@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.python-version
+
+# uv
+uv.lock
+
+# Test/Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+
+# Data/Reports (PoC artifacts)
+reports/
+data/
+*.parquet
+*.csv
+!tests/**/*.csv
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Tooling caches
+.serena/
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
