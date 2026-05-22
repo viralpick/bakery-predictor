@@ -18,8 +18,33 @@ from .evaluation.backtest import aggregate_by_model, per_category_wape, run_back
 from .evaluation.classifier_metrics import base_rate, precision_at_k, recall_at_k, roc_auc
 from .evaluation.split import apply_split, generate_time_splits
 from .features.calendar_features import add_calendar_features
+from .features.competitor_features import (
+    add_competitor_features,
+    compute_competitor_features,
+)
+from .features.consumption_features import (
+    add_consumption_features,
+    compute_store_consumption_features,
+)
+from .features.living_population_features import (
+    add_living_pop_features,
+    compute_store_living_features,
+)
+from .features.population_features import (
+    add_population_features,
+    compute_store_population_features,
+)
 from .features.weather_features import add_weather_features
-from .ingest import calendar_api, forecast_api, weather_api
+from .ingest import (
+    calendar_api,
+    competitor_api,
+    consumption_api,
+    forecast_api,
+    living_population_api,
+    living_population_csv,
+    population_api,
+    weather_api,
+)
 from .ingest.store_mapping import load_store_mapping
 from .models.lightgbm_regressor import VALID_FEATURE_SETS, GlobalLGBM, LGBMParams
 from .models.moving_average import MovingAverage
@@ -45,9 +70,15 @@ def cmd_generate_data(
     bundle.daily.to_parquet(out_dir / "daily.parquet", index=False)
     bundle.weather.to_parquet(out_dir / "weather.parquet", index=False)
     bundle.calendar.to_parquet(out_dir / "calendar.parquet", index=False)
+    bundle.competitor.to_parquet(out_dir / "competitor.parquet", index=False)
+    bundle.living_population.to_parquet(out_dir / "living_population.parquet", index=False)
+    bundle.population.to_parquet(out_dir / "population.parquet", index=False)
+    bundle.consumption.to_parquet(out_dir / "consumption.parquet", index=False)
     console.print(
         f"[green]wrote[/] hourly={len(bundle.hourly):,} daily={len(bundle.daily):,} "
-        f"weather={len(bundle.weather):,} calendar={len(bundle.calendar):,} → {out_dir}"
+        f"weather={len(bundle.weather):,} calendar={len(bundle.calendar):,} "
+        f"competitor={len(bundle.competitor):,} living_pop={len(bundle.living_population):,} "
+        f"population={len(bundle.population):,} consumption={len(bundle.consumption):,} → {out_dir}"
     )
     console.print(f"  stockout days: {int(bundle.daily['is_stockout'].sum()):,} / {len(bundle.daily):,}")
 
@@ -60,6 +91,7 @@ def cmd_backtest(
     horizon_days: int = 7,
     step_days: int = 7,
     variants: str = "v0,v1",
+    include_production: bool = False,
     out_dir: Path = REPORTS_DIR,
 ) -> None:
     """Compare baselines + LightGBM variants on the same rolling folds."""
@@ -69,7 +101,7 @@ def cmd_backtest(
     windows = generate_time_splits(
         daily["date"], n_splits=n_splits, val_horizon_days=horizon_days, step_days=step_days
     )
-    forecasters = _build_forecasters(variant_list)
+    forecasters = _build_forecasters(variant_list, include_production=include_production)
     console.print(
         f"[cyan]backtest[/] folds={len(windows)} horizon={horizon_days}d "
         f"variants={variant_list} models={[f.name for f in forecasters]}"
@@ -111,16 +143,18 @@ def cmd_predict_next_week(
     forecaster.fit(daily)
     pairs = daily[["store_id", "item_id", "category_id"]].drop_duplicates()
     target = pairs.merge(pd.DataFrame({"date": horizon}), how="cross")
-    if feature_set in {"v1", "v2"}:
+    if feature_set in {"v1", "v2", "v3"}:
         forecast_weather = _load_forecast_weather(horizon) if use_forecast else None
-        target = _enrich_target(target, ds, forecast_weather=forecast_weather)
+        target = _enrich_target(
+            target, ds, forecast_weather=forecast_weather, include_external=(feature_set == "v3"),
+        )
     yhat = forecaster.predict(target)
-    demand_col = "yhat_potential_demand" if feature_set == "v2" else "yhat_sold_units"
+    demand_col = "yhat_potential_demand" if feature_set in {"v2", "v3"} else "yhat_sold_units"
     target = target.assign(**{demand_col: yhat.round(2).to_numpy(), "model": forecaster.name})
 
-    if feature_set == "v2":
+    if feature_set in {"v2", "v3"}:
         prod_params = LGBMParams(objective="quantile", alpha=production_quantile)
-        prod_model = GlobalLGBM(feature_set="v2", params=prod_params).fit(daily)
+        prod_model = GlobalLGBM(feature_set=feature_set, params=prod_params).fit(daily)
         prod_yhat = prod_model.predict(target)
         target["stockout_prob"] = float("nan")
         target["recommended_production"] = prod_yhat.round(0).to_numpy()
@@ -167,31 +201,58 @@ def _load_dataset(source: str, data_dir: Path | None) -> DailyDataset:
 
 
 def _enrich_if_needed(ds: DailyDataset, variants: list[str]) -> pd.DataFrame:
-    """Return a daily frame enriched with calendar/weather iff any v1+ variant is requested."""
-    if not any(v in {"v1", "v2"} for v in variants):
+    """Return a daily frame enriched with calendar/weather/competitor as required by the variants."""
+    needs_cal_weather = any(v in {"v1", "v2", "v3"} for v in variants)
+    needs_external = any(v == "v3" for v in variants)
+    if not needs_cal_weather:
         return ds.daily
     enriched = add_calendar_features(ds.daily, ds.calendar)
     enriched = add_weather_features(enriched, ds.weather)
+    if needs_external:
+        mapping = load_store_mapping()
+        competitor_feats = compute_competitor_features(
+            ds.competitor, mapping, pd.DatetimeIndex(sorted(enriched["date"].unique())),
+        )
+        enriched = add_competitor_features(enriched, competitor_feats)
+        living_static = compute_store_living_features(ds.living_population, mapping)
+        enriched = add_living_pop_features(enriched, living_static)
+        pop_static = compute_store_population_features(ds.population, mapping)
+        enriched = add_population_features(enriched, pop_static)
+        cons_static = compute_store_consumption_features(ds.consumption, mapping)
+        enriched = add_consumption_features(enriched, cons_static)
     return enriched
 
 
 def _enrich_target(
-    target: pd.DataFrame, ds: DailyDataset, *, forecast_weather: pd.DataFrame | None = None
+    target: pd.DataFrame, ds: DailyDataset, *,
+    forecast_weather: pd.DataFrame | None = None,
+    include_external: bool = False,
 ) -> pd.DataFrame:
-    """Merge calendar (future-safe) and weather onto horizon dates. When a forecast
-    frame is provided, use it; otherwise fall back to observed weather (PoC convenience)."""
+    """Merge calendar (future-safe), weather, and (optionally) competitor
+    (forecast-safe via past-only license/close events) onto horizon dates."""
     target = add_calendar_features(target, ds.calendar)
     weather_frame = forecast_weather if forecast_weather is not None else ds.weather
     target = add_weather_features(target, weather_frame)
+    if include_external:
+        mapping = load_store_mapping()
+        competitor_feats = compute_competitor_features(
+            ds.competitor, mapping, pd.DatetimeIndex(sorted(target["date"].unique())),
+        )
+        target = add_competitor_features(target, competitor_feats)
+        living_static = compute_store_living_features(ds.living_population, mapping)
+        target = add_living_pop_features(target, living_static)
+        pop_static = compute_store_population_features(ds.population, mapping)
+        target = add_population_features(target, pop_static)
+        cons_static = compute_store_consumption_features(ds.consumption, mapping)
+        target = add_consumption_features(target, cons_static)
     return target
 
 
 def _load_forecast_weather(horizon: pd.DatetimeIndex) -> pd.DataFrame | None:
-    """Build a horizon weather frame from forecast_* parquet files.
-
-    PoC: assumes all stores share the same grid/region (Seoul). When per-store
-    differentiation lands (#4), this needs to loop over distinct (nx, ny) cells
-    and return a long-form frame keyed by store_id.
+    """Long-form horizon weather frame keyed by (store_id, date), one row per
+    (store, day) — each store's nx/ny/mid_reg from the store mapping is
+    matched against the latest forecast parquet, falling back to recent
+    observed averages when the forecast is missing.
     """
     short_p = EXTERNAL_DATA_DIR / "forecast_short_term_daily.parquet"
     mid_p = EXTERNAL_DATA_DIR / "forecast_mid_term_daily.parquet"
@@ -202,26 +263,26 @@ def _load_forecast_weather(horizon: pd.DatetimeIndex) -> pd.DataFrame | None:
             "이번엔 fallback (최근 28일 평균)으로 horizon 채움."
         )
     mapping = load_store_mapping()
-    sample_store = next(iter(mapping.values()))
     return load_weather_forecast_from_local(
         short_daily_path=short_p,
         mid_daily_path=mid_p,
         observed_parquet_path=observed_p,
-        station_id=sample_store["station_id"],
-        nx=sample_store["nx"],
-        ny=sample_store["ny"],
-        mid_land_reg_id=sample_store["mid_land_reg_id"],
-        mid_ta_reg_id=sample_store["mid_ta_reg_id"],
+        mapping=mapping,
         horizon_start=horizon[0],
         horizon_end=horizon[-1],
     )
 
 
-def _build_forecasters(variants: list[str]):
-    """Build a baseline + LightGBM-per-variant list."""
+def _build_forecasters(variants: list[str], *, include_production: bool = False,
+                       production_quantile: float = 0.85):
+    """Build baseline + LightGBM-per-variant list, optionally adding quantile
+    production models for v2/v3 (lightgbm_v2_q85 etc.)."""
     forecasters = [SeasonalNaive(n_weeks=4), MovingAverage(window=28)]
     for v in variants:
-        forecasters.append(GlobalLGBM(feature_set=v))
+        forecasters.append(GlobalLGBM(feature_set=v))  # demand (median) model
+        if include_production and v in {"v2", "v3"}:
+            prod_params = LGBMParams(objective="quantile", alpha=production_quantile)
+            forecasters.append(GlobalLGBM(feature_set=v, params=prod_params))
     return forecasters
 
 
@@ -233,6 +294,8 @@ def _model_to_feature_set(model: str) -> str | None:
         return "v1"
     if model == "lightgbm_v2":
         return "v2"
+    if model == "lightgbm_v3":
+        return "v3"
     return None
 
 
@@ -243,6 +306,7 @@ def _pick_model(name: str):
         "lightgbm": GlobalLGBM(feature_set="v0"),
         "lightgbm_v1": GlobalLGBM(feature_set="v1"),
         "lightgbm_v2": GlobalLGBM(feature_set="v2"),
+        "lightgbm_v3": GlobalLGBM(feature_set="v3"),
     }
     if name not in table:
         raise typer.BadParameter(f"unknown model {name!r}. choose from {list(table)}")
@@ -370,6 +434,516 @@ def _print_stockout_summary(fold_df: pd.DataFrame) -> None:
     console.print(table)
 
 
+@app.command("alpha-sweep")
+def cmd_alpha_sweep(
+    source: str = "real",
+    n_splits: int = 4,
+    horizon_days: int = 7,
+    step_days: int = 7,
+    variant: str = "v2",
+    alphas: str = "0.50,0.65,0.70,0.75,0.80,0.85,0.90,0.95",
+    margin_rate: float = 0.50,
+    cost_rate: float = 0.30,
+    lost_sale_multiplier: float = 1.7,
+    item_master: Path = Path("data/internal/보나비 데이터_20260520.xlsx"),
+    out_dir: Path = REPORTS_DIR,
+) -> None:
+    """Production-model quantile α sweep — net_profit-최대 α 찾기.
+
+    α 0.50 (median) ~ 0.95 범위 backtest + 사업 KPI 비교. 매장·카테고리별 최적 α 결정.
+    """
+    import warnings
+    import numpy as np
+    from .evaluation.business_metrics import (
+        CostParams, asymmetric_loss, simulate_profit,
+    )
+
+    warnings.filterwarnings("ignore")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cost_params = CostParams(
+        margin_rate=margin_rate, cost_rate=cost_rate, lost_sale_multiplier=lost_sale_multiplier
+    )
+    alpha_list = [float(a) for a in alphas.split(",") if a.strip()]
+
+    items_xl = pd.read_excel(item_master, "품목정보")
+    items_xl = items_xl[items_xl["상품구분"] == "SS"]
+    unit_prices = dict(
+        zip(items_xl["품목코드"].astype(str), pd.to_numeric(items_xl["판매단가"], errors="coerce").fillna(3000))
+    )
+
+    ds = _load_dataset(source, None)
+    daily = _enrich_if_needed(ds, [variant])
+    windows = generate_time_splits(
+        daily["date"], n_splits=n_splits, val_horizon_days=horizon_days, step_days=step_days
+    )
+
+    forecasters = []
+    for a in alpha_list:
+        if a == 0.5:
+            forecasters.append(GlobalLGBM(feature_set=variant))  # median (regression)
+        else:
+            params = LGBMParams(objective="quantile", alpha=a)
+            forecasters.append(GlobalLGBM(feature_set=variant, params=params))
+
+    console.print(
+        f"[cyan]alpha-sweep[/] variant={variant} αs={alpha_list} "
+        f"folds={len(windows)} horizon={horizon_days}d"
+    )
+    fold_df, pred_df = run_backtest(daily, forecasters, windows)
+
+    # Inject potential_demand for true-demand-aware profit simulation
+    if "potential_demand" in daily.columns:
+        pd_lookup = daily.set_index(["store_id", "item_id", "date"])["potential_demand"]
+        pred_df = pred_df.copy()
+        pred_df["potential_demand"] = pred_df.set_index(
+            ["store_id", "item_id", "date"]
+        ).index.map(pd_lookup)
+
+    rows = []
+    for model, sub in pred_df.groupby("model"):
+        asym = asymmetric_loss(sub["yhat"], sub["sold_units"], params=cost_params)
+        profit = simulate_profit(sub, unit_prices=unit_prices, params=cost_params)
+        rows.append({
+            "model": model,
+            "asymmetric_loss": asym,
+            "pct_under": (sub["yhat"] < sub["sold_units"]).mean(),
+            "pct_over": (sub["yhat"] > sub["sold_units"]).mean(),
+            "revenue_krw": float(profit["revenue_krw"].sum()),
+            "waste_cost_krw": float(profit["waste_cost_krw"].sum()),
+            "lost_margin_krw": float(profit["lost_margin_krw"].sum()),
+            "net_profit_krw": float(profit["net_profit_krw"].sum()),
+        })
+    sweep_df = pd.DataFrame(rows).sort_values("net_profit_krw", ascending=False)
+    table = Table(title=f"α sweep — {variant} model 사업 KPI 누계 (28일 backtest)")
+    for c in ("model", "asymmetric_loss", "pct_under", "pct_over",
+              "revenue_krw", "waste_cost_krw", "lost_margin_krw", "net_profit_krw"):
+        table.add_column(c, justify="left" if c == "model" else "right")
+    for _, r in sweep_df.iterrows():
+        table.add_row(
+            r["model"], f"{r['asymmetric_loss']:.4f}",
+            f"{r['pct_under']:.2%}", f"{r['pct_over']:.2%}",
+            f"{r['revenue_krw']/1e6:.2f}M", f"{r['waste_cost_krw']/1e6:.2f}M",
+            f"{r['lost_margin_krw']/1e6:.2f}M", f"{r['net_profit_krw']/1e6:.2f}M",
+        )
+    console.print(table)
+
+    best = sweep_df.iloc[0]
+    console.print(
+        f"\n[green]최적 모델[/] {best['model']} → net_profit {best['net_profit_krw']/1e6:.2f}M원"
+    )
+
+    sweep_df.to_csv(out_dir / "alpha_sweep.csv", index=False)
+    console.print(f"[green]wrote[/] {out_dir}/alpha_sweep.csv")
+
+
+@app.command("business-report")
+def cmd_business_report(
+    source: str = "real",
+    data_dir: Path | None = None,
+    n_splits: int = 4,
+    horizon_days: int = 7,
+    step_days: int = 7,
+    variants: str = "v0,v1,v2,v3",
+    production_quantile: float = 0.85,
+    margin_rate: float = 0.50,
+    cost_rate: float = 0.30,
+    lost_sale_multiplier: float = 1.7,
+    item_master: Path = Path("data/internal/보나비 데이터_20260520.xlsx"),
+    out_dir: Path = REPORTS_DIR,
+) -> None:
+    """v0 / v2 / v3 도입 시 광교 매장 예상 사업 임팩트 종합 리포트.
+
+    1) Self-fulfilling stockout 패턴 (광교 top 품목)
+    2) 영구 손실 시뮬레이션 (24개월 누계 KRW)
+    3) Production model backtest (v2/v3 quantile α 포함)
+    4) 사업 KPI (asymmetric loss + profit simulation)
+    """
+    import warnings
+
+    import numpy as np
+
+    from .analysis.self_fulfillment import (
+        estimated_lost_demand,
+        top_self_fulfilling_items,
+    )
+    from .analysis.substitution import (
+        adjust_lost_units,
+        compute_substitution_matrix,
+    )
+    from .evaluation.business_metrics import (
+        CostParams,
+        aggregate_profit,
+        asymmetric_loss,
+        simulate_profit,
+    )
+
+    warnings.filterwarnings("ignore")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cost_params = CostParams(
+        margin_rate=margin_rate,
+        cost_rate=cost_rate,
+        lost_sale_multiplier=lost_sale_multiplier,
+    )
+
+    # Item master + unit prices
+    items_xl = pd.read_excel(item_master, "품목정보")
+    items_xl = items_xl[items_xl["상품구분"] == "SS"]
+    unit_prices = dict(
+        zip(items_xl["품목코드"].astype(str), pd.to_numeric(items_xl["판매단가"], errors="coerce").fillna(3000))
+    )
+    item_names = dict(zip(items_xl["품목코드"].astype(str), items_xl["POS메뉴명"]))
+
+    # Data load
+    variant_list = _parse_variants(variants)
+    ds = _load_dataset(source, data_dir)
+    daily = _enrich_if_needed(ds, variant_list)
+
+    console.print("\n[bold cyan]━━━ 사업 임팩트 리포트 ━━━[/]\n")
+    console.print(
+        f"매장: store_gw01 (아티제 아브뉴프랑광교점) | "
+        f"기간: {daily['date'].min().date()} ~ {daily['date'].max().date()} | "
+        f"품목: {daily['item_id'].nunique()}개"
+    )
+    console.print(
+        f"가정: 마진율 {margin_rate:.0%}, 원가율 {cost_rate:.0%}, 품절 비용 multiplier {lost_sale_multiplier}×\n"
+    )
+
+    # ─── A. Self-fulfilling pattern ───
+    console.print("[bold]1. Self-fulfilling stockout 패턴[/]")
+    top_self = top_self_fulfilling_items(daily, n=10)
+    top_self["item_name"] = top_self["item_id"].map(item_names)
+    self_table = Table(title="Top 10 self-fulfilling 품목 (매주 일관 품절 + 낮은 CV)")
+    for col in ("item_name", "sold_total", "avg_stockout_rate", "avg_sold_cv", "avg_stockout_hour", "covered_dows"):
+        self_table.add_column(col, justify="right" if col != "item_name" else "left")
+    for _, r in top_self.iterrows():
+        self_table.add_row(
+            str(r["item_name"]),
+            f"{int(r['sold_total']):,}",
+            f"{r['avg_stockout_rate']:.1%}",
+            f"{r['avg_sold_cv']:.2f}",
+            f"{r['avg_stockout_hour']:.1f}시",
+            str(int(r["covered_dows"])),
+        )
+    console.print(self_table)
+
+    # ─── B. Permanent lost-revenue simulation ───
+    console.print("\n[bold]2. 영구 손실 시뮬레이션 (v0 운영 가정)[/]")
+    lost = estimated_lost_demand(daily)
+    lost["item_id"] = lost["item_id"].astype(str)
+    lost["unit_price"] = lost["item_id"].map(unit_prices).fillna(3000)
+    lost["actual_revenue"] = lost["sold_units"] * lost["unit_price"]
+    lost["lost_revenue"] = lost["lost_units"] * lost["unit_price"]
+    lost["lost_margin"] = lost["lost_revenue"] * margin_rate * lost_sale_multiplier
+
+    # Substitution-adjusted: subtract intra-category outflow estimated from receipts
+    receipts_path = Path("data/internal/bonavi_receipts.parquet")
+    sub_matrix = None
+    if receipts_path.exists():
+        try:
+            receipts_df = pd.read_parquet(receipts_path)
+            receipts_df = receipts_df[receipts_df["date"] >= daily["date"].min()]
+            sub_matrix = compute_substitution_matrix(daily, receipts_df)
+            lost_adj = adjust_lost_units(lost, sub_matrix.outflow_ratio)
+            lost["lost_units_adjusted"] = lost_adj["lost_units_adjusted"]
+            lost["lost_revenue_adjusted"] = lost["lost_units_adjusted"] * lost["unit_price"]
+            lost["lost_margin_adjusted"] = (
+                lost["lost_revenue_adjusted"] * margin_rate * lost_sale_multiplier
+            )
+        except Exception as exc:
+            console.print(f"[yellow]substitution matrix 계산 실패 — receipts 없거나 오류: {exc}[/]")
+            sub_matrix = None
+    months = (daily["date"].max() - daily["date"].min()).days / 30
+    summary_b = Table(title=f"매장 24개월 환산 추정 (실제 데이터 {months:.0f}개월)")
+    summary_b.add_column("항목"); summary_b.add_column("KRW", justify="right")
+    actual_rev = lost["actual_revenue"].sum() / months * 24
+    lost_rev = lost["lost_revenue"].sum() / months * 24
+    lost_marg = lost["lost_margin"].sum() / months * 24
+    summary_b.add_row("실제 매출 (24개월 환산)", f"{actual_rev/1e8:.2f}억원")
+    summary_b.add_row("실제 마진", f"{actual_rev*margin_rate/1e8:.2f}억원")
+    summary_b.add_row("[red]잃은 매출 (independent 보정)[/]", f"[red]{lost_rev/1e8:.2f}억원[/]")
+    summary_b.add_row("[red]잃은 마진 (cross-sell + 평판)[/]", f"[red]{lost_marg/1e8:.2f}억원[/]")
+    summary_b.add_row("잠재 회수율 (보정 전)", f"{lost_rev / actual_rev:.1%}")
+    if sub_matrix is not None:
+        lost_rev_adj = lost["lost_revenue_adjusted"].sum() / months * 24
+        lost_marg_adj = lost["lost_margin_adjusted"].sum() / months * 24
+        avg_outflow = float(sub_matrix.outflow_ratio.mean())
+        summary_b.add_row(
+            "[yellow]Substitution 평균 outflow[/]", f"[yellow]{avg_outflow:.1%}[/]"
+        )
+        summary_b.add_row(
+            "[green]잃은 매출 (substitution-adjusted)[/]",
+            f"[green]{lost_rev_adj/1e8:.2f}억원[/]",
+        )
+        summary_b.add_row(
+            "[green]잃은 마진 (substitution-adjusted)[/]",
+            f"[green]{lost_marg_adj/1e8:.2f}억원[/]",
+        )
+    console.print(summary_b)
+
+    # Top items by lost revenue
+    top_lost = (
+        lost.groupby("item_id", as_index=False)
+        .agg(lost_units=("lost_units", "sum"), lost_revenue=("lost_revenue", "sum"), unit_price=("unit_price", "first"))
+        .sort_values("lost_revenue", ascending=False)
+        .head(10)
+    )
+    top_lost["item_name"] = top_lost["item_id"].map(item_names)
+    lost_table = Table(title="Top 10 잃은 매출 품목 (전 기간 누계)")
+    for col in ("item_name", "lost_units", "unit_price", "lost_revenue"):
+        lost_table.add_column(col, justify="right" if col != "item_name" else "left")
+    for _, r in top_lost.iterrows():
+        lost_table.add_row(
+            str(r["item_name"]),
+            f"{int(r['lost_units']):,}개",
+            f"{int(r['unit_price']):,}원",
+            f"{r['lost_revenue']/1e6:.1f}M원",
+        )
+    console.print(lost_table)
+
+    # ─── C. Production-model backtest ───
+    console.print("\n[bold]3. Production model backtest (demand + quantile α)[/]")
+    windows = generate_time_splits(
+        daily["date"], n_splits=n_splits, val_horizon_days=horizon_days, step_days=step_days
+    )
+    forecasters = _build_forecasters(
+        variant_list, include_production=True, production_quantile=production_quantile
+    )
+    fold_df, pred_df = run_backtest(daily, forecasters, windows)
+    summary = aggregate_by_model(fold_df).sort_values("wape_all")
+    bt_table = Table(title="모델별 backtest 요약 (production model 포함)")
+    cols = (("model", "left"), ("wape_all", "right"), ("pct_underpredict", "right"),
+            ("pct_overpredict", "right"), ("mae", "right"))
+    for c, j in cols: bt_table.add_column(c, justify=j)
+    for _, r in summary.iterrows():
+        bt_table.add_row(
+            r["model"], f"{r['wape_all']:.4f}", f"{r['pct_underpredict']:.2%}",
+            f"{r['pct_overpredict']:.2%}", f"{r['mae']:.2f}",
+        )
+    console.print(bt_table)
+
+    # ─── D. Business KPI per model ───
+    console.print("\n[bold]4. 모델별 사업 KPI (asymmetric loss + profit simulation)[/]")
+    # Inject potential_demand into pred_df from the enriched daily so simulate_profit
+    # can see the censoring-corrected target.
+    if "potential_demand" in daily.columns:
+        pd_lookup = daily.set_index(["store_id", "item_id", "date"])["potential_demand"]
+        pred_df = pred_df.copy()
+        pred_df["potential_demand"] = pred_df.set_index(
+            ["store_id", "item_id", "date"]
+        ).index.map(pd_lookup)
+    biz_rows = []
+    for model, sub in pred_df.groupby("model"):
+        asym = asymmetric_loss(sub["yhat"], sub["sold_units"], params=cost_params)
+        profit = simulate_profit(sub, unit_prices=unit_prices, params=cost_params)
+        biz_rows.append({
+            "model": model, "asymmetric_loss": asym,
+            "revenue_krw": float(profit["revenue_krw"].sum()),
+            "waste_cost_krw": float(profit["waste_cost_krw"].sum()),
+            "lost_margin_krw": float(profit["lost_margin_krw"].sum()),
+            "net_profit_krw": float(profit["net_profit_krw"].sum()),
+        })
+    biz_df = pd.DataFrame(biz_rows).sort_values("net_profit_krw", ascending=False)
+    biz_table = Table(title="Backtest fold 누계 — 모델별 사업 KPI")
+    biz_cols = (("model", "left"), ("asymmetric_loss", "right"),
+                ("revenue_krw", "right"), ("waste_cost_krw", "right"),
+                ("lost_margin_krw", "right"), ("net_profit_krw", "right"))
+    for c, j in biz_cols: biz_table.add_column(c, justify=j)
+    for _, r in biz_df.iterrows():
+        biz_table.add_row(
+            r["model"],
+            f"{r['asymmetric_loss']:.4f}",
+            f"{r['revenue_krw']/1e6:.2f}M",
+            f"{r['waste_cost_krw']/1e6:.2f}M",
+            f"{r['lost_margin_krw']/1e6:.2f}M",
+            f"{r['net_profit_krw']/1e6:.2f}M",
+        )
+    console.print(biz_table)
+
+    # Persist
+    biz_df.to_csv(out_dir / "business_report_kpi.csv", index=False)
+    fold_df.to_csv(out_dir / "business_report_folds.csv", index=False)
+    top_self.to_csv(out_dir / "business_report_self_fulfilling.csv", index=False)
+    top_lost.to_csv(out_dir / "business_report_top_lost.csv", index=False)
+    console.print(
+        f"\n[green]wrote[/] {out_dir}/business_report_*.csv (kpi/folds/self_fulfilling/top_lost)"
+    )
+
+
+@app.command("mnl-substitution")
+def cmd_mnl_substitution(
+    source: str = "real",
+    receipts: Path = Path("data/internal/bonavi_receipts.parquet"),
+    item_master: Path = Path("data/internal/보나비 데이터_20260520.xlsx"),
+    out_dir: Path = Path("reports"),
+) -> None:
+    """Multinomial Logit choice model — receipt-level substitution matrix.
+
+    Compares MNL (theory-grounded, receipt-microscopic) against the daily-RD
+    substitution module on the same data. Outputs:
+      - mnl_utilities.csv         (per-item α, by category)
+      - mnl_substitution.csv      (per-pair s_share, s_raw)
+      - mnl_vs_rd_top_pairs.csv   (side-by-side ranking)
+    """
+    from .analysis.mnl_substitution import fit_mnl_per_category
+    from .analysis.substitution import compute_substitution_matrix
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if not receipts.exists():
+        console.print(f"[red]{receipts} 없음 — receipts parquet 필요[/]")
+        raise typer.Exit(code=1)
+
+    receipts_df = pd.read_parquet(receipts)
+    receipts_df["date"] = pd.to_datetime(receipts_df["date"])
+
+    ds = _load_dataset(source, None)
+    daily = ds.daily.copy()
+    daily["date"] = pd.to_datetime(daily["date"])
+
+    item_names: dict[str, str] = {}
+    if item_master.exists():
+        items_xl = pd.read_excel(item_master, "품목정보")
+        items_xl = items_xl[items_xl["상품구분"] == "SS"]
+        item_names = dict(zip(items_xl["품목코드"].astype(str), items_xl["POS메뉴명"]))
+
+    console.print("[cyan]MNL fit ...[/]")
+    mnl = fit_mnl_per_category(receipts_df, daily)
+    console.print(f"  utilities: {len(mnl.utilities)} items in {mnl.utilities['category_id'].nunique()} categories")
+
+    console.print("[cyan]RD substitution (baseline) ...[/]")
+    rd = compute_substitution_matrix(daily, receipts_df, include_inter_category=False)
+
+    # Top pairs comparison
+    mnl_top = mnl.substitution.nlargest(20, "s_share").copy()
+    mnl_top["from_name"] = mnl_top["from_item"].map(item_names)
+    mnl_top["to_name"] = mnl_top["to_item"].map(item_names)
+    rd_top = rd.coefficients[rd.coefficients["same_category"]].nlargest(20, "sub_rate").copy()
+    rd_top["from_name"] = rd_top["from_item"].map(item_names)
+    rd_top["to_name"] = rd_top["to_item"].map(item_names)
+
+    mnl_table = Table(title="MNL — top 15 substitution pairs (by s_share)")
+    for col in ("category_id", "from_name", "to_name", "s_share", "s_raw"):
+        mnl_table.add_column(col, justify="right" if col not in ("from_name", "to_name", "category_id") else "left")
+    for _, r in mnl_top.head(15).iterrows():
+        mnl_table.add_row(
+            r["category_id"], str(r["from_name"]), str(r["to_name"]),
+            f"{r['s_share']:.3f}", f"{r['s_raw']:.3f}",
+        )
+    console.print(mnl_table)
+
+    rd_table = Table(title="RD — top 15 substitution pairs (by sub_rate, within-category)")
+    for col in ("category_id", "from_name", "to_name", "sub_rate", "beta_rd", "co_occ"):
+        rd_table.add_column(col, justify="right" if col not in ("from_name", "to_name", "category_id") else "left")
+    for _, r in rd_top.head(15).iterrows():
+        rd_table.add_row(
+            r["category_id"], str(r["from_name"]), str(r["to_name"]),
+            f"{r['sub_rate']:.3f}", f"{r['beta_rd']:.3f}", f"{r['co_occ']:.3f}",
+        )
+    console.print(rd_table)
+
+    # Rank agreement: Spearman of overlapping (from, to) pairs
+    merged = mnl.substitution.merge(
+        rd.coefficients[["from_item", "to_item", "sub_rate", "beta_rd", "co_occ"]],
+        on=["from_item", "to_item"], how="inner",
+    )
+    if len(merged) > 10:
+        rho = merged[["s_share", "sub_rate"]].corr(method="spearman").iat[0, 1]
+        console.print(f"[bold]MNL ↔ RD rank correlation (Spearman):[/] {rho:.3f}  (over {len(merged)} pairs)")
+
+    mnl.utilities.to_csv(out_dir / "mnl_utilities.csv", index=False)
+    mnl.substitution.to_csv(out_dir / "mnl_substitution.csv", index=False)
+    merged.to_csv(out_dir / "mnl_vs_rd_pairs.csv", index=False)
+    pd.DataFrame({"item_id": mnl.outflow_ratio.index, "outflow_ratio": mnl.outflow_ratio.values}).to_csv(
+        out_dir / "mnl_outflow.csv", index=False,
+    )
+    console.print(f"[green]wrote[/] {out_dir}/mnl_*.csv (utilities/substitution/vs_rd/outflow)")
+
+
+@app.command("nested-logit")
+def cmd_nested_logit(
+    source: str = "real",
+    receipts: Path = Path("data/internal/bonavi_receipts.parquet"),
+    item_master: Path = Path("data/internal/보나비 데이터_20260520.xlsx"),
+    out_dir: Path = Path("reports"),
+) -> None:
+    """Nested logit (cross-category) — relaxes IIA via per-nest λ_g.
+
+    Outputs:
+      - nested_utilities.csv (α_i with category)
+      - nested_lambdas.csv   (λ_g per nest)
+      - nested_substitution.csv (within + cross-nest pairs with same_nest flag)
+    """
+    from .analysis.nested_logit import fit_nested_logit
+    from .analysis.mnl_substitution import fit_mnl_per_category
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if not receipts.exists():
+        console.print(f"[red]{receipts} 없음 — receipts parquet 필요[/]")
+        raise typer.Exit(code=1)
+
+    receipts_df = pd.read_parquet(receipts)
+    receipts_df["date"] = pd.to_datetime(receipts_df["date"])
+    ds = _load_dataset(source, None)
+    daily = ds.daily.copy()
+    daily["date"] = pd.to_datetime(daily["date"])
+
+    item_names: dict[str, str] = {}
+    if item_master.exists():
+        items_xl = pd.read_excel(item_master, "품목정보")
+        items_xl = items_xl[items_xl["상품구분"] == "SS"]
+        item_names = dict(zip(items_xl["품목코드"].astype(str), items_xl["POS메뉴명"]))
+
+    console.print("[cyan]nested logit fit ...[/]")
+    nl = fit_nested_logit(receipts_df, daily)
+    console.print(f"  utilities: {len(nl.utilities)} items, λ per nest:")
+
+    lam_table = Table(title="λ_g per nest (closer to 0 = stronger within-nest substitution)")
+    lam_table.add_column("nest")
+    lam_table.add_column("λ_g", justify="right")
+    for cat, lam in nl.lambdas.items():
+        lam_table.add_row(cat, f"{lam:.3f}")
+    console.print(lam_table)
+
+    within = nl.substitution[nl.substitution["same_nest"]]
+    cross = nl.substitution[~nl.substitution["same_nest"]]
+    ratio_table = Table(title="Within-nest vs cross-nest substitution")
+    ratio_table.add_column("kind"); ratio_table.add_column("pairs", justify="right")
+    ratio_table.add_column("mean s_share", justify="right"); ratio_table.add_column("median", justify="right")
+    ratio_table.add_row("within-nest", str(len(within)), f"{within['s_share'].mean():.4f}", f"{within['s_share'].median():.4f}")
+    ratio_table.add_row("cross-nest", str(len(cross)), f"{cross['s_share'].mean():.4f}", f"{cross['s_share'].median():.4f}")
+    if cross['s_share'].mean() > 0:
+        ratio_table.add_row("ratio (within/cross)", "—", f"{within['s_share'].mean()/cross['s_share'].mean():.2f}×", "—")
+    console.print(ratio_table)
+
+    # Top pairs side by side
+    top_within = within.nlargest(10, "s_share").copy()
+    top_within["from_name"] = top_within["from_item"].map(item_names)
+    top_within["to_name"] = top_within["to_item"].map(item_names)
+    win_tbl = Table(title="Top within-nest substitution pairs (s_share)")
+    for col in ("from_cat", "from_name", "to_name", "s_share"):
+        win_tbl.add_column(col, justify="right" if col == "s_share" else "left")
+    for _, r in top_within.iterrows():
+        win_tbl.add_row(r["from_cat"], str(r["from_name"]), str(r["to_name"]), f"{r['s_share']:.3f}")
+    console.print(win_tbl)
+
+    # Compare vs MNL
+    console.print("\n[cyan]MNL (per-category, IIA) for comparison ...[/]")
+    mnl = fit_mnl_per_category(receipts_df, daily)
+    overlap = nl.substitution.merge(
+        mnl.substitution[["from_item", "to_item", "s_share"]].rename(columns={"s_share": "mnl_s_share"}),
+        on=["from_item", "to_item"], how="inner",
+    )
+    if len(overlap) > 10:
+        rho = overlap[["s_share", "mnl_s_share"]].corr(method="spearman").iat[0, 1]
+        console.print(f"[bold]Nested ↔ MNL within-nest pair rank correlation (Spearman):[/] {rho:.3f}  (over {len(overlap)} pairs)")
+
+    nl.utilities.to_csv(out_dir / "nested_utilities.csv", index=False)
+    nl.lambdas.to_csv(out_dir / "nested_lambdas.csv")
+    nl.substitution.to_csv(out_dir / "nested_substitution.csv", index=False)
+    overlap.to_csv(out_dir / "nested_vs_mnl_pairs.csv", index=False)
+    console.print(f"[green]wrote[/] {out_dir}/nested_*.csv (utilities/lambdas/substitution/vs_mnl)")
+
+
 @app.command("ingest-calendar")
 def cmd_ingest_calendar(
     start_year: int = 2024,
@@ -395,6 +969,110 @@ def cmd_ingest_weather(
     out = weather_api.backfill(start_date, end_date)
     df = pd.read_parquet(out)
     console.print(f"[green]wrote[/] {out} ({len(df):,} rows, {df['station_id'].nunique()} stations)")
+
+
+@app.command("ingest-living-population")
+def cmd_ingest_living_population(
+    start: str | None = None,
+    end: str | None = None,
+) -> None:
+    """서울 열린데이터광장 SPOP_LOCAL_RESD_DONG backfill → data/external/living_population.parquet.
+
+    Open Data Plaza retains only the last ~2 months via OpenAPI. Default window
+    is last 30 days from today. Older history requires monthly CSV zip download.
+    """
+    today = Date.today()
+    end_date = Date.fromisoformat(end) if end else today
+    start_date = Date.fromisoformat(start) if start else (today - pd.Timedelta(days=30).to_pytimedelta())
+    console.print(f"[cyan]living-pop[/] SPOP_LOCAL_RESD_DONG {start_date} ~ {end_date} backfill 시작")
+    out = living_population_api.backfill(start_date, end_date)
+    df = pd.read_parquet(out)
+    console.print(
+        f"[green]wrote[/] {out} ({len(df):,} rows, "
+        f"{df['admin_dong_code'].nunique()} dongs, {df['date'].nunique()} days)"
+    )
+
+
+@app.command("ingest-population")
+def cmd_ingest_population() -> None:
+    """행안부 admmSexdAgePpltn (행정동 성/연령별 인구) → data/external/population.parquet.
+
+    Snapshot은 월 단위. statsYm은 API 응답에 포함되어 자동 추출. 활용신청한
+    DATA_GO_KR_API_KEY 그대로 사용 (admmSexdAgePpltn 활용신청 필요).
+    """
+    console.print("[cyan]population[/] admmSexdAgePpltn 전체 백필 시작")
+    out = population_api.backfill()
+    df = pd.read_parquet(out)
+    console.print(
+        f"[green]wrote[/] {out} ({len(df):,} rows, "
+        f"{df['admin_dong_code'].nunique()} dongs)"
+    )
+
+
+@app.command("ingest-consumption")
+def cmd_ingest_consumption() -> None:
+    """서울 VwsmAdstrdNcmCnsmpW (상권분석 소비-행정동) 전체 분기 백필 → data/external/consumption.parquet."""
+    console.print("[cyan]consumption[/] VwsmAdstrdNcmCnsmpW 전체 백필 시작")
+    out = consumption_api.backfill()
+    df = pd.read_parquet(out)
+    console.print(
+        f"[green]wrote[/] {out} ({len(df):,} rows, "
+        f"{df['admin_dong_code'].nunique()} dongs, {df['quarter'].nunique()} quarters)"
+    )
+
+
+@app.command("format-bonavi")
+def cmd_format_bonavi(
+    xlsx_path: Path = Path("data/internal/보나비 데이터_20260520.xlsx"),
+    store_code: str = "1000000047",
+    rename_store_id: str = "store_gw01",
+    out_path: Path = Path("data/internal/bonavi_daily.parquet"),
+) -> None:
+    """보나비 xlsx → DAILY_COLUMNS parquet 변환. 광교점 1매장 단품·정상매출만."""
+    from .data.bonavi_loader import build
+
+    console.print(f"[cyan]bonavi[/] {xlsx_path} → {out_path} (store={store_code} → {rename_store_id})")
+    out = build(xlsx_path=xlsx_path, store_code=store_code, rename_store_id=rename_store_id, out_path=out_path)
+    df = pd.read_parquet(out)
+    console.print(
+        f"[green]wrote[/] {out} ({len(df):,} rows, "
+        f"{df['item_id'].nunique()} items, "
+        f"{df['category_id'].nunique()} categories, "
+        f"{df['date'].nunique()} days, "
+        f"stockout {df['is_stockout'].sum():,})"
+    )
+
+
+@app.command("ingest-living-pop-csv")
+def cmd_ingest_living_pop_csv() -> None:
+    """data/external/living_pop_zips/*.zip(LOCAL_PEOPLE_DONG history) → living_population.parquet.
+
+    OpenAPI는 최근 2개월만 retention이라 학습 윈도우 cover를 위해 월별 zip 다운로드.
+    매장 dong만 필터링해 적재 + 기존 parquet과 merge dedup.
+    """
+    console.print("[cyan]living-pop CSV[/] data/external/living_pop_zips/ 안 zip 일괄 처리")
+    out = living_population_csv.ingest_zip_dir()
+    df = pd.read_parquet(out)
+    months = df['date'].dt.to_period('M').nunique()
+    console.print(
+        f"[green]wrote[/] {out} ({len(df):,} rows, "
+        f"{df['admin_dong_code'].nunique()} dongs, "
+        f"{df['date'].nunique()} days, {months} months)"
+    )
+
+
+@app.command("ingest-competitor")
+def cmd_ingest_competitor() -> None:
+    """소상공인진흥공단 storeListInRadius (반경 1km 빵/도넛 + 카페) → data/external/competitor_raw.parquet.
+
+    PoC 한계: SBIZ 데이터는 현재 영업 중인 점포만 — license_date/close_date 정보 없어
+    신규/폐업 90일 trend features는 0으로 채워짐.
+    """
+    console.print("[cyan]competitor[/] storeListInRadius 매장별 1km 백필 시작")
+    out = competitor_api.backfill()
+    df = pd.read_parquet(out)
+    by_cat = df.groupby("category").size().to_dict()
+    console.print(f"[green]wrote[/] {out} ({len(df):,} rows, {by_cat})")
 
 
 @app.command("ingest-forecast")
