@@ -22,6 +22,17 @@ from bakery.ingest.forecast_api import (
 )
 
 
+def _seoul_mapping(stores: list[str]) -> dict:
+    return {
+        s: {
+            "station_id": 108, "station_name": "서울",
+            "nx": 60, "ny": 127,
+            "mid_land_reg_id": "11B00000", "mid_ta_reg_id": "11B10101",
+        }
+        for s in stores
+    }
+
+
 def test_parse_precipitation_handles_kma_strings():
     assert parse_precipitation("강수없음") == 0.0
     assert parse_precipitation("") == 0.0
@@ -115,22 +126,23 @@ def test_load_weather_forecast_uses_short_when_available(tmp_path):
         }
     )
     mid_df.to_parquet(mid_p, index=False)
+    mapping = _seoul_mapping(["s1"])
     # Empty observed → fallback uses hardcoded defaults
     out = load_weather_forecast_from_local(
         short_p, mid_p, obs_p,
-        station_id=108, nx=60, ny=127,
-        mid_land_reg_id="11B00000", mid_ta_reg_id="11B10101",
+        mapping=mapping,
         horizon_start=horizon_start, horizon_end=horizon_end,
     )
     assert len(out) == 7
-    assert list(out["date"].dt.strftime("%Y-%m-%d")) == [
+    s1 = out[out["store_id"] == "s1"].sort_values("date").reset_index(drop=True)
+    assert list(s1["date"].dt.strftime("%Y-%m-%d")) == [
         "2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04",
         "2026-06-05", "2026-06-06", "2026-06-07",
     ]
     # D+0~D+2 from short
-    assert out.iloc[0]["max_temp"] == 27.0
+    assert s1.iloc[0]["max_temp"] == 27.0
     # D+5 (2026-06-06) is the rainy day per mid forecast (rnSt 60/70 → is_rain=1)
-    rainy = out[out["date"] == pd.Timestamp("2026-06-06")].iloc[0]
+    rainy = s1[s1["date"] == pd.Timestamp("2026-06-06")].iloc[0]
     assert rainy["is_rain"] == 1
     # All schema columns present
     for col in WEATHER_DAILY_COLUMNS:
@@ -138,26 +150,28 @@ def test_load_weather_forecast_uses_short_when_available(tmp_path):
 
 
 def test_load_weather_forecast_falls_back_when_files_missing(tmp_path):
+    mapping = _seoul_mapping(["s1", "s2"])
     out = load_weather_forecast_from_local(
         tmp_path / "missing_short.parquet",
         tmp_path / "missing_mid.parquet",
         tmp_path / "missing_obs.parquet",
-        station_id=108, nx=60, ny=127,
-        mid_land_reg_id="11B00000", mid_ta_reg_id="11B10101",
+        mapping=mapping,
         horizon_start=pd.Timestamp("2026-06-01"),
         horizon_end=pd.Timestamp("2026-06-07"),
     )
-    assert len(out) == 7
+    # 7 days × 2 stores
+    assert len(out) == 14
+    assert set(out["store_id"].unique()) == {"s1", "s2"}
     # All rows should use the hard-coded fallback defaults (humidity=60)
     assert (out["humidity"] == 60.0).all()
 
 
 def test_load_weather_forecast_horizon_validation(tmp_path):
+    mapping = _seoul_mapping(["s1"])
     with pytest.raises(ValueError, match="empty horizon"):
         load_weather_forecast_from_local(
             tmp_path / "s.parquet", tmp_path / "m.parquet", tmp_path / "o.parquet",
-            station_id=108, nx=60, ny=127,
-            mid_land_reg_id="11B00000", mid_ta_reg_id="11B10101",
+            mapping=mapping,
             horizon_start=pd.Timestamp("2026-06-10"),
             horizon_end=pd.Timestamp("2026-06-01"),
         )

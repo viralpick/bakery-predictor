@@ -1,15 +1,21 @@
-"""Store → ASOS station mapping.
+"""Store → ASOS station + admin-dong mapping.
 
-PoC default assumes three synthetic stores live in greater Seoul region. When
-real store coordinates arrive, override via a yaml file passed to
-`load_store_mapping(path=...)`.
+PoC default: three synthetic stores in Seoul.
+  - store_A: 강남(학동) 인근, residential — 행정동 청담1동
+  - store_B: 홍대입구역 인근, transit — 행정동 서교동
+  - store_C: 여의도역 인근, office — 행정동 여의동
 
-Station IDs are from KMA ASOS:
-  108 = 서울, 112 = 인천, 119 = 수원, 143 = 대구, 156 = 광주, 159 = 부산
+Real-data swap: override via yaml passed to `load_store_mapping(path=...)`.
+`admin_dong_code` is the 행안부 행정동코드 (10-digit). Used to join
+living-population / age / consumption external data, all of which are
+keyed by admin dong.
+
+ASOS station IDs from KMA: 108 = 서울, 112 = 인천, 119 = 수원, ...
 """
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import TypedDict
 
@@ -17,44 +23,51 @@ import yaml
 
 
 class StationMapping(TypedDict):
+    # ASOS / KMA weather
     station_id: int
     station_name: str
-    # 단기예보 격자 좌표 (KMA Lambert grid)
     nx: int
     ny: int
-    # 중기예보 예보구역 코드
-    mid_land_reg_id: str  # 육상예보구역 (강수확률·날씨묘사)
-    mid_ta_reg_id: str    # 기온예보구역 (최저·최고 기온)
-
-
-# Forecast region codes for major regions (KMA OpenAPI 가이드 기준):
-#   서울/인천/경기 육상 = "11B00000", 서울 기온 = "11B10101"
-#   강원도 영서 = "11D10000", 강원도 영동 = "11D20000"
-#   대전/세종/충남 = "11C20000", 충북 = "11C10000"
-#   광주/전남 = "11F20000", 전북 = "11F10000"
-#   대구/경북 = "11H10000", 부산/울산/경남 = "11H20000"
-#   제주 = "11G00000"
-# 격자 좌표(nx, ny): 서울=60,127, 인천=55,124, 수원=60,121
+    mid_land_reg_id: str
+    mid_ta_reg_id: str
+    # Store coordinates (decimal degrees, WGS84)
+    lat: float
+    lon: float
+    # Administrative dong (행정동) — keys living-population / age / consumption
+    admin_dong_code: str
+    admin_dong_name: str
 
 
 DEFAULT_STATIONS: dict[str, StationMapping] = {
-    # PoC: all stores share Seoul observatory + grid + forecast region.
-    # When real store coordinates arrive, point each store at its nearest
-    # ASOS station + grid cell + forecast region.
     "store_A": {
         "station_id": 108, "station_name": "서울",
         "nx": 60, "ny": 127,
         "mid_land_reg_id": "11B00000", "mid_ta_reg_id": "11B10101",
+        "lat": 37.5160, "lon": 127.0340,
+        "admin_dong_code": "11680565", "admin_dong_name": "청담동",
     },
     "store_B": {
         "station_id": 108, "station_name": "서울",
         "nx": 60, "ny": 127,
         "mid_land_reg_id": "11B00000", "mid_ta_reg_id": "11B10101",
+        "lat": 37.5563, "lon": 126.9240,
+        "admin_dong_code": "11440660", "admin_dong_name": "서교동",
     },
     "store_C": {
         "station_id": 108, "station_name": "서울",
         "nx": 60, "ny": 127,
         "mid_land_reg_id": "11B00000", "mid_ta_reg_id": "11B10101",
+        "lat": 37.5212, "lon": 126.9239,
+        "admin_dong_code": "11560540", "admin_dong_name": "여의동",
+    },
+    # 실 매장 — 아티제 아브뉴프랑광교점 (보나비)
+    # 점포코드 1000000047, 경기도 수원시 영통구 (이의동/광교2동)
+    "store_gw01": {
+        "station_id": 119, "station_name": "수원",
+        "nx": 60, "ny": 121,
+        "mid_land_reg_id": "11B00000", "mid_ta_reg_id": "11B20601",
+        "lat": 37.2853, "lon": 127.0593,
+        "admin_dong_code": "41117610", "admin_dong_name": "광교2동",
     },
 }
 
@@ -64,21 +77,36 @@ def load_store_mapping(path: Path | None = None) -> dict[str, StationMapping]:
         return dict(DEFAULT_STATIONS)
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     stores = raw.get("stores", raw)
-    return {
-        k: {
+    out: dict[str, StationMapping] = {}
+    for k, v in stores.items():
+        out[k] = {
             "station_id": int(v["station_id"]),
             "station_name": v["station_name"],
             "nx": int(v.get("nx", 60)),
             "ny": int(v.get("ny", 127)),
             "mid_land_reg_id": str(v.get("mid_land_reg_id", "11B00000")),
             "mid_ta_reg_id": str(v.get("mid_ta_reg_id", "11B10101")),
+            "lat": float(v["lat"]),
+            "lon": float(v["lon"]),
+            "admin_dong_code": str(v["admin_dong_code"]),
+            "admin_dong_name": str(v["admin_dong_name"]),
         }
-        for k, v in stores.items()
-    }
+    return out
+
+
+def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance between two WGS84 coordinates, in meters."""
+    earth_r = 6_371_000.0
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * earth_r * math.asin(math.sqrt(a))
 
 
 def unique_stations(mapping: dict[str, StationMapping]) -> list[StationMapping]:
-    """Distinct stations to fetch (multiple stores may share one)."""
+    """Distinct ASOS stations to fetch (multiple stores may share one)."""
     seen: dict[int, StationMapping] = {}
     for entry in mapping.values():
         seen[entry["station_id"]] = entry
@@ -86,10 +114,13 @@ def unique_stations(mapping: dict[str, StationMapping]) -> list[StationMapping]:
 
 
 def unique_forecast_grids(mapping: dict[str, StationMapping]) -> list[tuple[int, int]]:
-    """Distinct (nx, ny) grid cells for short-term forecast."""
     return sorted({(s["nx"], s["ny"]) for s in mapping.values()})
 
 
 def unique_mid_regions(mapping: dict[str, StationMapping]) -> list[tuple[str, str]]:
-    """Distinct (mid_land_reg_id, mid_ta_reg_id) pairs for mid-term forecast."""
     return sorted({(s["mid_land_reg_id"], s["mid_ta_reg_id"]) for s in mapping.values()})
+
+
+def unique_admin_dongs(mapping: dict[str, StationMapping]) -> list[str]:
+    """Distinct admin-dong codes (10-digit) across all stores."""
+    return sorted({s["admin_dong_code"] for s in mapping.values()})

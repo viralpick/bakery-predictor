@@ -21,8 +21,12 @@ from ..features.cannibalization import (
     CANNIBALIZATION_FEATURE_COLUMNS,
     add_cannibalization_features,
 )
+from ..features.competitor_features import COMPETITOR_FEATURE_COLUMNS
+from ..features.consumption_features import CONSUMPTION_FEATURE_COLUMNS
 from ..features.date_features import DATE_FEATURE_COLUMNS, add_date_features
 from ..features.lag_features import LAG_FEATURE_COLUMNS, add_lag_features
+from ..features.living_population_features import LIVING_POP_FEATURE_COLUMNS
+from ..features.population_features import POPULATION_FEATURE_COLUMNS
 from ..features.rolling_features import ROLLING_FEATURE_COLUMNS, add_rolling_features
 from ..features.weather_features import WEATHER_FEATURE_COLUMNS
 from .base import Forecaster
@@ -36,7 +40,13 @@ _BASE_NUMERIC_COLUMNS: list[str] = [
     *ROLLING_FEATURE_COLUMNS,
 ]
 
-VALID_FEATURE_SETS = ("v0", "v1", "v2")
+VALID_FEATURE_SETS = ("v0", "v1", "v2", "v3")
+
+# Feature sets that need potential_demand-aware history (sold_units +
+# is_stockout carried alongside the target column).
+_POTENTIAL_DEMAND_FEATURE_SETS = {"v2", "v3"}
+# Feature sets that need calendar + weather columns on both train and target.
+_CALENDAR_WEATHER_FEATURE_SETS = {"v1", "v2", "v3"}
 
 
 def build_numeric_columns(feature_set: str) -> list[str]:
@@ -51,13 +61,24 @@ def build_numeric_columns(feature_set: str) -> list[str]:
             *WEATHER_FEATURE_COLUMNS,
             *CANNIBALIZATION_FEATURE_COLUMNS,
         ]
+    if feature_set == "v3":
+        return [
+            *_BASE_NUMERIC_COLUMNS,
+            *CALENDAR_FEATURE_COLUMNS,
+            *WEATHER_FEATURE_COLUMNS,
+            *CANNIBALIZATION_FEATURE_COLUMNS,
+            *COMPETITOR_FEATURE_COLUMNS,
+            *LIVING_POP_FEATURE_COLUMNS,
+            *POPULATION_FEATURE_COLUMNS,
+            *CONSUMPTION_FEATURE_COLUMNS,
+        ]
     raise ValueError(f"unknown feature_set: {feature_set!r}. Use one of {VALID_FEATURE_SETS}")
 
 
 def _default_target(feature_set: str) -> str:
     """v0/v1 trained on observed sold_units (history compatibility).
-    v2 trained on censoring-corrected potential_demand."""
-    return "potential_demand" if feature_set == "v2" else "sold_units"
+    v2/v3 trained on censoring-corrected potential_demand."""
+    return "potential_demand" if feature_set in _POTENTIAL_DEMAND_FEATURE_SETS else "sold_units"
 
 
 @dataclass
@@ -116,15 +137,24 @@ class GlobalLGBM(Forecaster):
         self.model: lgb.Booster | None = None
         self._train_history: pd.DataFrame | None = None
         self._extra_history_cols: list[str] = []
-        if feature_set in {"v1", "v2"}:
+        if feature_set in _CALENDAR_WEATHER_FEATURE_SETS:
             self._extra_history_cols.extend(CALENDAR_FEATURE_COLUMNS + WEATHER_FEATURE_COLUMNS)
-        if feature_set == "v2":
+        if feature_set in _POTENTIAL_DEMAND_FEATURE_SETS:
             # Cannibalization aggregates run over (sold_units, is_stockout) at the
             # store/category level. When y_col is potential_demand, sold_units is
             # no longer the trained target, so we explicitly carry it in history.
             self._extra_history_cols.append("is_stockout")
             if self.y_col != "sold_units":
                 self._extra_history_cols.append("sold_units")
+        # v3 external features are all forecast-safe — competitor evolves slowly
+        # via license/close events; living-pop / population / consumption are
+        # static per store_id. extra_history_cols ensures the join survives
+        # predict-frame construction even when the target frame already carries them.
+        if feature_set == "v3":
+            self._extra_history_cols.extend(COMPETITOR_FEATURE_COLUMNS)
+            self._extra_history_cols.extend(LIVING_POP_FEATURE_COLUMNS)
+            self._extra_history_cols.extend(POPULATION_FEATURE_COLUMNS)
+            self._extra_history_cols.extend(CONSUMPTION_FEATURE_COLUMNS)
 
     @staticmethod
     def _build_name(feature_set: str, params: LGBMParams) -> str:
@@ -178,7 +208,7 @@ class GlobalLGBM(Forecaster):
         out = add_date_features(df)
         out = add_lag_features(out, y_col=self.y_col)
         out = add_rolling_features(out, y_col=self.y_col)
-        if self.feature_set == "v2":
+        if self.feature_set in _POTENTIAL_DEMAND_FEATURE_SETS:
             out = add_cannibalization_features(out)
         return out
 
@@ -225,19 +255,24 @@ class GlobalLGBM(Forecaster):
         if self.feature_set == "v0":
             return
         required: list[str] = []
-        if self.feature_set in {"v1", "v2"}:
+        if self.feature_set in _CALENDAR_WEATHER_FEATURE_SETS:
             required.extend(CALENDAR_FEATURE_COLUMNS + WEATHER_FEATURE_COLUMNS)
         # is_stockout / sold_units are required on train (for cannibalization +
         # target). On the target frame, _join_history fills them in if absent.
-        if self.feature_set == "v2" and label == "train":
+        if self.feature_set in _POTENTIAL_DEMAND_FEATURE_SETS and label == "train":
             required.append("is_stockout")
             if self.y_col != "sold_units":
                 required.append("sold_units")
+        if self.feature_set == "v3" and label == "train":
+            required.extend(COMPETITOR_FEATURE_COLUMNS)
+            required.extend(LIVING_POP_FEATURE_COLUMNS)
+            required.extend(POPULATION_FEATURE_COLUMNS)
+            required.extend(CONSUMPTION_FEATURE_COLUMNS)
         missing = set(required) - set(df.columns)
         if missing:
             raise ValueError(
                 f"{self.feature_set} {label} frame missing required columns: {sorted(missing)}. "
-                "Did you forget to enrich daily with calendar/weather (and ensure DAILY_COLUMNS for v2)?"
+                "Did you enrich daily with calendar/weather/competitor/living-pop/population/consumption?"
             )
 
     def feature_importance(self) -> pd.DataFrame:

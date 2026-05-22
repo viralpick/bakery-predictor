@@ -42,7 +42,7 @@ def _v2_daily(n_days: int = 180, seed: int = 3) -> pd.DataFrame:
                 )
     df = pd.DataFrame(rows)
     cal = build_calendar_daily(dates.min(), dates.max())
-    w = build_synthetic_weather(dates.min(), dates.max(), seed=seed)
+    w = build_synthetic_weather(dates.min(), dates.max(), store_ids=["s1", "s2"], seed=seed)
     df = add_calendar_features(df, cal)
     df = add_weather_features(df, w)
     stores = [StoreHours("s1", 9, 22), StoreHours("s2", 8, 21)]
@@ -84,7 +84,11 @@ def test_v2_target_frame_can_skip_sold_units_and_is_stockout():
         .merge(pd.DataFrame({"date": pd.date_range(cutoff, periods=7, freq="D")}), how="cross")
     )
     # Carry calendar/weather to satisfy v2 check (predict-next-week does this).
-    horizon_full = horizon.merge(df.drop_duplicates("date")[["date"] + [c for c in df.columns if c not in {"store_id","item_id","category_id","date","sold_units","is_stockout","stockout_time","potential_demand"}]], on="date", how="left")
+    feature_cols = [c for c in df.columns if c not in {"store_id","item_id","category_id","date","sold_units","is_stockout","stockout_time","potential_demand"}]
+    horizon_full = horizon.merge(
+        df.drop_duplicates(["store_id","date"])[["store_id","date", *feature_cols]],
+        on=["store_id","date"], how="left",
+    )
     m = GlobalLGBM(feature_set="v2").fit(train)
     yhat = m.predict(horizon_full)
     assert len(yhat) == len(horizon_full)

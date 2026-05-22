@@ -42,19 +42,37 @@ class StoreHours:
     close_hour: int
 
 
-def bakery_hour_profile(open_hour: int, close_hour: int, *, alpha: float = DEFAULT_ALPHA) -> np.ndarray:
+def bakery_hour_profile(
+    open_hour: int,
+    close_hour: int,
+    *,
+    alpha: float = DEFAULT_ALPHA,
+    measured: np.ndarray | None = None,
+) -> np.ndarray:
     """Return a 24-length array, 0 outside open hours, summing to 1 over open hours.
 
-    alpha=1: full bakery curve. alpha=0: uniform over open hours.
+    Two ways to get the bakery curve:
+      - `measured` (preferred): 24-length store-measured profile from receipts.
+        Used as the curve directly (skips the hard-coded PEAKS).
+      - `measured=None`: fall back to the hard-coded 4-peak bakery default.
+
+    alpha blends curve with uniform: alpha=1 keeps the curve, alpha=0 uniform,
+    alpha=0.5 (default) softens peaks so very-early stockouts don't explode
+    the correction.
     """
     if not 0.0 <= alpha <= 1.0:
         raise ValueError(f"alpha must be in [0, 1]; got {alpha}")
     if close_hour <= open_hour:
         raise ValueError(f"close_hour ({close_hour}) must be > open_hour ({open_hour})")
     hours = np.arange(24, dtype=float)
-    curve = np.zeros(24)
-    for peak, width, height in PEAKS:
-        curve += height * np.exp(-0.5 * ((hours - peak) / width) ** 2)
+    if measured is not None:
+        if measured.shape != (24,):
+            raise ValueError(f"measured profile must be length-24; got {measured.shape}")
+        curve = np.asarray(measured, dtype=float).copy()
+    else:
+        curve = np.zeros(24)
+        for peak, width, height in PEAKS:
+            curve += height * np.exp(-0.5 * ((hours - peak) / width) ** 2)
     mask = (hours >= open_hour) & (hours < close_hour)
     curve = curve * mask
     if curve.sum() <= 0:
@@ -109,11 +127,28 @@ def attach_potential_demand(
     alpha: float = DEFAULT_ALPHA,
     max_multiplier: float = DEFAULT_MAX_MULTIPLIER,
     min_cum_weight: float = DEFAULT_MIN_CUM_WEIGHT,
+    outflow_ratio: pd.Series | dict | None = None,
+    measured_profiles: dict[str, np.ndarray] | None = None,
 ) -> pd.DataFrame:
-    """Return a copy of `daily` with a `potential_demand` column."""
+    """Return a copy of `daily` with a `potential_demand` column.
+
+    `measured_profiles` (per-store store_id → length-24 array): if provided, the
+    censoring profile uses each store's measured hour distribution instead of
+    the hard-coded 4-peak bakery default. Stores missing from the dict fall
+    back to the hard-coded curve.
+
+    `outflow_ratio` (per-item fraction lost to substitution within the same
+    category) shrinks the censoring correction:
+        potential = sold + (raw_potential - sold) × (1 - outflow_ratio[item])
+    Items missing from the series default to outflow_ratio=0 (no shrink).
+    """
+    measured_profiles = measured_profiles or {}
     hours_lookup = {s.store_id: (s.open_hour, s.close_hour) for s in stores}
     profiles = {
-        sid: bakery_hour_profile(oh, ch, alpha=alpha) for sid, (oh, ch) in hours_lookup.items()
+        sid: bakery_hour_profile(
+            oh, ch, alpha=alpha, measured=measured_profiles.get(sid)
+        )
+        for sid, (oh, ch) in hours_lookup.items()
     }
 
     sold = daily["sold_units"].astype(float).to_numpy()
@@ -146,6 +181,13 @@ def attach_potential_demand(
         cum = max(cum, min_cum_weight)
         mult = min(1.0 / cum, max_multiplier)
         potential[i] = sold[i] * mult
+
+    if outflow_ratio is not None:
+        out_map = outflow_ratio.to_dict() if isinstance(outflow_ratio, pd.Series) else outflow_ratio
+        item_outflow = np.array([out_map.get(str(it), 0.0) for it in daily["item_id"].astype(str)])
+        item_outflow = np.clip(item_outflow, 0.0, 1.0)
+        # Shrink the censoring correction by the outflow ratio.
+        potential = sold + (potential - sold) * (1.0 - item_outflow)
 
     out = daily.copy()
     out["potential_demand"] = potential.astype("float32")

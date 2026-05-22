@@ -12,12 +12,11 @@ import pandas as pd
 
 LAG_FEATURE_COLUMNS: list[str] = [
     "sales_lag_1",
-    "sales_lag_7",
+    "sales_lag_7",     # = sales_same_dow_1w (1주 전 동일 요일) — alias 제거됨
     "sales_lag_14",
     "sales_lag_28",
-    "sales_same_dow_1w",
-    "sales_same_dow_2w",
-    "sales_same_dow_4w",
+    "sales_same_dow_2w",   # 2주 평균 (≠ sales_lag_14 단일값)
+    "sales_same_dow_4w",   # 4주 평균 (≠ sales_lag_28 단일값)
 ]
 
 
@@ -32,7 +31,6 @@ def add_lag_features(
     grouped = out.groupby(list(group_keys), observed=True)[y_col]
     for k in (1, 7, 14, 28):
         out[f"sales_lag_{k}"] = grouped.shift(k)
-    out["sales_same_dow_1w"] = grouped.shift(7)
     out["sales_same_dow_2w"] = _avg_shifts(grouped, [7, 14])
     out["sales_same_dow_4w"] = _avg_shifts(grouped, [7, 14, 21, 28])
     return out
