@@ -29,6 +29,7 @@ data/
 
 # Tooling caches
 .serena/
+.claude/scheduled_tasks.lock
 
 # Secrets — never commit
 .env

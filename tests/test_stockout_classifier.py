@@ -47,7 +47,9 @@ def _enriched(n_days: int = 150, seed: int = 11) -> pd.DataFrame:
                 )
     df = pd.DataFrame(rows)
     cal = build_calendar_daily(dates.min(), dates.max())
-    weather = build_synthetic_weather(dates.min(), dates.max(), seed=seed)
+    weather = build_synthetic_weather(
+        dates.min(), dates.max(), store_ids=["s1", "s2"], seed=seed
+    )
     df = add_calendar_features(df, cal)
     df = add_weather_features(df, weather)
     return df

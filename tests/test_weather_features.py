@@ -10,25 +10,28 @@ from bakery.data.weather import (
     validate_weather,
 )
 from bakery.features.weather_features import (
-    HEATWAVE_TEMP_C,
-    HEAVY_RAIN_MM,
-    HEAVY_SNOW_CM,
     WEATHER_FEATURE_COLUMNS,
     add_weather_features,
 )
 
 
 def test_weather_frame_validates_and_has_all_columns():
-    df = build_synthetic_weather("2024-01-01", "2024-12-31", seed=42)
+    df = build_synthetic_weather(
+        "2024-01-01", "2024-12-31", store_ids=["s1", "s2", "s3"], seed=42
+    )
     validate_weather(df)
     for col in WEATHER_DAILY_COLUMNS:
         assert col in df.columns
-    assert len(df) == 366  # 2024 leap year
+    # long form: 366 days (2024 leap) × 3 stores
+    assert len(df) == 366 * 3
+    assert set(df["store_id"].unique()) == {"s1", "s2", "s3"}
+    # per-store count equal
+    assert (df.groupby("store_id").size() == 366).all()
 
 
 def test_weather_seasonality_plausible():
-    """Summer (Jun-Aug) should average warmer than winter (Dec-Feb)."""
-    df = build_synthetic_weather("2024-01-01", "2024-12-31", seed=42)
+    """Summer (Jun-Aug) should average warmer than winter (Dec-Feb) per store."""
+    df = build_synthetic_weather("2024-01-01", "2024-12-31", store_ids=["s1"], seed=42)
     summer = df[(df["date"].dt.month >= 6) & (df["date"].dt.month <= 8)]["avg_temp"].mean()
     winter = df[df["date"].dt.month.isin([12, 1, 2])]["avg_temp"].mean()
     assert summer > 20
@@ -36,9 +39,23 @@ def test_weather_seasonality_plausible():
     assert summer > winter + 15
 
 
-def test_threshold_flags_match_raw_columns():
+def test_per_store_weather_differs_but_correlates():
+    """Stores share seasonal base but get small distinct noise."""
+    df = build_synthetic_weather(
+        "2024-01-01", "2024-03-31", store_ids=["s1", "s2"], seed=42
+    )
+    a = df[df["store_id"] == "s1"].sort_values("date")["avg_temp"].to_numpy()
+    b = df[df["store_id"] == "s2"].sort_values("date")["avg_temp"].to_numpy()
+    # Different (perturbations applied), but highly correlated (same base).
+    assert (a != b).any()
+    corr = pd.Series(a).corr(pd.Series(b))
+    assert corr > 0.95
+
+
+def test_weather_merge_preserves_raw_columns():
     weather = pd.DataFrame(
         {
+            "store_id": ["s1"] * 5,
             "date": pd.date_range("2024-06-01", periods=5, freq="D"),
             "avg_temp": [30.0, -7.0, 15.0, 15.0, 15.0],
             "max_temp": [35.0, -2.0, 20.0, 20.0, 20.0],
@@ -63,30 +80,17 @@ def test_threshold_flags_match_raw_columns():
     merged = add_weather_features(sales, weather)
     for col in WEATHER_FEATURE_COLUMNS:
         assert col in merged.columns
-    # Row 0: heatwave (avg_temp=30 >= HEATWAVE_TEMP_C)
-    assert merged.iloc[0]["is_heatwave"] == 1
-    assert merged.iloc[0]["is_coldsnap"] == 0
-    # Row 1: coldsnap + heavy snow
-    assert merged.iloc[1]["is_coldsnap"] == 1
-    assert merged.iloc[1]["is_heavy_snow"] == 1
-    # Row 2: heavy rain
-    assert merged.iloc[2]["is_heavy_rain"] == 1
-    # Row 3: light rain — not heavy
-    assert merged.iloc[3]["is_heavy_rain"] == 0
-    # Row 4: nothing flagged
-    assert merged.iloc[4][["is_heatwave", "is_coldsnap", "is_heavy_rain", "is_heavy_snow"]].sum() == 0
-
-
-def test_thresholds_are_documented_constants():
-    # Hands-off pin so threshold drift gets caught in PR review.
-    assert HEATWAVE_TEMP_C == 28.0
-    assert HEAVY_RAIN_MM == 10.0
-    assert HEAVY_SNOW_CM == 5.0
+    # raw values survive the merge
+    assert merged.iloc[0]["avg_temp"] == 30.0
+    assert merged.iloc[2]["precipitation_mm"] == 15.0
+    assert merged.iloc[1]["snow_depth_cm"] == 8.0
 
 
 def test_weather_merge_no_future_leakage():
     """Per-row merge: mutating a future weather row cannot change past merged rows."""
-    weather = build_synthetic_weather("2024-01-01", "2024-12-31", seed=42)
+    weather = build_synthetic_weather(
+        "2024-01-01", "2024-12-31", store_ids=["s1"], seed=42
+    )
     sales = pd.DataFrame(
         {
             "store_id": ["s1"] * 30,
@@ -104,3 +108,36 @@ def test_weather_merge_no_future_leakage():
     past_a = merged_a[merged_a["date"] < pivot][WEATHER_FEATURE_COLUMNS].reset_index(drop=True)
     past_b = merged_b[merged_b["date"] < pivot][WEATHER_FEATURE_COLUMNS].reset_index(drop=True)
     pd.testing.assert_frame_equal(past_a, past_b)
+
+
+def test_weather_merge_picks_per_store_rows():
+    """Two stores with intentionally different weather → merged rows differ."""
+    weather = pd.DataFrame(
+        {
+            "store_id": ["s1", "s1", "s2", "s2"],
+            "date": pd.to_datetime(["2024-06-01", "2024-06-02"] * 2),
+            "avg_temp": [30.0, 30.0, 10.0, 10.0],
+            "max_temp": [35.0, 35.0, 15.0, 15.0],
+            "min_temp": [25.0, 25.0, 5.0, 5.0],
+            "diurnal_range": [10.0] * 4,
+            "humidity": [70.0] * 4,
+            "precipitation_mm": [0.0] * 4,
+            "is_rain": [0] * 4,
+            "snow_depth_cm": [0.0] * 4,
+            "is_snow": [0] * 4,
+            "sunshine_hours": [10.0] * 4,
+        }
+    )
+    sales = pd.DataFrame(
+        {
+            "store_id": ["s1", "s1", "s2", "s2"],
+            "item_id": ["i1"] * 4,
+            "date": pd.to_datetime(["2024-06-01", "2024-06-02"] * 2),
+            "sold_units": [10] * 4,
+        }
+    )
+    merged = add_weather_features(sales, weather)
+    s1_rows = merged[merged["store_id"] == "s1"]
+    s2_rows = merged[merged["store_id"] == "s2"]
+    assert (s1_rows["avg_temp"] == 30.0).all()
+    assert (s2_rows["avg_temp"] == 10.0).all()

@@ -1,16 +1,19 @@
-"""Merge weather daily into a sales daily frame and derive threshold flags.
+"""Merge weather daily into a sales daily frame.
 
-PoC assumption: one weather observation per date, shared across all stores.
-When a real per-station weather frame arrives, this function will need a
-`station_id` join key — keep that change isolated here.
+Weather frames are long-form keyed by `(store_id, date)`. PoC review noted
+that threshold flags (`is_heavy_rain` / `is_heavy_snow` / `is_heatwave` /
+`is_coldsnap`) are fully redundant with the raw numeric columns — LightGBM
+splits learn the threshold cutoffs natively — so they were dropped.
+`is_rain` / `is_snow` are kept because the "any precipitation / any snow"
+binary is a cleaner 0-vs-positive split than `precipitation_mm > 0`
+across noisy near-zero values.
 """
 
 from __future__ import annotations
 
 import pandas as pd
 
-# Raw numeric columns that come straight from the weather frame.
-WEATHER_RAW_COLUMNS: list[str] = [
+WEATHER_FEATURE_COLUMNS: list[str] = [
     "avg_temp",
     "max_temp",
     "min_temp",
@@ -23,33 +26,22 @@ WEATHER_RAW_COLUMNS: list[str] = [
     "sunshine_hours",
 ]
 
-# Threshold-derived flags. Thresholds match Korean meteorological conventions.
-HEATWAVE_TEMP_C = 28.0  # avg_temp above this — note KMA uses max_temp ≥ 33; we use avg as a softer signal
-COLDSNAP_TEMP_C = -5.0
-HEAVY_RAIN_MM = 10.0
-HEAVY_SNOW_CM = 5.0
-
-WEATHER_DERIVED_COLUMNS: list[str] = [
-    "is_heavy_rain",
-    "is_heavy_snow",
-    "is_heatwave",
-    "is_coldsnap",
-]
-
-WEATHER_FEATURE_COLUMNS: list[str] = WEATHER_RAW_COLUMNS + WEATHER_DERIVED_COLUMNS
+# Back-compat alias for callers that still import the older raw-vs-derived split.
+WEATHER_RAW_COLUMNS = WEATHER_FEATURE_COLUMNS
 
 
 def add_weather_features(
     df: pd.DataFrame, weather_df: pd.DataFrame, *, date_col: str = "date"
 ) -> pd.DataFrame:
-    missing = set(WEATHER_RAW_COLUMNS) - set(weather_df.columns)
+    missing = set(WEATHER_FEATURE_COLUMNS) - set(weather_df.columns)
     if missing:
         raise ValueError(f"weather_df missing columns: {sorted(missing)}")
-    out = df.merge(weather_df[[date_col, *WEATHER_RAW_COLUMNS]], on=date_col, how="left")
-    for col in WEATHER_RAW_COLUMNS:
+    if "store_id" not in weather_df.columns:
+        raise ValueError("weather_df missing 'store_id' — expected long-form (store_id, date) keys")
+    if "store_id" not in df.columns:
+        raise ValueError("df missing 'store_id' — cannot merge per-store weather")
+    join_cols = ["store_id", date_col]
+    out = df.merge(weather_df[[*join_cols, *WEATHER_FEATURE_COLUMNS]], on=join_cols, how="left")
+    for col in WEATHER_FEATURE_COLUMNS:
         out[col] = out[col].fillna(0)
-    out["is_heavy_rain"] = (out["precipitation_mm"] >= HEAVY_RAIN_MM).astype("int8")
-    out["is_heavy_snow"] = (out["snow_depth_cm"] >= HEAVY_SNOW_CM).astype("int8")
-    out["is_heatwave"] = (out["avg_temp"] >= HEATWAVE_TEMP_C).astype("int8")
-    out["is_coldsnap"] = (out["avg_temp"] <= COLDSNAP_TEMP_C).astype("int8")
     return out
