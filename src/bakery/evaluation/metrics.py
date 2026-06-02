@@ -40,6 +40,72 @@ def summarize(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
     return {"wape": wape(y_true, y_pred), "mae": mae(y_true, y_pred), "rmse": rmse(y_true, y_pred)}
 
 
+def coverage(actual: np.ndarray, lower: np.ndarray, upper: np.ndarray) -> float:
+    """Fraction of points falling inside the closed interval [lower, upper]."""
+    actual = np.asarray(actual, dtype=float)
+    lower = np.asarray(lower, dtype=float)
+    upper = np.asarray(upper, dtype=float)
+    if not (actual.shape == lower.shape == upper.shape):
+        raise ValueError(
+            f"shape mismatch: actual {actual.shape}, lower {lower.shape}, upper {upper.shape}"
+        )
+    if len(actual) == 0:
+        return float("nan")
+    inside = (actual >= lower) & (actual <= upper)
+    return float(np.mean(inside))
+
+
+def coverage_by_group(
+    actual: np.ndarray, lower: np.ndarray, upper: np.ndarray, group: np.ndarray
+) -> dict:
+    """Per-group coverage (e.g., by day-of-week for Mondrian conformal)."""
+    actual = np.asarray(actual, dtype=float)
+    lower = np.asarray(lower, dtype=float)
+    upper = np.asarray(upper, dtype=float)
+    group = np.asarray(group)
+    if not (actual.shape == lower.shape == upper.shape == group.shape):
+        raise ValueError("shape mismatch among actual/lower/upper/group")
+    out: dict = {}
+    for g in np.unique(group):
+        mask = group == g
+        out[g] = coverage(actual[mask], lower[mask], upper[mask])
+    return out
+
+
+def interval_width(lower: np.ndarray, upper: np.ndarray) -> float:
+    """Mean interval width (proxy for waste/over-stocking cost)."""
+    lower = np.asarray(lower, dtype=float)
+    upper = np.asarray(upper, dtype=float)
+    if lower.shape != upper.shape:
+        raise ValueError(f"shape mismatch: lower {lower.shape} vs upper {upper.shape}")
+    if len(lower) == 0:
+        return float("nan")
+    return float(np.mean(upper - lower))
+
+
+def pinball_loss(actual: np.ndarray, pred: np.ndarray, q: float) -> float:
+    """Mean quantile (pinball) loss at level q.
+
+    Under-prediction (pred < actual) is weighted by q; over-prediction by (1-q).
+    """
+    diff = _align(actual, pred)  # actual - pred
+    loss = np.where(diff >= 0, q * diff, (q - 1.0) * diff)
+    return float(np.mean(loss))
+
+
+def mase(
+    actual: np.ndarray, pred: np.ndarray, train_actual: np.ndarray, season: int = 7
+) -> float:
+    """Mean Absolute Scaled Error: model MAE / seasonal-naive MAE on the train series."""
+    train_actual = np.asarray(train_actual, dtype=float)
+    if len(train_actual) <= season:
+        return float("nan")
+    naive_mae = float(np.mean(np.abs(train_actual[season:] - train_actual[:-season])))
+    if naive_mae == 0:
+        return float("nan")
+    return mae(actual, pred) / naive_mae
+
+
 def summarize_with_stockout(
     y_true: np.ndarray, y_pred: np.ndarray, is_stockout: np.ndarray
 ) -> dict[str, float]:

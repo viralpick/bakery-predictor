@@ -160,6 +160,32 @@ def compute_proportions(
     ]]
 
 
+def distribute_interval(
+    history: pd.DataFrame,
+    interval_by_date: pd.DataFrame,
+) -> pd.DataFrame:
+    """Propagate a category-total interval to items by proportion (Stage 2, §4.4).
+
+    No new model — the same per-item proportions that distribute the point total
+    scale every bound. Because Σ proportion = 1, item bounds reconstruct the
+    category bounds, and item width = proportion × category width.
+
+    interval_by_date: columns [date, lower, anchor, upper].
+    """
+    chunks = []
+    for _, row in interval_by_date.iterrows():
+        d = pd.Timestamp(row["date"])
+        props = compute_proportions(history, d)
+        chunk = props[["item_id", "category_id", "proportion"]].copy()
+        chunk["date"] = d
+        chunk["item_lower"] = chunk["proportion"] * row["lower"]
+        chunk["item_anchor"] = chunk["proportion"] * row["anchor"]
+        chunk["item_upper"] = chunk["proportion"] * row["upper"]
+        chunks.append(chunk)
+    cols = ["date", "item_id", "category_id", "proportion", "item_lower", "item_anchor", "item_upper"]
+    return pd.concat(chunks, ignore_index=True)[cols]
+
+
 def distribute_total(
     history: pd.DataFrame,
     total_by_date: pd.Series,

@@ -27,12 +27,19 @@ class CategoryTotalModel:
     alpha_demand: float
     production_q: float
     target_col: str
+    production_lo: lgb.LGBMRegressor | None = None
+    q_lo: float | None = None
 
     def predict_expected(self, X: pd.DataFrame) -> np.ndarray:
         return self.expected.predict(X[self.feature_cols])
 
     def predict_production(self, X: pd.DataFrame) -> np.ndarray:
         return self.quantile.predict(X[self.feature_cols])
+
+    def predict_production_lo(self, X: pd.DataFrame) -> np.ndarray:
+        if self.production_lo is None:
+            raise ValueError("no q_lo model: fit_category_total was called without q_lo")
+        return self.production_lo.predict(X[self.feature_cols])
 
 
 def select_feature_cols(df: pd.DataFrame, target_col: str) -> list[str]:
@@ -44,12 +51,19 @@ def fit_category_total(
     target_col: str = "adjusted_demand_unit",
     alpha_demand: float = 0.5,
     production_q: float = 0.90,
+    q_lo: float | None = None,
     n_estimators: int = 400,
     learning_rate: float = 0.05,
     max_depth: int = 6,
     num_leaves: int = 31,
     random_state: int = 42,
 ) -> CategoryTotalModel:
+    """Fit the expected (L1) and q0.90 production models.
+
+    When `q_lo` is given, also fits an adaptive lower-quantile model used as the
+    asymmetric interval's lower anchor. Symmetric intervals don't need it, so it
+    stays off by default.
+    """
     feat_cols = select_feature_cols(train, target_col)
     X = train[feat_cols]
     y = train[target_col]
@@ -60,10 +74,14 @@ def fit_category_total(
     )
     expected = lgb.LGBMRegressor(objective="regression_l1", **common).fit(X, y)
     quantile = lgb.LGBMRegressor(objective="quantile", alpha=production_q, **common).fit(X, y)
+    production_lo = None
+    if q_lo is not None:
+        production_lo = lgb.LGBMRegressor(objective="quantile", alpha=q_lo, **common).fit(X, y)
     return CategoryTotalModel(
         expected=expected, quantile=quantile,
         feature_cols=feat_cols,
         alpha_demand=alpha_demand, production_q=production_q, target_col=target_col,
+        production_lo=production_lo, q_lo=q_lo,
     )
 
 
@@ -71,6 +89,56 @@ def fit_category_total(
 class BacktestResult:
     folds: pd.DataFrame
     predictions: pd.DataFrame
+
+
+@dataclass
+class CalibrationFold:
+    fold: int
+    train: pd.DataFrame
+    calibration: pd.DataFrame
+    test: pd.DataFrame
+
+
+def expanding_calibration_folds(
+    df: pd.DataFrame,
+    *,
+    target_col: str = "adjusted_demand_unit",
+    n_folds: int = 4,
+    min_train_days: int = 365,
+    calibration_days: int = 60,
+    horizon_days: int = 30,
+) -> list[CalibrationFold]:
+    """Time-ordered train → calibration → test folds for conformal intervals.
+
+    Splits on unique dates (not row index) so a single date never straddles the
+    calibration/test boundary — that would leak future residuals into the margin
+    (CLAUDE.md absolute rules #1, #3). Calibration always sits strictly between
+    train and test.
+    """
+    df = df.sort_values("date").dropna(subset=[target_col]).reset_index(drop=True)
+    dates = pd.DatetimeIndex(sorted(pd.to_datetime(df["date"].unique())))
+    n = len(dates)
+    needed = min_train_days + calibration_days + n_folds * horizon_days
+    if n < needed:
+        raise ValueError(f"Not enough unique days: {n} < {needed}")
+
+    folds: list[CalibrationFold] = []
+    for k in range(n_folds):
+        test_end_i = n - k * horizon_days
+        test_start_i = test_end_i - horizon_days
+        cal_start_i = test_start_i - calibration_days
+        train_dates = dates[:cal_start_i]
+        cal_dates = dates[cal_start_i:test_start_i]
+        test_dates = dates[test_start_i:test_end_i]
+        folds.append(
+            CalibrationFold(
+                fold=k,
+                train=df[df["date"].isin(train_dates)].copy(),
+                calibration=df[df["date"].isin(cal_dates)].copy(),
+                test=df[df["date"].isin(test_dates)].copy(),
+            )
+        )
+    return list(reversed(folds))
 
 
 def expanding_window_backtest(
