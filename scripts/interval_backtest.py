@@ -1,4 +1,6 @@
-"""광교 conformal 구간예측 A/B: 대칭 vs 비대칭 (Coverage@80/@95).
+"""[DEPRECATED 2026-06-08] v5 conformal 구간(범위)예측 — 폐기. 점추정+품절/매진 위험수치로 전환 (docs/poc_scope_v6.md §8 D1). 데이터 검증 단계 산출물로만 보존.
+
+광교 conformal 구간예측 A/B: 대칭 vs 비대칭 (Coverage@80/@95).
 
 q0.90 production을 중심 앵커로 고정한 채, calibration fold에서 요일별 잔차로
 구간 마진을 보정한다. 대칭(center±δ)과 비대칭(adaptive q_lo 하한 + center 상한)을
@@ -48,14 +50,14 @@ def build_gwangyo_features(exclude_bulk: bool = True) -> pd.DataFrame:
     return build_features(cd, target_col=TARGET_COL)
 
 
-def fit_fold(train: pd.DataFrame) -> dict[float, object]:
+def fit_fold(train: pd.DataFrame, production_q: float = PRODUCTION_Q) -> dict[float, object]:
     """coverage 수준별 모델 (center/expected 공유, q_lo만 다름)."""
     return {
         cov: fit_category_total(
             train,
             target_col=TARGET_COL,
             alpha_demand=ALPHA,
-            production_q=PRODUCTION_Q,
+            production_q=production_q,
             q_lo=q_lo,
         )
         for cov, q_lo in COVERAGE_Q_LO.items()
@@ -107,7 +109,8 @@ def eval_fold(fold, models) -> list[dict]:
     return rows
 
 
-def run(df: pd.DataFrame, *, n_folds, min_train_days, calibration_days, horizon_days) -> pd.DataFrame:
+def run(df: pd.DataFrame, *, n_folds, min_train_days, calibration_days, horizon_days,
+        production_q: float = PRODUCTION_Q) -> pd.DataFrame:
     folds = expanding_calibration_folds(
         df,
         target_col=TARGET_COL,
@@ -123,7 +126,7 @@ def run(df: pd.DataFrame, *, n_folds, min_train_days, calibration_days, horizon_
             f"cal={f.calibration['date'].nunique()}d test={f.test['date'].nunique()}d "
             f"(test {f.test['date'].min().date()}→{f.test['date'].max().date()})"
         )
-        models = fit_fold(f.train)
+        models = fit_fold(f.train, production_q=production_q)
         records.extend(eval_fold(f, models))
     return pd.DataFrame(records)
 
