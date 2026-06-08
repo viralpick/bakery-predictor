@@ -4,12 +4,19 @@
 
 ## 단계
 
-- v0: 내부 데이터 baseline (Seasonal Naive, MA, Global LightGBM)
-- v1: + 캘린더/특일 + 날씨
-- v1.5 (unified): + potential_demand target + cannibalization + quantile production model
-- v2: + 지하철 / 상권 / 연령대 / 소비정보
+지금까지(v0~v5)는 **PoC 착수 전 데이터 검증/검토 단계**였다. 이제부터가 실측 PoC.
 
-현재 단계: **v1.5 통합 수요 모델** (`lightgbm_v2`). 외부 캘린더/날씨는 실 API 백필. spec.md §6의 censored demand 처리 + 매장×카테고리 캐니벌라이제이션 + quantile 권장 생산량을 단일 회귀로 통합.
+- v0~v2: 내부 baseline → 캘린더/날씨 → 외부데이터(지하철/상권/연령/소비)
+- v1.5 (unified): potential_demand target + cannibalization + quantile production
+- v4: 카테고리 합 + 품목 비율 + 신제품 tracker (3-stage)
+- v5: conformal 구간예측 — ⚠️ **DEPRECATED** (점추정+위험수치로 전환)
+
+현재 단계: **진짜 PoC 착수 (260605 아티제 실무자 미팅)**. 상세 범위 = `@docs/poc_scope_v6.md`.
+- **산출물**: 점추정 + 품절/매진 위험 수치 (구간/범위 예측 폐기)
+- **검증 대상**: 광교 단독. 타매장은 광교 예측 보조 데이터로만.
+- **검증 방식**: 4주 구축 + 4주 전향적(prospective) 실측 — 기존 발주 시스템과 성능 비교
+- **metric**: 폐기비용↓ / 매진 time median↑ / 매진률↓ (운영 KPI, 아티제와 최종 합의)
+- bulk→품목비율 예측은 수요 이전 통계검증 통과 시에만. 카테고리 정의는 아티제 제공.
 
 ## 절대 규칙
 
