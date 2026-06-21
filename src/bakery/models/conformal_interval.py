@@ -1,5 +1,11 @@
 """Split conformal prediction intervals with Mondrian (day-of-week) grouping.
 
+⚠️ DEPRECATED (v6, 2026-06): v6 산출물이 *구간(interval) 예측 → 점추정 + 품절/매진
+위험 수치*로 전환되면서 이 모듈은 더 이상 v6 경로에 쓰이지 않는다. 위험 수치는
+`bakery.decision`(MC 껍질)이 산출한다. 데이터 검증 단계(v5) 산출물로만 보존하며,
+코드 삭제는 참조 정리 후 별도 작업으로 진행한다. 배경:
+docs/poc_scope_v6.md §2.1, docs/kinetic_layer_fit_analysis.md §3.
+
 The q0.90 production point stays the order anchor (center); this layer wraps it
 with calibrated residual margins so measured coverage converges to the nominal
 level. Distribution-free: uses empirical residual quantiles, no normality

@@ -12,6 +12,7 @@ from rich.table import Table
 
 from .config import EXTERNAL_DATA_DIR
 from .data.loader import DailyDataset, load_dataset
+from .decision import PolicyParams, RiskParams, build_recommendation, lineage_to_frame
 from .data.synthetic import generate_synthetic_bundle
 from .data.weather import load_weather_forecast_from_local
 from .evaluation.backtest import aggregate_by_model, per_category_wape, run_backtest
@@ -184,6 +185,72 @@ def cmd_predict_next_week(
         f"{out_dir}/next_week_predictions.csv"
     )
     _print_next_week_preview(target, demand_col=demand_col)
+
+
+def _demand_points_next_week(
+    ds: DailyDataset, model: str, use_forecast: bool,
+) -> tuple[pd.DataFrame, str]:
+    """Per-item demand point estimates for the next 7 days (v6 point estimate)."""
+    feature_set = _model_to_feature_set(model)
+    daily = _enrich_if_needed(ds, [feature_set]) if feature_set else ds.daily
+    last = daily["date"].max()
+    horizon = pd.date_range(last + pd.Timedelta(days=1), periods=7, freq="D")
+    forecaster = _pick_model(model)
+    forecaster.fit(daily)
+    pairs = daily[["store_id", "item_id", "category_id"]].drop_duplicates()
+    target = pairs.merge(pd.DataFrame({"date": horizon}), how="cross")
+    if feature_set in {"v1", "v2", "v3"}:
+        fw = _load_forecast_weather(horizon) if use_forecast else None
+        target = _enrich_target(target, ds, forecast_weather=fw, include_external=(feature_set == "v3"))
+    target["demand_point"] = forecaster.predict(target).clip(lower=0).round(2).to_numpy()
+    return target, forecaster.name
+
+
+@app.command("v6-predict")
+def cmd_v6_predict(
+    source: str = "synthetic",
+    data_dir: Path | None = None,
+    model: str = "lightgbm_v2",
+    safety_margin: float = 0.15,
+    demand_cv: float = 0.30,
+    n_samples: int = 5000,
+    use_forecast: bool = False,
+    out_dir: Path = REPORTS_DIR,
+) -> None:
+    """v6 산출물: 점추정 + 발주량 + 매진/폐기 위험 수치 + 결정 lineage.
+
+    Forecast(LightGBM 점추정) → 결정론 정책(안전마진·반올림) → Monte-Carlo 위험.
+    예측은 학습 코어, 이 레이어는 예측 *이후*의 결정/위험/lineage 껍질이다
+    (docs/kinetic_layer_fit_analysis.md §8·§10). 예측 이후 단계라 leakage 없음.
+    """
+    ds = _load_dataset(source, data_dir)
+    items, model_name = _demand_points_next_week(ds, model, use_forecast)
+    rec = build_recommendation(
+        items[["store_id", "category_id", "item_id", "date", "demand_point"]],
+        PolicyParams(safety_margin=safety_margin),
+        RiskParams(demand_cv=demand_cv, n_samples=n_samples),
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    rec.table.to_csv(out_dir / "v6_recommendations.csv", index=False)
+    lineage_to_frame(rec.lineages).to_csv(out_dir / "v6_decision_lineage.csv", index=False)
+    console.print(
+        f"[green]wrote[/] {len(rec.table):,} v6 recommendations (model={model_name}) → "
+        f"{out_dir}/v6_recommendations.csv  (+ v6_decision_lineage.csv)"
+    )
+    _print_v6_preview(rec.table)
+
+
+def _print_v6_preview(table: pd.DataFrame, *, top: int = 8) -> None:
+    view = table.sort_values("p_stockout", ascending=False).head(top)
+    t = Table(title=f"v6 — 매진위험 상위 {min(top, len(view))}품목")
+    for col in ("item_id", "demand_point", "order_qty", "p_stockout", "p_waste", "expected_cost"):
+        t.add_column(col, justify="right")
+    for r in view.itertuples(index=False):
+        t.add_row(
+            str(r.item_id), f"{r.demand_point:.1f}", f"{r.order_qty:.0f}",
+            f"{r.p_stockout:.0%}", f"{r.p_waste:.0%}", f"{r.expected_cost:.1f}",
+        )
+    console.print(t)
 
 
 def _parse_variants(variants: str) -> list[str]:
