@@ -30,6 +30,49 @@ def test_make_llm_client_unknown_raises():
         make_llm_client("grok", "x")
 
 
+def test_parse_response_falls_back_to_content_json():
+    """When msg.parsed is None (raw json_schema) and msg.content is JSON, parse it."""
+    import types
+    msg = types.SimpleNamespace(
+        content='{"answer_value": 7}',
+        parsed=None,
+        tool_calls=None
+    )
+    choice = types.SimpleNamespace(message=msg)
+    completion = types.SimpleNamespace(choices=[choice])
+
+    resp = L._parse_response(completion)
+    assert resp.parsed == {"answer_value": 7}
+    assert resp.text == '{"answer_value": 7}'
+    assert resp.tool_calls == []
+
+
+def test_parse_response_handles_missing_content_and_tool_call():
+    """When content is None but there's a tool_call, parsed stays None, tool_calls are extracted."""
+    import types
+    tc = types.SimpleNamespace(
+        id="call_123",
+        function=types.SimpleNamespace(
+            name="my_tool",
+            arguments='{"x": 1}'
+        )
+    )
+    msg = types.SimpleNamespace(
+        content=None,
+        parsed=None,
+        tool_calls=[tc]
+    )
+    choice = types.SimpleNamespace(message=msg)
+    completion = types.SimpleNamespace(choices=[choice])
+
+    resp = L._parse_response(completion)
+    assert resp.parsed is None
+    assert resp.text is None
+    assert len(resp.tool_calls) == 1
+    assert resp.tool_calls[0].name == "my_tool"
+    assert resp.tool_calls[0].arguments == {"x": 1}
+
+
 @pytest.mark.skipif(not os.getenv("OPENAI_API_KEY"), reason="no OPENAI_API_KEY")
 def test_live_structured_answer():
     client = make_llm_client("openai", "gpt-5-mini")

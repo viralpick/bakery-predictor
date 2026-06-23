@@ -44,9 +44,9 @@ QUESTIONS: list[Question] = [
     Question("q_rank_top5", "매진 위험 상위 5개 품목은?", "ranking", "rank_stockout_risk", {"k": 5}),
     Question("q_waste", "이 기간 이 매장의 폐기(capacity-sold) 수량 합계는?",
              "numeric", "waste_cost", {}),
-    Question("q_diff_weekend", "주말일 때와 아닐 때 일 판매량 평균 차이는?",
+    Question("q_diff_weekend", "주말일 때 평균에서 평일일 때 평균을 뺀 일 판매량 차이는? (주말이 더 높으면 양수)",
              "numeric", "demand_diff_by_condition", {"condition_col": "is_weekend", "frame": "calendar"}),
-    Question("q_diff_rain", "비 올 때와 안 올 때 일 판매량 평균 차이는?",
+    Question("q_diff_rain", "비 올 때 평균에서 비 안 올 때 평균을 뺀 일 판매량 차이는? (비 올 때가 더 높으면 양수)",
              "numeric", "demand_diff_by_condition", {"condition_col": "is_rain", "frame": "weather"}),
     Question("q_order_top", "상위 품목의 권장 발주량은?", "decomposition", "explain_order", {}),
     Question("q_whatif_up", "수요 30, 발주 30에서 발주를 10 늘리면 기대비용은?",
@@ -54,9 +54,15 @@ QUESTIONS: list[Question] = [
     Question("q_whatif_down", "수요 30, 발주 40에서 발주를 -10 줄이면 기대비용은?",
              "numeric", "what_if", {"demand_point": 30.0, "base_order": 40.0, "delta_order": -10.0}),
     Question("q_rank_top1", "매진 위험이 가장 높은 1개 품목은?", "ranking", "rank_stockout_risk", {"k": 1}),
-    Question("q_diff_offday", "휴무일 여부에 따른 일 판매량 평균 차이는?",
+    Question("q_diff_offday", "휴무일일 때 평균에서 비휴무일일 때 평균을 뺀 일 판매량 차이는? (휴무일이 더 높으면 양수)",
              "numeric", "demand_diff_by_condition", {"condition_col": "is_off_day", "frame": "calendar"}),
 ]
+
+
+def resolve_eval_context(dataset: DailyDataset) -> tuple[str, tuple[str, str]]:
+    """The (store_id, period) the eval targets — same basis as build_gold's gold."""
+    store, period, _ = _ctx(dataset)
+    return store, period
 
 
 def build_gold(question: Question, dataset: DailyDataset) -> dict:
