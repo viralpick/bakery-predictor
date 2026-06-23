@@ -59,7 +59,7 @@ def _grade_ranking(pred, gold: list) -> bool:
 def _grade_qty(pred, gold: float) -> bool:
     if not isinstance(pred, (int, float)):
         return False
-    return abs(pred - gold) <= max(_QTY_TOL, abs(gold) * 1e-3)
+    return abs(pred - gold) <= _QTY_TOL   # spec: exact match; 1e-6 covers float repr
 
 
 def summarize(results: list[QResult]) -> EvalReport:
