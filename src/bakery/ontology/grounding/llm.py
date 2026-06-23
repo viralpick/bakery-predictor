@@ -97,6 +97,12 @@ def _parse_response(completion) -> LLMResponse:
     calls = [ToolCall(id=tc.id, name=tc.function.name, arguments=json.loads(tc.function.arguments))
              for tc in (msg.tool_calls or [])]
     parsed = getattr(msg, "parsed", None)
+    # Fallback: if response_format is raw json_schema (not Pydantic), OpenAI puts JSON in .content
+    if parsed is None and msg.content:
+        try:
+            parsed = json.loads(msg.content)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
     return LLMResponse(text=msg.content, tool_calls=calls, parsed=parsed)
 
 
