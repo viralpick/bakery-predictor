@@ -28,7 +28,8 @@ OUTPUT_SCHEMAS: dict[str, dict] = {
 _GROUNDED_SYS = (
     "You answer bakery ordering questions using ONLY the provided tools. "
     "Call the relevant tool(s), then return the final answer in the required JSON schema. "
-    "Never guess a number you can compute with a tool."
+    "Never guess a number you can compute with a tool. "
+    "도구가 계산해 반환한 수치(예: diff)는 그대로 사용하고 직접 다시 계산하지 마라."
 )
 
 
