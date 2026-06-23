@@ -59,6 +59,12 @@ QUESTIONS: list[Question] = [
 ]
 
 
+def resolve_eval_context(dataset: DailyDataset) -> tuple[str, tuple[str, str]]:
+    """The (store_id, period) the eval targets — same basis as build_gold's gold."""
+    store, period, _ = _ctx(dataset)
+    return store, period
+
+
 def build_gold(question: Question, dataset: DailyDataset) -> dict:
     store, period, top_item = _ctx(dataset)
     k = question.fn_kwargs
