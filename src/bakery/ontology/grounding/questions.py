@@ -30,7 +30,7 @@ class Question:
 def _ctx(dataset: DailyDataset):
     """Resolve a stable (store, period, top_item) from the dataset."""
     daily = dataset.daily
-    store = daily["store_id"].iloc[0]
+    store = sorted(dataset.daily["store_id"].unique())[0]
     dd = pd.to_datetime(daily.loc[daily["store_id"] == store, "date"])
     period = (str(dd.min().date()), str(dd.max().date()))
     sub = daily[daily["store_id"] == store]
@@ -39,7 +39,7 @@ def _ctx(dataset: DailyDataset):
 
 
 QUESTIONS: list[Question] = [
-    Question("q_rank_top3", "광교에서 매진 위험이 가장 높은 상위 3개 품목은?",
+    Question("q_rank_top3", "이 매장에서 매진 위험이 가장 높은 상위 3개 품목은?",
              "ranking", "rank_stockout_risk", {"k": 3}),
     Question("q_rank_top5", "매진 위험 상위 5개 품목은?", "ranking", "rank_stockout_risk", {"k": 5}),
     Question("q_waste", "이 기간 이 매장의 폐기(capacity-sold) 수량 합계는?",
@@ -66,9 +66,16 @@ def build_gold(question: Question, dataset: DailyDataset) -> dict:
         ranked = fn.rank_stockout_risk(dataset.daily, store, period, k["k"])
         return {"top_items": list(ranked["item_id"])}
     if question.source_fn == "waste_cost":
-        return {"answer_value": float(fn.waste_cost(dataset.daily, store, period)["waste_cost"])}
+        value = float(fn.waste_cost(dataset.daily, store, period)["waste_cost"])
+        if not math.isfinite(value):
+            raise ValueError(f"non-finite gold for {question.id}: {value}")
+        return {"answer_value": value}
     if question.source_fn == "demand_diff_by_condition":
-        frame = dataset.calendar if k["frame"] == "calendar" else dataset.weather
+        frame_map = {"calendar": dataset.calendar, "weather": dataset.weather}
+        try:
+            frame = frame_map[k["frame"]]
+        except KeyError as exc:
+            raise KeyError(f"unknown frame for {question.id}: {k['frame']}") from exc
         out = fn.demand_diff_by_condition(dataset.daily, frame, store, k["condition_col"])
         value = float(out["diff"])
         if not math.isfinite(value):
@@ -82,5 +89,8 @@ def build_gold(question: Question, dataset: DailyDataset) -> dict:
         return {"order_qty": value}
     if question.source_fn == "what_if":
         r = fn.what_if(k["demand_point"], k["base_order"], k["delta_order"])
-        return {"answer_value": float(r.new_expected_cost)}
+        value = float(r.new_expected_cost)
+        if not math.isfinite(value):
+            raise ValueError(f"non-finite gold for {question.id}: {value}")
+        return {"answer_value": value}
     raise KeyError(question.source_fn)

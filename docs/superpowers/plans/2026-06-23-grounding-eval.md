@@ -952,21 +952,6 @@ from bakery.ontology.grounding.run import run_eval_with_client
 from bakery.ontology.grounding.llm import LLMResponse
 
 
-class AlwaysGroundedRight:
-    """Returns gold for grounded (via tools), wrong for rag-only — sanity of plumbing."""
-    def __init__(self, dataset):
-        from bakery.ontology.grounding.questions import QUESTIONS, build_gold
-        self._gold = {q.id: build_gold(q, dataset) for q in QUESTIONS}
-        self._current = None
-
-    def generate(self, messages, *, tools=None, output_schema=None):
-        # crude: when tools present, pretend we computed and return the matching gold
-        # (the test only checks plumbing produces a report, not real model behavior)
-        if tools:
-            return LLMResponse(text=None, tool_calls=[], parsed=self._answer)
-        return LLMResponse(text=None, tool_calls=[], parsed={})
-
-
 def test_run_eval_produces_report():
     dataset = load_dataset("synthetic")
     # minimal smoke: a fake that always returns empty answers → report still computes
