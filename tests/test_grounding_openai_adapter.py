@@ -20,7 +20,6 @@ def test_to_response_format_wraps_json_schema():
     assert "schema" in rf["json_schema"]
 
 
-@pytest.mark.skipif(not os.getenv("OPENAI_API_KEY"), reason="no OPENAI_API_KEY")
 def test_make_llm_client_openai():
     client = make_llm_client("openai", "gpt-5-mini")
     assert isinstance(client, L.OpenAIClient)

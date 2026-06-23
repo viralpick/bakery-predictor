@@ -8,6 +8,8 @@ without touching anything above this file.
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -62,9 +64,6 @@ class LLMClient(Protocol):
 # OpenAI Adapter (S3 provider-specific code)
 # ============================================================================
 
-import json
-import os
-
 
 def _to_openai_tools(tools: list[ToolSpec]) -> list[dict]:
     return [{"type": "function",
@@ -105,17 +104,24 @@ class OpenAIClient:
     """OpenAI adapter (gpt-5-mini). The only provider-specific code in S3."""
 
     def __init__(self, model: str = "gpt-5-mini", api_key: str | None = None):
-        from openai import OpenAI
-        self._client = OpenAI(api_key=api_key or os.getenv("OPENAI_API_KEY"))
         self._model = model
+        self._api_key = api_key
+        self._client = None
+
+    def _ensure_client(self):
+        if self._client is None:
+            from openai import OpenAI
+            self._client = OpenAI(api_key=self._api_key or os.getenv("OPENAI_API_KEY"))
+        return self._client
 
     def generate(self, messages, *, tools=None, output_schema=None) -> LLMResponse:
+        client = self._ensure_client()
         kwargs: dict = {"model": self._model, "messages": _to_openai_messages(messages)}
         if tools:
             kwargs["tools"] = _to_openai_tools(tools)
         if output_schema:
             kwargs["response_format"] = _to_response_format(output_schema)
-        completion = self._client.chat.completions.parse(**kwargs)
+        completion = client.chat.completions.parse(**kwargs)
         return _parse_response(completion)
 
 
