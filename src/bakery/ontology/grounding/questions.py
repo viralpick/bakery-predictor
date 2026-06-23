@@ -8,6 +8,7 @@ through tool calls, while the rag-only arm must guess.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -69,10 +70,16 @@ def build_gold(question: Question, dataset: DailyDataset) -> dict:
     if question.source_fn == "demand_diff_by_condition":
         frame = dataset.calendar if k["frame"] == "calendar" else dataset.weather
         out = fn.demand_diff_by_condition(dataset.daily, frame, store, k["condition_col"])
-        return {"answer_value": float(out["diff"])}
+        value = float(out["diff"])
+        if not math.isfinite(value):
+            raise ValueError(f"non-finite gold for {question.id}: {value}")
+        return {"answer_value": value}
     if question.source_fn == "explain_order":
         lin = fn.explain_order(dataset.daily, store, top_item, period)
-        return {"order_qty": float(lin["contribution"].sum())}
+        value = float(lin["contribution"].sum())
+        if not math.isfinite(value):
+            raise ValueError(f"non-finite gold for {question.id}: {value}")
+        return {"order_qty": value}
     if question.source_fn == "what_if":
         r = fn.what_if(k["demand_point"], k["base_order"], k["delta_order"])
         return {"answer_value": float(r.new_expected_cost)}
