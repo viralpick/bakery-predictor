@@ -20,6 +20,7 @@ dependencies = [
     "pyproj>=3.7.2",
     "openpyxl>=3.1.5",
     "plotly>=6.7.0",
+    "openai>=2.43.0",
 ]
 
 [project.scripts]

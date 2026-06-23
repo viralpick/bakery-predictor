@@ -56,3 +56,70 @@ class LLMClient(Protocol):
         tools: list[ToolSpec] | None = None,
         output_schema: dict | None = None,
     ) -> LLMResponse: ...
+
+
+# ============================================================================
+# OpenAI Adapter (S3 provider-specific code)
+# ============================================================================
+
+import json
+import os
+
+
+def _to_openai_tools(tools: list[ToolSpec]) -> list[dict]:
+    return [{"type": "function",
+             "function": {"name": t.name, "description": t.description,
+                          "parameters": t.parameters, "strict": True}}
+            for t in tools]
+
+
+def _to_response_format(schema: dict) -> dict:
+    return {"type": "json_schema",
+            "json_schema": {"name": "answer", "schema": schema, "strict": True}}
+
+
+def _to_openai_messages(messages: list[Message]) -> list[dict]:
+    out = []
+    for m in messages:
+        if m.role == "assistant" and m.tool_calls:
+            out.append({"role": "assistant", "content": m.content,
+                        "tool_calls": [{"id": c.id, "type": "function",
+                                        "function": {"name": c.name, "arguments": json.dumps(c.arguments)}}
+                                       for c in m.tool_calls]})
+        elif m.role == "tool":
+            out.append({"role": "tool", "tool_call_id": m.tool_call_id, "content": m.content})
+        else:
+            out.append({"role": m.role, "content": m.content})
+    return out
+
+
+def _parse_response(completion) -> LLMResponse:
+    msg = completion.choices[0].message
+    calls = [ToolCall(id=tc.id, name=tc.function.name, arguments=json.loads(tc.function.arguments))
+             for tc in (msg.tool_calls or [])]
+    parsed = getattr(msg, "parsed", None)
+    return LLMResponse(text=msg.content, tool_calls=calls, parsed=parsed)
+
+
+class OpenAIClient:
+    """OpenAI adapter (gpt-5-mini). The only provider-specific code in S3."""
+
+    def __init__(self, model: str = "gpt-5-mini", api_key: str | None = None):
+        from openai import OpenAI
+        self._client = OpenAI(api_key=api_key or os.getenv("OPENAI_API_KEY"))
+        self._model = model
+
+    def generate(self, messages, *, tools=None, output_schema=None) -> LLMResponse:
+        kwargs: dict = {"model": self._model, "messages": _to_openai_messages(messages)}
+        if tools:
+            kwargs["tools"] = _to_openai_tools(tools)
+        if output_schema:
+            kwargs["response_format"] = _to_response_format(output_schema)
+        completion = self._client.chat.completions.parse(**kwargs)
+        return _parse_response(completion)
+
+
+def make_llm_client(provider: str, model: str, **kw) -> LLMClient:
+    if provider == "openai":
+        return OpenAIClient(model=model, **kw)
+    raise ValueError(f"unknown provider: {provider} (anthropic adapter: add when 발급)")
