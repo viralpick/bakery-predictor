@@ -1158,5 +1158,29 @@ def cmd_ingest_forecast() -> None:
         console.print("[yellow]warning[/] no forecast rows returned — check API status / region codes")
 
 
+@app.command("grounding-eval")
+def cmd_grounding_eval(
+    provider: str = "openai",
+    model: str = "gpt-5-mini",
+    source: str = "synthetic",
+) -> None:
+    """v7 그라운딩 eval: grounded arm vs RAG-only arm delta 측정.
+
+    두 arm 모두 동일한 모델(provider/model)을 사용해 공정하게 비교한다.
+    --source synthetic 이면 시연용 (실데이터 없이 실행 가능).
+    """
+    from .ontology.grounding.run import run_eval
+
+    report = run_eval(provider=provider, model=model, source=source)
+    console.print(f"[bold]grounded_accuracy[/] {report.grounded_accuracy:.3f}")
+    console.print(f"[bold]rag_accuracy[/]      {report.rag_accuracy:.3f}")
+    console.print(f"[bold]delta[/]             {report.delta:+.3f}")
+    console.print(
+        "[yellow]synthetic 시연 (measured on synthetic, not real data)[/]"
+        if source == "synthetic"
+        else f"[cyan]source={source}[/]"
+    )
+
+
 if __name__ == "__main__":
     app()
