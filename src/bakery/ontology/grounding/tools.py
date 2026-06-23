@@ -36,7 +36,12 @@ TOOL_SPECS: list[ToolSpec] = [
               "required": ["store_id", "period"], "additionalProperties": False}),
     ToolSpec("demand_diff_by_condition", "Mean daily sales when a 0/1 condition is on vs off.",
              {"type": "object", "properties": {
-                 "store_id": {"type": "string"}, "condition_col": {"type": "string"},
+                 "store_id": {"type": "string"},
+                 "condition_col": {
+                     "type": "string",
+                     "enum": ["is_weekend", "is_off_day", "is_public_holiday", "is_rain", "is_snow"],
+                     "description": "0/1 flag column. calendar frame: is_weekend, is_off_day, is_public_holiday. weather frame: is_rain, is_snow. Pick the one matching the question (휴무일→is_off_day, 주말→is_weekend, 비→is_rain)."
+                 },
                  "frame": {"type": "string", "enum": ["calendar", "weather"]}},
               "required": ["store_id", "condition_col", "frame"], "additionalProperties": False}),
 ]
