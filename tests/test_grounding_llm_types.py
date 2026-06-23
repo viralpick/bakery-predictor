@@ -1,9 +1,15 @@
+import dataclasses
+
+import pytest
+
 from bakery.ontology.grounding.llm import ToolSpec, ToolCall, Message, LLMResponse
 
 def test_toolspec_is_frozen_dataclass():
     t = ToolSpec(name="f", description="d", parameters={"type": "object", "properties": {}})
     assert t.name == "f"
     assert t.parameters["type"] == "object"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        t.name = "changed"
 
 def test_message_defaults():
     m = Message(role="user", content="hi")
