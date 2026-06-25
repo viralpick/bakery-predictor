@@ -72,3 +72,50 @@ def test_toggle_off_auto_approves():
     assert r.valid_as_of == T0           # auto-confirmed at propose time
     with pytest.raises(ValueError):      # already APPROVED → cannot re-approve
         s.approve(r.record_id, "alice", approved_at=T1)
+
+
+def test_confirmed_as_of_filters_by_valid_as_of():
+    s = _store()
+    # r1: approved at T1 (<= cutoff)
+    r1 = s.propose_order("store_A", "item_1", "2026-06-15", 100.0, proposed_at=T0)
+    s.approve(r1.record_id, "alice", approved_at=T1)
+    # r2: approved LATER than cutoff
+    r2 = s.propose_order("store_A", "item_2", "2026-06-15", 50.0, proposed_at=T0)
+    s.approve(r2.record_id, "alice", approved_at="2026-06-20T09:00:00")
+    # r3: still PENDING
+    s.propose_order("store_A", "item_3", "2026-06-15", 30.0, proposed_at=T0)
+    # r4: REJECTED
+    r4 = s.propose_order("store_A", "item_4", "2026-06-15", 10.0, proposed_at=T0)
+    s.reject(r4.record_id, "alice")
+
+    cutoff = "2026-06-15T00:00:00"
+    confirmed = s.confirmed_as_of(cutoff)
+    ids = {r.record_id for r in confirmed}
+    assert ids == {r1.record_id}        # only r1: APPROVED and valid_as_of <= cutoff
+
+
+def test_to_frame_has_all_records_and_override():
+    s = _store()
+    r = s.propose_order("store_A", "item_1", "2026-06-15", 100.0, proposed_at=T0)
+    s.approve(r.record_id, "alice", approved_at=T1, approved_qty=80.0)
+    df = s.to_frame()
+    assert len(df) == 1
+    assert "override" in df.columns
+    assert df.iloc[0]["override"] == -20.0
+    assert df.iloc[0]["status"] == APPROVED
+
+
+def test_parquet_round_trip(tmp_path):
+    s = _store()
+    r = s.propose_order("store_A", "item_1", "2026-06-15", 100.0, proposed_at=T0)
+    s.approve(r.record_id, "alice", approved_at=T1, approved_qty=80.0)
+    s.propose_order("store_A", "item_2", "2026-06-15", 50.0, proposed_at=T0)  # PENDING
+    path = tmp_path / "wb.parquet"
+    s.to_parquet(path)
+    loaded = WritebackStore.from_parquet(path)
+    assert {r.record_id for r in loaded.records} == {r_.record_id for r_ in s.records}
+    by_id = {r_.record_id: r_ for r_ in loaded.records}
+    assert by_id["r1"].approved_qty == 80.0
+    assert by_id["r1"].valid_as_of == T1
+    assert by_id["r2"].status == PENDING
+    assert by_id["r2"].approved_qty is None

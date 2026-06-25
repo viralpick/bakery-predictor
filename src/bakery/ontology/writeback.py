@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+import pandas as pd
+
 PENDING = "PENDING"
 APPROVED = "APPROVED"
 REJECTED = "REJECTED"
@@ -97,3 +99,47 @@ class WritebackStore:
         new = replace(rec, status=REJECTED, approver=approver)
         self._records[i] = new
         return new
+
+    def confirmed_as_of(self, cutoff: str) -> list[OrderRecord]:
+        """APPROVED records confirmed at or before cutoff (ISO lexicographic).
+
+        Reproduces the order state that was confirmed as of a point in time —
+        the basis for honest prospective evaluation (no retroactive edits).
+        """
+        return [r for r in self._records
+                if r.status == APPROVED and r.valid_as_of is not None
+                and r.valid_as_of <= cutoff]
+
+    def to_frame(self) -> pd.DataFrame:
+        cols = ["record_id", "store_id", "item_id", "date", "proposed_qty",
+                "proposed_at", "status", "approved_qty", "approver", "valid_as_of"]
+        rows = []
+        for r in self._records:
+            row = {c: getattr(r, c) for c in cols}
+            row["override"] = r.override
+            rows.append(row)
+        return pd.DataFrame(rows, columns=[*cols, "override"])
+
+    def to_parquet(self, path) -> None:
+        # override is a derived column; drop before persisting (recomputed on load)
+        self.to_frame().drop(columns=["override"]).to_parquet(path, index=False)
+
+    @classmethod
+    def from_parquet(cls, path) -> "WritebackStore":
+        df = pd.read_parquet(path)
+        store = cls()
+        for row in df.itertuples(index=False):
+            d = row._asdict()
+            aq = d["approved_qty"]
+            store._records.append(OrderRecord(
+                record_id=str(d["record_id"]), store_id=str(d["store_id"]),
+                item_id=str(d["item_id"]), date=str(d["date"]),
+                proposed_qty=float(d["proposed_qty"]), proposed_at=str(d["proposed_at"]),
+                status=str(d["status"]),
+                approved_qty=None if pd.isna(aq) else float(aq),
+                approver=None if pd.isna(d["approver"]) else str(d["approver"]),
+                valid_as_of=None if pd.isna(d["valid_as_of"]) else str(d["valid_as_of"]),
+            ))
+        # keep _seq past the loaded ids so new proposes don't collide
+        store._seq = len(store._records)
+        return store

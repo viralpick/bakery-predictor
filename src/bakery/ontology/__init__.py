@@ -24,6 +24,7 @@ from .schema import (
     OntologyLink,
     OntologyObject,
 )
+from .writeback import OrderRecord, WritebackStore
 
 __all__ = [
     "BAKERY_ONTOLOGY", "Ontology", "OntologyObject", "OntologyField",
@@ -31,4 +32,5 @@ __all__ = [
     "FUNCTION_REGISTRY", "OntologyFunctionSpec", "WhatIfResult",
     "rank_stockout_risk", "explain_order", "what_if", "waste_cost",
     "demand_diff_by_condition",
+    "OrderRecord", "WritebackStore",
 ]
