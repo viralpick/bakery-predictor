@@ -140,6 +140,7 @@ class WritebackStore:
                 approver=None if pd.isna(d["approver"]) else str(d["approver"]),
                 valid_as_of=None if pd.isna(d["valid_as_of"]) else str(d["valid_as_of"]),
             ))
-        # keep _seq past the loaded ids so new proposes don't collide
-        store._seq = len(store._records)
+        # advance _seq past the highest loaded id so new proposes never collide
+        seqs = [int(r.record_id[1:]) for r in store._records if r.record_id[1:].isdigit()]
+        store._seq = max(seqs, default=0)
         return store

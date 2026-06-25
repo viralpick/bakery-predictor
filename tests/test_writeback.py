@@ -119,3 +119,17 @@ def test_parquet_round_trip(tmp_path):
     assert by_id["r1"].valid_as_of == T1
     assert by_id["r2"].status == PENDING
     assert by_id["r2"].approved_qty is None
+
+
+def test_propose_after_load_no_id_collision(tmp_path):
+    s = _store()
+    r1 = s.propose_order("store_A", "item_1", "2026-06-15", 100.0, proposed_at=T0)
+    s.approve(r1.record_id, "alice", approved_at=T1)
+    s.propose_order("store_A", "item_2", "2026-06-15", 50.0, proposed_at=T0)  # r2
+    path = tmp_path / "wb.parquet"
+    s.to_parquet(path)
+    loaded = WritebackStore.from_parquet(path)
+    existing = {r.record_id for r in loaded.records}
+    new = loaded.propose_order("store_A", "item_3", "2026-06-15", 30.0, proposed_at=T0)
+    assert new.record_id not in existing       # no collision
+    assert new.record_id == "r3"               # continues the sequence
