@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .constants import DECOMPOSITION, NUMERIC, RANKING
 from .questions import Question
 
 _QTY_TOL = 1e-6   # decomposition order qty is rounded; tiny float slack
@@ -33,11 +34,11 @@ class EvalReport:
 def grade(question: Question, answer: dict, gold: dict) -> bool:
     if not isinstance(answer, dict):
         return False
-    if question.grader_type == "numeric":
+    if question.grader_type == NUMERIC:
         return _grade_numeric(answer.get("answer_value"), gold["answer_value"], question.tolerance)
-    if question.grader_type == "ranking":
+    if question.grader_type == RANKING:
         return _grade_ranking(answer.get("top_items"), gold["top_items"])
-    if question.grader_type == "decomposition":
+    if question.grader_type == DECOMPOSITION:
         return _grade_qty(answer.get("order_qty"), gold["order_qty"])
     raise KeyError(question.grader_type)
 

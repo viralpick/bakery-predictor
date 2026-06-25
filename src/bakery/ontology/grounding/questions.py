@@ -15,6 +15,7 @@ import pandas as pd
 
 from .. import functions as fn
 from ...data.loader import DailyDataset
+from .constants import CALENDAR, DECOMPOSITION, NUMERIC, RANKING, WEATHER
 
 
 @dataclass(frozen=True)
@@ -40,22 +41,22 @@ def _ctx(dataset: DailyDataset):
 
 QUESTIONS: list[Question] = [
     Question("q_rank_top3", "이 매장에서 매진 위험이 가장 높은 상위 3개 품목은?",
-             "ranking", "rank_stockout_risk", {"k": 3}),
-    Question("q_rank_top5", "매진 위험 상위 5개 품목은?", "ranking", "rank_stockout_risk", {"k": 5}),
+             RANKING, "rank_stockout_risk", {"k": 3}),
+    Question("q_rank_top5", "매진 위험 상위 5개 품목은?", RANKING, "rank_stockout_risk", {"k": 5}),
     Question("q_waste", "이 기간 이 매장의 폐기(capacity-sold) 수량 합계는?",
-             "numeric", "waste_cost", {}),
+             NUMERIC, "waste_cost", {}),
     Question("q_diff_weekend", "주말일 때 평균에서 평일일 때 평균을 뺀 일 판매량 차이는? (주말이 더 높으면 양수)",
-             "numeric", "demand_diff_by_condition", {"condition_col": "is_weekend", "frame": "calendar"}),
+             NUMERIC, "demand_diff_by_condition", {"condition_col": "is_weekend", "frame": CALENDAR}),
     Question("q_diff_rain", "비 올 때 평균에서 비 안 올 때 평균을 뺀 일 판매량 차이는? (비 올 때가 더 높으면 양수)",
-             "numeric", "demand_diff_by_condition", {"condition_col": "is_rain", "frame": "weather"}),
-    Question("q_order_top", "상위 품목의 권장 발주량은?", "decomposition", "explain_order", {}),
+             NUMERIC, "demand_diff_by_condition", {"condition_col": "is_rain", "frame": WEATHER}),
+    Question("q_order_top", "상위 품목의 권장 발주량은?", DECOMPOSITION, "explain_order", {}),
     Question("q_whatif_up", "수요 30, 발주 30에서 발주를 10 늘리면 기대비용은?",
-             "numeric", "what_if", {"demand_point": 30.0, "base_order": 30.0, "delta_order": 10.0}),
+             NUMERIC, "what_if", {"demand_point": 30.0, "base_order": 30.0, "delta_order": 10.0}),
     Question("q_whatif_down", "수요 30, 발주 40에서 발주를 -10 줄이면 기대비용은?",
-             "numeric", "what_if", {"demand_point": 30.0, "base_order": 40.0, "delta_order": -10.0}),
-    Question("q_rank_top1", "매진 위험이 가장 높은 1개 품목은?", "ranking", "rank_stockout_risk", {"k": 1}),
+             NUMERIC, "what_if", {"demand_point": 30.0, "base_order": 40.0, "delta_order": -10.0}),
+    Question("q_rank_top1", "매진 위험이 가장 높은 1개 품목은?", RANKING, "rank_stockout_risk", {"k": 1}),
     Question("q_diff_offday", "휴무일일 때 평균에서 비휴무일일 때 평균을 뺀 일 판매량 차이는? (휴무일이 더 높으면 양수)",
-             "numeric", "demand_diff_by_condition", {"condition_col": "is_off_day", "frame": "calendar"}),
+             NUMERIC, "demand_diff_by_condition", {"condition_col": "is_off_day", "frame": CALENDAR}),
 ]
 
 
@@ -77,7 +78,7 @@ def build_gold(question: Question, dataset: DailyDataset) -> dict:
             raise ValueError(f"non-finite gold for {question.id}: {value}")
         return {"answer_value": value}
     if question.source_fn == "demand_diff_by_condition":
-        frame_map = {"calendar": dataset.calendar, "weather": dataset.weather}
+        frame_map = {CALENDAR: dataset.calendar, WEATHER: dataset.weather}
         try:
             frame = frame_map[k["frame"]]
         except KeyError as exc:

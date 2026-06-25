@@ -12,6 +12,7 @@ import json
 
 from ...data.loader import DailyDataset
 from .. import functions as fn
+from .constants import CALENDAR, FRAMES
 from .llm import ToolCall, ToolResult, ToolSpec
 
 _PERIOD = {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2,
@@ -42,7 +43,7 @@ TOOL_SPECS: list[ToolSpec] = [
                      "enum": ["is_weekend", "is_off_day", "is_public_holiday", "is_rain", "is_snow"],
                      "description": "0/1 flag column. calendar frame: is_weekend, is_off_day, is_public_holiday. weather frame: is_rain, is_snow. Pick the one matching the question (휴무일→is_off_day, 주말→is_weekend, 비→is_rain)."
                  },
-                 "frame": {"type": "string", "enum": ["calendar", "weather"]}},
+                 "frame": {"type": "string", "enum": list(FRAMES)}},
               "required": ["store_id", "condition_col", "frame"], "additionalProperties": False}),
 ]
 
@@ -78,6 +79,6 @@ def _call(name: str, a: dict, dataset: DailyDataset):
     if name == "waste_cost":
         return fn.waste_cost(dataset.daily, a["store_id"], tuple(a["period"]))
     if name == "demand_diff_by_condition":
-        frame = dataset.calendar if a["frame"] == "calendar" else dataset.weather
+        frame = dataset.calendar if a["frame"] == CALENDAR else dataset.weather
         return fn.demand_diff_by_condition(dataset.daily, frame, a["store_id"], a["condition_col"])
     raise KeyError(f"unknown tool: {name}")
