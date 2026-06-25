@@ -13,6 +13,7 @@ so behavior is deterministic and testable.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import datetime
 
 import pandas as pd
 
@@ -101,14 +102,23 @@ class WritebackStore:
         return new
 
     def confirmed_as_of(self, cutoff: str) -> list[OrderRecord]:
-        """APPROVED records confirmed at or before cutoff (ISO lexicographic).
+        """APPROVED records confirmed at or before cutoff.
+
+        Both valid_as_of and cutoff are parsed with datetime.fromisoformat so a
+        date-only or differently-formatted cutoff still compares correctly
+        (this method guards prospective-eval integrity — silent mis-filtering
+        would defeat its purpose).
 
         Reproduces the order state that was confirmed as of a point in time —
         the basis for honest prospective evaluation (no retroactive edits).
         """
-        return [r for r in self._records
-                if r.status == APPROVED and r.valid_as_of is not None
-                and r.valid_as_of <= cutoff]
+        cutoff_dt = datetime.fromisoformat(cutoff)
+        out = []
+        for r in self._records:
+            if r.status == APPROVED and r.valid_as_of is not None:
+                if datetime.fromisoformat(r.valid_as_of) <= cutoff_dt:
+                    out.append(r)
+        return out
 
     def to_frame(self) -> pd.DataFrame:
         cols = ["record_id", "store_id", "item_id", "date", "proposed_qty",

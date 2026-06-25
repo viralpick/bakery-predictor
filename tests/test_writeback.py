@@ -94,6 +94,17 @@ def test_confirmed_as_of_filters_by_valid_as_of():
     assert ids == {r1.record_id}        # only r1: APPROVED and valid_as_of <= cutoff
 
 
+def test_confirmed_as_of_accepts_date_only_cutoff():
+    s = _store()
+    early = s.propose_order("store_A", "item_1", "2026-06-20", 100.0, proposed_at=T0)
+    s.approve(early.record_id, "alice", approved_at="2026-06-14T10:00:00")   # before 6/15
+    late = s.propose_order("store_A", "item_2", "2026-06-20", 50.0, proposed_at=T0)
+    s.approve(late.record_id, "alice", approved_at="2026-06-16T10:00:00")    # after 6/15
+    confirmed = s.confirmed_as_of("2026-06-15")          # date-only cutoff = 6/15 midnight
+    ids = {r.record_id for r in confirmed}
+    assert ids == {early.record_id}                       # only the 6/14 one
+
+
 def test_to_frame_has_all_records_and_override():
     s = _store()
     r = s.propose_order("store_A", "item_1", "2026-06-15", 100.0, proposed_at=T0)
