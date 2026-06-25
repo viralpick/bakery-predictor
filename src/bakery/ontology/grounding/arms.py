@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from ..schema import BAKERY_ONTOLOGY
 from ...data.loader import DailyDataset
+from .constants import DECOMPOSITION, NUMERIC, RANKING
 from .llm import LLMClient, Message
 from .questions import Question, resolve_eval_context
 from .tools import TOOL_SPECS, dispatch
@@ -17,12 +18,12 @@ from .tools import TOOL_SPECS, dispatch
 MAX_TOOL_TURNS = 6
 
 OUTPUT_SCHEMAS: dict[str, dict] = {
-    "numeric": {"type": "object", "properties": {"answer_value": {"type": "number"}},
-                "required": ["answer_value"], "additionalProperties": False},
-    "ranking": {"type": "object", "properties": {"top_items": {"type": "array", "items": {"type": "string"}}},
-                "required": ["top_items"], "additionalProperties": False},
-    "decomposition": {"type": "object", "properties": {"order_qty": {"type": "number"}},
-                      "required": ["order_qty"], "additionalProperties": False},
+    NUMERIC: {"type": "object", "properties": {"answer_value": {"type": "number"}},
+              "required": ["answer_value"], "additionalProperties": False},
+    RANKING: {"type": "object", "properties": {"top_items": {"type": "array", "items": {"type": "string"}}},
+              "required": ["top_items"], "additionalProperties": False},
+    DECOMPOSITION: {"type": "object", "properties": {"order_qty": {"type": "number"}},
+                    "required": ["order_qty"], "additionalProperties": False},
 }
 
 _GROUNDED_SYS = (
