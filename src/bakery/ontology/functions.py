@@ -29,6 +29,7 @@ from ..decision import (
     build_recommendation,
     simulate_item_risk,
 )
+from .writeback import WritebackStore
 
 DEMAND_PROXY_COL = "potential_demand"
 CONDITION_ON, CONDITION_OFF = 1, 0   # 0/1 flag values for demand_diff_by_condition
@@ -175,6 +176,7 @@ class OntologyFunctionSpec:
     params: tuple[str, ...]
     returns: str
     impl: Callable
+    side: str = "read"          # "read" | "write" — write는 LLM 도구 surface 제외
 
 
 # The stable API surface the grounded agent enumerates and calls (S3 consumes this).
@@ -194,4 +196,12 @@ FUNCTION_REGISTRY: dict[str, OntologyFunctionSpec] = {
     "demand_diff_by_condition": OntologyFunctionSpec(
         "demand_diff_by_condition", "Mean daily sales when a condition is on vs off.",
         ("store_id", "condition_col"), "{mean_on, mean_off, diff}", demand_diff_by_condition),
+    "propose_order": OntologyFunctionSpec(
+        "propose_order", "Write a PENDING order recommendation (human-approval-gated).",
+        ("store_id", "item_id", "date", "proposed_qty"), "OrderRecord",
+        WritebackStore.propose_order, side="write"),
+    "commit_order": OntologyFunctionSpec(
+        "commit_order", "Commit a PENDING order (approve, optionally correcting qty).",
+        ("record_id", "approver", "approved_qty"), "OrderRecord",
+        WritebackStore.approve, side="write"),
 }

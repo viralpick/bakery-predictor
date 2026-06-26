@@ -71,3 +71,53 @@ def run_rag_only(client: LLMClient, question: Question, dataset: DailyDataset) -
     messages = [Message(role="system", content=_RAG_SYS),
                 Message(role="user", content=f"{_context_line(dataset)}\n\n{question.text}")]
     return client.generate(messages, output_schema=schema).parsed or {}
+
+
+PROPOSAL_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "proposals": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "item_id": {"type": "string"},
+                    "qty": {"type": "number"},
+                    "rationale": {"type": "string"},
+                },
+                "required": ["item_id", "qty", "rationale"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["proposals"],
+    "additionalProperties": False,
+}
+
+_RECOMMEND_SYS = (
+    "You are a bakery ordering agent. Use ONLY the provided tools to assess each "
+    "item's stockout risk and waste cost for the given store and period, then propose "
+    "order quantities for the items that need attention. You MAY adjust a tool's "
+    "suggested order_qty using judgment about context the model cannot see (events, "
+    "promotions, operator experience) — explain any adjustment in the rationale. "
+    "Return proposals in the required JSON schema. "
+    "도구가 반환한 수치를 근거로 삼되, 모델이 모르는 맥락이 있으면 수량을 조정하고 rationale에 이유를 적어라."
+)
+
+
+def recommend_orders(client: LLMClient, dataset: DailyDataset,
+                     store_id: str, period: tuple[str, str]) -> list[dict]:
+    """Grounded agent proposes orders (read-only tools). Returns proposal dicts."""
+    ctx = (f"분석 대상 — 매장(store_id): {store_id}, 기간: {period[0]} ~ {period[1]}. "
+           f"도구를 호출할 때 이 store_id와 period=[{period[0]}, {period[1]}]를 사용하라.")
+    messages = [Message(role="system", content=_RECOMMEND_SYS),
+                Message(role="user", content=f"{ctx}\n\n발주 추천을 제안하라.")]
+    for _ in range(MAX_TOOL_TURNS):
+        resp = client.generate(messages, tools=TOOL_SPECS, output_schema=PROPOSAL_SCHEMA)
+        if not resp.tool_calls:
+            return (resp.parsed or {}).get("proposals", [])
+        messages.append(Message(role="assistant", tool_calls=resp.tool_calls))
+        for call in resp.tool_calls:
+            result = dispatch(call, dataset)
+            messages.append(Message(role="tool", content=result.content, tool_call_id=result.call_id))
+    return (client.generate(messages, output_schema=PROPOSAL_SCHEMA).parsed or {}).get("proposals", [])
