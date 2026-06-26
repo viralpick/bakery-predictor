@@ -92,6 +92,7 @@ def test_function_registry_impls_match_module():
     assert FUNCTION_REGISTRY["what_if"].impl is what_if
     assert set(FUNCTION_REGISTRY) == {
         "rank_stockout_risk", "explain_order", "what_if", "waste_cost", "demand_diff_by_condition",
+        "propose_order", "commit_order",
     }
 
 
@@ -99,3 +100,22 @@ def test_empty_period_raises(dataset):
     store_id = dataset.daily["store_id"].iloc[0]
     with pytest.raises(ValueError, match="no rows"):
         rank_stockout_risk(dataset.daily, store_id, ("1900-01-01", "1900-01-02"))
+
+
+def test_function_spec_defaults_to_read_side():
+    from bakery.ontology.functions import FUNCTION_REGISTRY
+    assert FUNCTION_REGISTRY["rank_stockout_risk"].side == "read"
+    # 기존 5개 read 함수 전부 read
+    read_names = {n for n, s in FUNCTION_REGISTRY.items() if s.side == "read"}
+    assert {"rank_stockout_risk", "explain_order", "what_if",
+            "waste_cost", "demand_diff_by_condition"} <= read_names
+
+
+def test_write_functions_registered_with_write_side():
+    from bakery.ontology.functions import FUNCTION_REGISTRY
+    from bakery.ontology.writeback import WritebackStore
+    assert FUNCTION_REGISTRY["propose_order"].side == "write"
+    assert FUNCTION_REGISTRY["commit_order"].side == "write"
+    # impl이 실제 WritebackStore 메서드를 가리킨다
+    assert FUNCTION_REGISTRY["propose_order"].impl is WritebackStore.propose_order
+    assert FUNCTION_REGISTRY["commit_order"].impl is WritebackStore.approve
