@@ -137,3 +137,24 @@ def test_closed_loop_rejects_autonomous_store():
     with pytest.raises(ValueError):
         run_closed_loop(None, None, "S", ("2024-01-01", "2024-01-07"),
                         wb, auto_approve, now="2024-01-01T09:00:00")
+
+
+# ---------------------------------------------------------------------------
+# Task 5: CLI registration + _select_gate_policy tests
+# ---------------------------------------------------------------------------
+
+
+def test_cli_registers_closed_loop_command():
+    from bakery.cli import app
+    names = {c.name for c in app.registered_commands}
+    assert "closed-loop" in names
+
+
+def test_select_policy_maps_names():
+    from bakery.cli import _select_gate_policy
+    from bakery.ontology.loop import auto_approve, approve_as_proposed
+    assert _select_gate_policy("auto") is auto_approve
+    assert _select_gate_policy("human") is approve_as_proposed
+    import pytest
+    with pytest.raises(ValueError):
+        _select_gate_policy("bogus")

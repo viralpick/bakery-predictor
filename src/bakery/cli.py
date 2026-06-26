@@ -1182,5 +1182,58 @@ def cmd_grounding_eval(
     )
 
 
+
+
+def _select_gate_policy(policy: str):
+    from .ontology.loop import auto_approve, approve_as_proposed
+    if policy == "auto":
+        return auto_approve
+    if policy == "human":
+        return approve_as_proposed
+    raise ValueError(f"unknown policy: {policy} (auto|human)")
+
+
+@app.command("closed-loop")
+def cmd_closed_loop(
+    store: str,
+    period: str,                        # "YYYY-MM-DD,YYYY-MM-DD"
+    policy: str = "human",              # auto(frontier) | human(rubber-stamp)
+    source: str = "synthetic",
+    provider: str = "openai",
+    model: str = "gpt-5-mini",
+    now: str = "",                      # ISO; 비면 period start의 09:00
+    out: str = "",                      # parquet 경로(옵션)
+) -> None:
+    """v7 하류 closed-loop: grounded 추천 → 사람 게이트 → writeback commit.
+
+    추천은 read 도구만 쓰는 grounded 에이전트가 한다(쓰기는 게이트 통과 후 결정론 코드).
+    --source synthetic 이면 시연용. closed-loop은 메커니즘 시연이며 정확도 주장이 아니다.
+    """
+    from .data.loader import load_dataset
+    from .ontology.grounding.llm import make_llm_client
+    from .ontology.loop import run_closed_loop
+    from .ontology.writeback import WritebackStore
+
+    start, end = (s.strip() for s in period.split(","))
+    stamp = now or f"{start}T09:00:00"
+    gate = _select_gate_policy(policy)
+    client = make_llm_client(provider, model)
+    dataset = load_dataset(source)
+    wb = WritebackStore(require_approval=True)
+    recs = run_closed_loop(client, dataset, store, (start, end), wb, gate, now=stamp)
+
+    console.print(f"[bold]closed-loop[/] store={store} period={start}~{end} policy={policy}")
+    for r in recs:
+        console.print(f"  {r.item_id}: proposed={r.proposed_qty} → "
+                      f"{r.status} qty={r.approved_qty} by={r.approver}")
+    if not recs:
+        console.print("[yellow]no valid proposals[/]")
+    if out:
+        wb.to_parquet(out)
+        console.print(f"[green]wrote[/] {out} ({len(wb.records)} records)")
+    console.print(
+        "[yellow]synthetic 메커니즘 시연 (mechanism demo, not accuracy)[/]"
+        if source == "synthetic" else f"[cyan]source={source}[/]")
+
 if __name__ == "__main__":
     app()
