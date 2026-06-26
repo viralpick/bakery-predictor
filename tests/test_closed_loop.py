@@ -1,7 +1,51 @@
+import pytest
+
 from bakery.ontology.loop import (
     APPROVE, OrderProposal, GateDecision,
     auto_approve, approve_as_proposed, human_correct,
 )
+from bakery.data.loader import load_dataset
+from bakery.ontology.grounding.llm import LLMResponse, ToolCall
+from bakery.ontology.grounding import arms
+
+
+@pytest.fixture(scope="module")
+def dataset():
+    return load_dataset("synthetic")
+
+
+class RecommendFakeLLM:
+    """1st call (tools present): emits a rank_stockout_risk tool call.
+    2nd call: returns the structured proposals."""
+    def __init__(self, store_id, period, proposals):
+        self._tc = ToolCall(id="c1", name="rank_stockout_risk",
+                            arguments={"store_id": store_id, "period": list(period), "k": 3})
+        self._proposals = proposals
+        self.calls = 0
+
+    def generate(self, messages, *, tools=None, output_schema=None):
+        self.calls += 1
+        if tools and self.calls == 1:
+            return LLMResponse(text=None, tool_calls=[self._tc], parsed=None)
+        return LLMResponse(text=None, tool_calls=[], parsed={"proposals": self._proposals})
+
+
+def test_recommend_orders_returns_proposal_dicts(dataset):
+    store = dataset.daily["store_id"].iloc[0]
+    period = ("2024-01-01", "2024-01-07")
+    proposals = [{"item_id": "P1", "qty": 12.0, "rationale": "high risk"}]
+    fake = RecommendFakeLLM(store, period, proposals)
+    out = arms.recommend_orders(fake, dataset, store, period)
+    assert fake.calls == 2                 # tool turn + proposal turn
+    assert out == proposals
+
+
+def test_recommend_orders_empty_when_no_proposals(dataset):
+    store = dataset.daily["store_id"].iloc[0]
+    period = ("2024-01-01", "2024-01-07")
+    fake = RecommendFakeLLM(store, period, [])
+    out = arms.recommend_orders(fake, dataset, store, period)
+    assert out == []
 
 
 def test_auto_approve_takes_proposal_as_is():
