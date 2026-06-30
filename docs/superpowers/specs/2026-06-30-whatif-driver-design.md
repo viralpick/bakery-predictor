@@ -16,6 +16,16 @@ closed-loop의 **상류 레버**를 구현한다 (하류 = S5 발주량 변경).
 ### D2. forecast 국소 도입 (전면 교체 아님)
 `what_if_driver` 안에서만 before/after를 `model.predict`로 계산한다. 기존 5개 read 함수(rank_stockout_risk 등)의 `demand_point`은 **proxy(potential_demand) 그대로 유지**. 이유: S1~S5 회귀 리스크 0, before/after가 같은 모델이라 델타 공정, forecast wiring이 이 함수의 컴포넌트로 흡수돼 별도 sub-project 불필요.
 
+### D2-1. feature_set = "v2" (target = potential_demand) — 절대규칙 #2 준수
+모델은 `GlobalLGBM(feature_set="v2")`를 쓴다. 이유: **v2/v3만 target=potential_demand**(v0/v1=sold_units). 품절일 `sold_units`는 검열된 값이라 이를 demand로 stockout 위험 시뮬레이터에 넣으면 고수요일 위험을 체계적으로 과소평가한다(절대규칙 #2 위반). v2는 calendar+weather 드라이버를 포함하고, **cannibalization feature는 `GlobalLGBM._build_features`가 내부 계산**(carried sold_units/is_stockout)하므로 입력 프레임은 v1과 동일한 calendar+weather enriched 프레임이면 된다(외부데이터 불필요).
+
+### D2-2. 입력 feature 프레임 조립 (forecast wiring 핵심)
+ontology `DailyDataset`은 daily/calendar/weather를 분리 보관하나 `GlobalLGBM`은 단일 병합 프레임을 요구한다. 따라서 fit/predict 전에 cli의 검증된 조립을 재사용한다:
+```python
+enriched = add_weather_features(add_calendar_features(daily, calendar), weather)
+```
+daily는 이미 `potential_demand`/`sold_units`/`is_stockout` 컬럼 보유(loader). 드라이버 컬럼(is_rain/is_snow/is_weekend/is_off_day/is_public_holiday)은 add_calendar/weather가 추가. predict는 calendar/weather feature를 프레임에서 그대로 사용하고 lag/rolling은 history에서 재계산하므로, **드라이버 컬럼 override가 예측에 반영**되고 lag/rolling은 불변(leakage 안전).
+
 ### D3. ceteris paribus 재예측 + 복수 드라이버
 before/after는 **같은 fitted 모델 + 드라이버 컬럼만 차이**. 나머지 feature(lag/rolling 등)는 기존 period row 값을 재사용(새 계산 없음 → leakage 안전). 델타 = 순수 드라이버 민감도.
 - **복수 드라이버 동시 변경 지원** (`driver_overrides: dict[str, float]`). LightGBM 트리가 상호작용을 학습하므로 복합 시나리오("비 오는 휴일")의 효과가 자동 반영된다 — 팔란티어 Scenario의 정통(여러 가정 동시). 단일 드라이버는 dict 1원소 특수 케이스.
@@ -34,7 +44,7 @@ before/after는 **같은 fitted 모델 + 드라이버 컬럼만 차이**. 나머
 
 ```
 what_if_driver(daily, store_id, item_id, period, driver_overrides, *, base_order, train_cutoff, ...)
-  1. model = _fit_demand_model(daily, train_cutoff, feature_set="v1")   # cutoff 이전만, 1회 캐시, seed 고정
+  1. model = _fit_demand_model(daily, train_cutoff, feature_set="v2")   # cutoff 이전만, 1회 캐시, seed 고정
   2. base_row  = period의 (store_id, item_id) feature row(들)            # 실측 드라이버
   3. before_demand = _predict_demand(model, base_row)
   4. pert_row  = base_row 복사 후 driver_overrides 적용                 # 드라이버 컬럼만 변경
@@ -52,7 +62,7 @@ what_if_driver(daily, store_id, item_id, period, driver_overrides, *, base_order
 | 컴포넌트 | 책임 |
 |---|---|
 | `WhatIfDriverResult` (frozen) | store_id, item_id, driver_overrides, before/after_demand, demand_delta, before/after_p_stockout, before/after_expected_cost, out_of_support, propagation_path |
-| `what_if_driver(daily, store_id, item_id, period, driver_overrides, *, base_order, feature_set="v1", train_cutoff, risk=RiskParams())` | 오케스트레이션(위 1~8). 반환 WhatIfDriverResult |
+| `what_if_driver(daily, store_id, item_id, period, driver_overrides, *, base_order, feature_set="v2", train_cutoff, risk=RiskParams())` | 오케스트레이션(위 1~8). 반환 WhatIfDriverResult |
 | `_fit_demand_model(daily, train_cutoff, feature_set)` | cutoff 이전 데이터로 GlobalLGBM fit, seed 고정, (cutoff, feature_set) 키로 캐시 |
 | `_predict_demand(model, row)` | feature row predict → demand float (period 다중 row면 합 또는 평균; 기존 `_item_demand_points` 집계와 일치) |
 | `_count_support(daily, store_id, driver_overrides)` | 해당 store에서 perturb 조합과 일치하는 과거 row 수 |
