@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from ..decision import RiskParams, simulate_item_risk
 from ..features.calendar_features import add_calendar_features
 from ..features.weather_features import add_weather_features
 from ..models.lightgbm_regressor import GlobalLGBM
@@ -97,3 +98,31 @@ def _period_item_rows(enriched: pd.DataFrame, store_id: str, item_id: str,
 def _predict_demand(model: GlobalLGBM, target: pd.DataFrame) -> float:
     """Mean predicted demand over the target rows (matches _item_demand_points mean)."""
     return float(model.predict(target).mean())
+
+
+def what_if_driver(daily, calendar, weather, store_id, item_id, period,
+                   driver_overrides, *, base_order, train_cutoff,
+                   feature_set: str = "v2", risk: RiskParams = RiskParams()) -> WhatIfDriverResult:
+    """Upstream Scenario lever: perturb driver(s) → re-forecast demand → propagate
+    to stockout risk/cost. Read-only. before/after share one fitted model; only the
+    driver columns differ (ceteris paribus). train_cutoff is caller-injected (leakage)."""
+    _validate_drivers(driver_overrides)
+    enriched = _build_enriched(daily, calendar, weather)
+    model = _fit_demand_model(enriched, train_cutoff, feature_set)
+    base_rows = _period_item_rows(enriched, store_id, item_id, period)
+    before_demand = _predict_demand(model, base_rows)
+    pert_rows = base_rows.copy()
+    for col, val in driver_overrides.items():
+        pert_rows[col] = val
+    after_demand = _predict_demand(model, pert_rows)
+    before = simulate_item_risk(before_demand, base_order, risk)
+    after = simulate_item_risk(after_demand, base_order, risk)
+    return WhatIfDriverResult(
+        store_id=store_id, item_id=item_id, driver_overrides=dict(driver_overrides),
+        before_demand=before_demand, after_demand=after_demand,
+        demand_delta=after_demand - before_demand,
+        before_p_stockout=before.p_stockout, after_p_stockout=after.p_stockout,
+        before_expected_cost=before.expected_cost, after_expected_cost=after.expected_cost,
+        out_of_support=_count_support(enriched, store_id, driver_overrides) == 0,
+        propagation_path=_propagation_path(driver_overrides),
+    )

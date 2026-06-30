@@ -8,6 +8,7 @@ from bakery.data.loader import load_dataset
 from bakery.ontology.scenario import (
     _build_enriched, _fit_demand_model, _period_item_rows, _predict_demand,
 )
+from bakery.ontology import scenario as sc
 
 
 @pytest.fixture(scope="module")
@@ -105,3 +106,46 @@ def test_result_is_frozen():
                            ("dailysales_observed_on_weather", "item_sold_as_dailysales"))
     with pytest.raises(Exception):
         r.before_demand = 1.0
+
+
+class _StubModel:
+    """Demand responds to is_rain: 10 baseline, −3 when is_rain==1. Deterministic."""
+    def predict(self, target):
+        rain = float(target["is_rain"].iloc[0]) if "is_rain" in target.columns else 0.0
+        return pd.Series([10.0 - 3.0 * rain] * len(target))
+
+
+def test_what_if_driver_propagates_demand_to_risk(dataset, monkeypatch):
+    monkeypatch.setattr(sc, "_fit_demand_model", lambda *a, **k: _StubModel())
+    enriched = sc._build_enriched(dataset.daily, dataset.calendar, dataset.weather)
+    cutoff, period = _cutoff_and_period(enriched)
+    store = enriched["store_id"].iloc[0]
+    item = enriched.loc[enriched["store_id"] == store, "item_id"].iloc[0]
+    res = sc.what_if_driver(dataset.daily, dataset.calendar, dataset.weather,
+                            store, item, period, {"is_rain": 1}, base_order=10.0,
+                            train_cutoff=cutoff)
+    assert res.before_demand == 10.0 and res.after_demand == 7.0
+    assert res.demand_delta == -3.0
+    # demand fell → stockout risk should not rise
+    assert res.after_p_stockout <= res.before_p_stockout
+    assert res.propagation_path == ("dailysales_observed_on_weather", "item_sold_as_dailysales")
+
+
+def test_what_if_driver_out_of_support_flag(dataset, monkeypatch):
+    monkeypatch.setattr(sc, "_fit_demand_model", lambda *a, **k: _StubModel())
+    enriched = sc._build_enriched(dataset.daily, dataset.calendar, dataset.weather)
+    cutoff, period = _cutoff_and_period(enriched)
+    store = enriched["store_id"].iloc[0]
+    item = enriched.loc[enriched["store_id"] == store, "item_id"].iloc[0]
+    # impossible combo unlikely in history → out_of_support True
+    res = sc.what_if_driver(dataset.daily, dataset.calendar, dataset.weather,
+                            store, item, period, {"is_rain": 1, "is_snow": 1},
+                            base_order=10.0, train_cutoff=cutoff)
+    assert isinstance(res.out_of_support, bool)
+
+
+def test_what_if_driver_rejects_unknown_driver(dataset):
+    with pytest.raises(ValueError):
+        sc.what_if_driver(dataset.daily, dataset.calendar, dataset.weather,
+                          "A", "P1", ("2024-01-01", "2024-01-02"), {"is_sunny": 1},
+                          base_order=10.0, train_cutoff="2024-01-01")
