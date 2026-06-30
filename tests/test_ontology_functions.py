@@ -92,7 +92,7 @@ def test_function_registry_impls_match_module():
     assert FUNCTION_REGISTRY["what_if"].impl is what_if
     assert set(FUNCTION_REGISTRY) == {
         "rank_stockout_risk", "explain_order", "what_if", "waste_cost", "demand_diff_by_condition",
-        "propose_order", "commit_order",
+        "propose_order", "commit_order", "what_if_driver",
     }
 
 
@@ -119,3 +119,11 @@ def test_write_functions_registered_with_write_side():
     # impl이 실제 WritebackStore 메서드를 가리킨다
     assert FUNCTION_REGISTRY["propose_order"].impl is WritebackStore.propose_order
     assert FUNCTION_REGISTRY["commit_order"].impl is WritebackStore.approve
+
+
+def test_what_if_driver_registered_read_side():
+    from bakery.ontology.functions import FUNCTION_REGISTRY
+    from bakery.ontology import scenario
+    spec = FUNCTION_REGISTRY["what_if_driver"]
+    assert spec.side == "read"
+    assert spec.impl is scenario.what_if_driver

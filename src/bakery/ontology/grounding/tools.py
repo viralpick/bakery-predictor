@@ -12,6 +12,7 @@ import json
 
 from ...data.loader import DailyDataset
 from .. import functions as fn
+from .. import scenario
 from .constants import CALENDAR, FRAMES
 from .llm import ToolCall, ToolResult, ToolSpec
 
@@ -45,6 +46,21 @@ TOOL_SPECS: list[ToolSpec] = [
                  },
                  "frame": {"type": "string", "enum": list(FRAMES)}},
               "required": ["store_id", "condition_col", "frame"], "additionalProperties": False}),
+    ToolSpec("what_if_driver",
+             "Upstream Scenario lever: perturb weather/calendar driver(s) for a store/item over a period, "
+             "re-forecast demand, and report how stockout risk/cost change. Read-only.",
+             {"type": "object", "properties": {
+                 "store_id": {"type": "string"}, "item_id": {"type": "string"}, "period": _PERIOD,
+                 "driver_overrides": {
+                     "type": "object",
+                     "properties": {
+                         "is_public_holiday": {"type": "number"},
+                         "is_rain": {"type": "number"}, "is_snow": {"type": "number"}},
+                     "additionalProperties": False,
+                     "description": "Hypothetical 0/1 driver values to set. 공휴일=is_public_holiday, 비=is_rain, 눈=is_snow. (주말/휴무일은 모델에 닿지 않아 미지원.)"},
+                 "base_order": {"type": "number"}},
+              "required": ["store_id", "item_id", "period", "driver_overrides", "base_order"],
+              "additionalProperties": False}),
 ]
 
 
@@ -81,4 +97,9 @@ def _call(name: str, a: dict, dataset: DailyDataset):
     if name == "demand_diff_by_condition":
         frame = dataset.calendar if a["frame"] == CALENDAR else dataset.weather
         return fn.demand_diff_by_condition(dataset.daily, frame, a["store_id"], a["condition_col"])
+    if name == "what_if_driver":
+        return scenario.what_if_driver(
+            dataset.daily, dataset.calendar, dataset.weather,
+            a["store_id"], a["item_id"], tuple(a["period"]), a["driver_overrides"],
+            base_order=a["base_order"], train_cutoff=a["period"][0])
     raise KeyError(f"unknown tool: {name}")
