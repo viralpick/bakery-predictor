@@ -18,7 +18,7 @@ from ..features.weather_features import add_weather_features
 from ..models.lightgbm_regressor import GlobalLGBM
 
 WEATHER_DRIVERS = frozenset({"is_rain", "is_snow"})
-CALENDAR_DRIVERS = frozenset({"is_weekend", "is_off_day", "is_public_holiday"})
+CALENDAR_DRIVERS = frozenset({"is_public_holiday"})
 VALID_DRIVERS = WEATHER_DRIVERS | CALENDAR_DRIVERS
 
 _WEATHER_LINK = "dailysales_observed_on_weather"
@@ -70,19 +70,8 @@ def _count_support(enriched: pd.DataFrame, store_id: str, driver_overrides: dict
 
 def _build_enriched(daily: pd.DataFrame, calendar: pd.DataFrame,
                     weather: pd.DataFrame) -> pd.DataFrame:
-    """Merge the separate ontology frames into the single frame GlobalLGBM needs.
-
-    add_calendar_features passes through model features (is_public_holiday etc).
-    We also merge driver columns (is_weekend, is_off_day) from calendar so that
-    _count_support and what-if overrides work against all CALENDAR_DRIVERS.
-    """
-    base = add_weather_features(add_calendar_features(daily, calendar), weather)
-    driver_cols = [c for c in ("is_weekend", "is_off_day")
-                   if c in calendar.columns and c not in base.columns]
-    if driver_cols:
-        date_col = "date"
-        base = base.merge(calendar[[date_col, *driver_cols]], on=date_col, how="left")
-    return base
+    """Merge the separate ontology frames into the single frame GlobalLGBM needs."""
+    return add_weather_features(add_calendar_features(daily, calendar), weather)
 
 
 def _fit_demand_model(enriched: pd.DataFrame, train_cutoff: str,

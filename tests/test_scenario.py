@@ -24,7 +24,7 @@ def _cutoff_and_period(enriched):
 
 def test_build_enriched_has_driver_columns(dataset):
     enriched = _build_enriched(dataset.daily, dataset.calendar, dataset.weather)
-    for col in ["is_rain", "is_snow", "is_weekend", "is_off_day", "is_public_holiday"]:
+    for col in ["is_rain", "is_snow", "is_public_holiday"]:
         assert col in enriched.columns
 
 
@@ -64,7 +64,7 @@ def test_period_item_rows_empty_raises(dataset):
 
 
 def test_valid_drivers_membership():
-    assert VALID_DRIVERS == {"is_rain", "is_snow", "is_weekend", "is_off_day", "is_public_holiday"}
+    assert VALID_DRIVERS == {"is_rain", "is_snow", "is_public_holiday"}
 
 
 def test_validate_drivers_rejects_empty_and_unknown():
@@ -80,7 +80,7 @@ def test_propagation_path_by_driver_kind():
         "dailysales_observed_on_weather", "item_sold_as_dailysales")
     assert _propagation_path({"is_public_holiday": 1}) == (
         "dailysales_observed_on_calendar", "item_sold_as_dailysales")
-    assert _propagation_path({"is_rain": 1, "is_off_day": 1}) == (
+    assert _propagation_path({"is_rain": 1, "is_public_holiday": 1}) == (
         "dailysales_observed_on_weather", "dailysales_observed_on_calendar",
         "item_sold_as_dailysales")
 
@@ -89,14 +89,14 @@ def test_count_support_matches_store_and_overrides():
     df = pd.DataFrame({
         "store_id": ["A", "A", "A", "B"],
         "is_rain":  [1,   0,   1,   1],
-        "is_off_day": [1, 1,   0,   1],
+        "is_public_holiday": [1, 1, 0, 1],
     })
-    # store A, is_rain=1 & is_off_day=1 → only row 0
-    assert _count_support(df, "A", {"is_rain": 1, "is_off_day": 1}) == 1
+    # store A, is_rain=1 & is_public_holiday=1 → only row 0
+    assert _count_support(df, "A", {"is_rain": 1, "is_public_holiday": 1}) == 1
     # store A, is_rain=1 → rows 0,2
     assert _count_support(df, "A", {"is_rain": 1}) == 2
     # store A, combo never seen
-    assert _count_support(df, "A", {"is_rain": 0, "is_off_day": 0}) == 0
+    assert _count_support(df, "A", {"is_rain": 0, "is_public_holiday": 0}) == 0
 
 
 def test_result_is_frozen():
