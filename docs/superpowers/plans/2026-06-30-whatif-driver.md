@@ -32,7 +32,7 @@
 
 **Interfaces:**
 - Produces:
-  - `WEATHER_DRIVERS = frozenset({"is_rain", "is_snow"})`, `CALENDAR_DRIVERS = frozenset({"is_weekend", "is_off_day", "is_public_holiday"})`, `VALID_DRIVERS = WEATHER_DRIVERS | CALENDAR_DRIVERS`.
+  - `WEATHER_DRIVERS = frozenset({"is_rain", "is_snow"})`, `CALENDAR_DRIVERS = frozenset({"is_public_holiday"})`, `VALID_DRIVERS = WEATHER_DRIVERS | CALENDAR_DRIVERS`. (is_weekend/is_off_day는 모델에 닿지 않는 no-op이라 제외 — 설계 D2-3.)
   - `WhatIfDriverResult` (frozen): `store_id, item_id, driver_overrides: dict[str, float], before_demand: float, after_demand: float, demand_delta: float, before_p_stockout: float, after_p_stockout: float, before_expected_cost: float, after_expected_cost: float, out_of_support: bool, propagation_path: tuple[str, ...]`.
   - `_validate_drivers(driver_overrides: dict) -> None` — 빈 dict 또는 VALID_DRIVERS 외 키면 ValueError.
   - `_propagation_path(driver_overrides: dict) -> tuple[str, ...]` — weather 키 있으면 `"dailysales_observed_on_weather"`, calendar 키 있으면 `"dailysales_observed_on_calendar"`, 항상 끝에 `"item_sold_as_dailysales"`.
@@ -52,7 +52,7 @@ from bakery.ontology.scenario import (
 
 
 def test_valid_drivers_membership():
-    assert VALID_DRIVERS == {"is_rain", "is_snow", "is_weekend", "is_off_day", "is_public_holiday"}
+    assert VALID_DRIVERS == {"is_public_holiday", "is_rain", "is_snow"}
 
 
 def test_validate_drivers_rejects_empty_and_unknown():
@@ -68,7 +68,7 @@ def test_propagation_path_by_driver_kind():
         "dailysales_observed_on_weather", "item_sold_as_dailysales")
     assert _propagation_path({"is_public_holiday": 1}) == (
         "dailysales_observed_on_calendar", "item_sold_as_dailysales")
-    assert _propagation_path({"is_rain": 1, "is_off_day": 1}) == (
+    assert _propagation_path({"is_rain": 1, "is_public_holiday": 1}) == (
         "dailysales_observed_on_weather", "dailysales_observed_on_calendar",
         "item_sold_as_dailysales")
 
@@ -77,14 +77,14 @@ def test_count_support_matches_store_and_overrides():
     df = pd.DataFrame({
         "store_id": ["A", "A", "A", "B"],
         "is_rain":  [1,   0,   1,   1],
-        "is_off_day": [1, 1,   0,   1],
+        "is_public_holiday": [1, 1, 0, 1],
     })
-    # store A, is_rain=1 & is_off_day=1 → only row 0
-    assert _count_support(df, "A", {"is_rain": 1, "is_off_day": 1}) == 1
+    # store A, is_rain=1 & is_public_holiday=1 → only row 0
+    assert _count_support(df, "A", {"is_rain": 1, "is_public_holiday": 1}) == 1
     # store A, is_rain=1 → rows 0,2
     assert _count_support(df, "A", {"is_rain": 1}) == 2
     # store A, combo never seen
-    assert _count_support(df, "A", {"is_rain": 0, "is_off_day": 0}) == 0
+    assert _count_support(df, "A", {"is_rain": 0, "is_public_holiday": 0}) == 0
 
 
 def test_result_is_frozen():
@@ -121,7 +121,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 WEATHER_DRIVERS = frozenset({"is_rain", "is_snow"})
-CALENDAR_DRIVERS = frozenset({"is_weekend", "is_off_day", "is_public_holiday"})
+CALENDAR_DRIVERS = frozenset({"is_public_holiday"})
 VALID_DRIVERS = WEATHER_DRIVERS | CALENDAR_DRIVERS
 
 _WEATHER_LINK = "dailysales_observed_on_weather"
@@ -226,7 +226,7 @@ def _cutoff_and_period(enriched):
 
 def test_build_enriched_has_driver_columns(dataset):
     enriched = _build_enriched(dataset.daily, dataset.calendar, dataset.weather)
-    for col in ["is_rain", "is_snow", "is_weekend", "is_off_day", "is_public_holiday"]:
+    for col in ["is_rain", "is_snow", "is_public_holiday"]:
         assert col in enriched.columns
 
 
@@ -491,7 +491,7 @@ def test_what_if_driver_tool_spec_present():
     spec = next(t for t in TOOL_SPECS if t.name == "what_if_driver")
     props = spec.parameters["properties"]
     assert set(props["driver_overrides"]["properties"]) == {
-        "is_rain", "is_snow", "is_weekend", "is_off_day", "is_public_holiday"}
+        "is_public_holiday", "is_rain", "is_snow"}
 
 
 def test_dispatch_what_if_driver_serializes(dataset):
@@ -547,11 +547,10 @@ from . import scenario
                  "driver_overrides": {
                      "type": "object",
                      "properties": {
-                         "is_rain": {"type": "number"}, "is_snow": {"type": "number"},
-                         "is_weekend": {"type": "number"}, "is_off_day": {"type": "number"},
-                         "is_public_holiday": {"type": "number"}},
+                         "is_public_holiday": {"type": "number"},
+                         "is_rain": {"type": "number"}, "is_snow": {"type": "number"}},
                      "additionalProperties": False,
-                     "description": "Hypothetical 0/1 driver values to set. 휴무일=is_off_day, 주말=is_weekend, 공휴일=is_public_holiday, 비=is_rain, 눈=is_snow."},
+                     "description": "Hypothetical 0/1 driver values to set. 공휴일=is_public_holiday, 비=is_rain, 눈=is_snow. (주말/휴무일은 모델에 닿지 않아 미지원.)"},
                  "base_order": {"type": "number"}},
               "required": ["store_id", "item_id", "period", "driver_overrides", "base_order"],
               "additionalProperties": False}),

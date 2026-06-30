@@ -24,7 +24,15 @@ ontology `DailyDataset`은 daily/calendar/weather를 분리 보관하나 `Global
 ```python
 enriched = add_weather_features(add_calendar_features(daily, calendar), weather)
 ```
-daily는 이미 `potential_demand`/`sold_units`/`is_stockout` 컬럼 보유(loader). 드라이버 컬럼(is_rain/is_snow/is_weekend/is_off_day/is_public_holiday)은 add_calendar/weather가 추가. predict는 calendar/weather feature를 프레임에서 그대로 사용하고 lag/rolling은 history에서 재계산하므로, **드라이버 컬럼 override가 예측에 반영**되고 lag/rolling은 불변(leakage 안전).
+daily는 이미 `potential_demand`/`sold_units`/`is_stockout` 컬럼 보유(loader). 드라이버 컬럼은 add_calendar/weather가 추가. predict는 calendar/weather **passthrough** feature를 프레임에서 그대로 사용하고 lag/rolling은 history에서 재계산하므로, **passthrough 드라이버 컬럼 override가 예측에 반영**되고 lag/rolling은 불변(leakage 안전).
+
+### D2-3. perturbable 드라이버 = passthrough model feature 3개만 (경험적 검증)
+구현 중 실측: period row에서 드라이버를 뒤집고 v2 재예측 시 **override가 모델에 닿는 건 passthrough feature뿐**이다.
+- ✅ **`is_public_holiday`**(passthrough calendar, 강함) / **`is_rain`**·**`is_snow`**(passthrough weather, 약함) — override가 예측에 반영됨.
+- ❌ `is_weekend` — 날짜(dow)에서 feature 파이프라인이 **재계산**해 컬럼 override가 덮어써짐(구조적 no-op).
+- ❌ `is_off_day` — v2 모델 feature가 **아님**(build_numeric_columns v2에 없음).
+
+따라서 **`VALID_DRIVERS = {is_public_holiday, is_rain, is_snow}`**. is_weekend/is_off_day는 "아무것도 안 하는 레버"라 노출하지 않는다(정직성). "주말이라면" 시나리오는 dow 변경이 필요해 이 ceteris-paribus 컬럼-override 메커니즘으론 불가 → 범위 밖.
 
 ### D3. ceteris paribus 재예측 + 복수 드라이버
 before/after는 **같은 fitted 모델 + 드라이버 컬럼만 차이**. 나머지 feature(lag/rolling 등)는 기존 period row 값을 재사용(새 계산 없음 → leakage 안전). 델타 = 순수 드라이버 민감도.
@@ -66,11 +74,11 @@ what_if_driver(daily, store_id, item_id, period, driver_overrides, *, base_order
 | `_fit_demand_model(daily, train_cutoff, feature_set)` | cutoff 이전 데이터로 GlobalLGBM fit, seed 고정, (cutoff, feature_set) 키로 캐시 |
 | `_predict_demand(model, row)` | feature row predict → demand float (period 다중 row면 합 또는 평균; 기존 `_item_demand_points` 집계와 일치) |
 | `_count_support(daily, store_id, driver_overrides)` | 해당 store에서 perturb 조합과 일치하는 과거 row 수 |
-| `_propagation_path(driver_overrides)` | weather 드라이버(is_rain/is_snow)→`dailysales_observed_on_weather`→`item_sold_as_dailysales`; calendar(is_weekend/is_off_day/is_public_holiday)→`dailysales_observed_on_calendar`→`item_sold_as_dailysales` |
+| `_propagation_path(driver_overrides)` | weather 드라이버(is_rain/is_snow)→`dailysales_observed_on_weather`→`item_sold_as_dailysales`; calendar(is_public_holiday)→`dailysales_observed_on_calendar`→`item_sold_as_dailysales` |
 
 등록:
 - `FUNCTION_REGISTRY["what_if_driver"]` — `OntologyFunctionSpec(..., side="read")` (impl=scenario.what_if_driver)
-- `grounding/tools.py` TOOL_SPECS + dispatch — LLM 노출. `driver_overrides`는 object, 키 enum = `["is_weekend","is_off_day","is_public_holiday","is_rain","is_snow"]`, 값 number, `additionalProperties: false`. (demand_diff_by_condition의 enum 패턴 답습)
+- `grounding/tools.py` TOOL_SPECS + dispatch — LLM 노출. `driver_overrides`는 object, 키 = `["is_public_holiday","is_rain","is_snow"]`, 값 number, `additionalProperties: false`. (demand_diff_by_condition의 enum 패턴 답습)
 
 ## 데이터 흐름 (예시)
 
@@ -86,7 +94,7 @@ what_if_driver(daily, store_id, item_id, period, driver_overrides, *, base_order
 ## 에러 / 엣지
 
 - **빈 base_row** (period에 해당 (store,item) 없음) → ValueError (명확 실패; 조용한 빈 예측 금지).
-- **알 수 없는 driver 키** (5개 enum 외) → ValueError. (LLM 노출은 enum으로 강제되나 직접 호출 방어)
+- **알 수 없는 driver 키** (3개 enum 외) → ValueError. (LLM 노출은 enum으로 강제되나 직접 호출 방어)
 - **train_cutoff 이후 데이터 없음 / fit 불가** → ValueError.
 - **out_of_support=True**: 차단하지 않고 결과 반환 + 플래그 (외삽 정직 경고).
 
@@ -105,5 +113,6 @@ what_if_driver(daily, store_id, item_id, period, driver_overrides, *, base_order
 
 - **Scenario→commit closed-loop** (what_if_driver 결과 → S5 commit_order 발주 확정) — Stretch, 분리.
 - 드라이버 기여 분해 (개별 효과) — YAGNI.
+- **is_weekend "주말이라면" / is_off_day "휴무라면" 시나리오** — is_weekend는 날짜(dow) 파생이라 컬럼 override가 모델에 안 닿고, is_off_day는 v2 feature가 아님(D2-3). dow 변경 기반 시나리오는 별도 메커니즘 필요 → 범위 밖.
 - 비논리 조합 차단 로직 — out_of_support 플래그로 대체.
 - forecast 전면 교체 (proxy 폐기) — 국소 도입 유지 (D2).
