@@ -13,6 +13,10 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from ..features.calendar_features import add_calendar_features
+from ..features.weather_features import add_weather_features
+from ..models.lightgbm_regressor import GlobalLGBM
+
 WEATHER_DRIVERS = frozenset({"is_rain", "is_snow"})
 CALENDAR_DRIVERS = frozenset({"is_weekend", "is_off_day", "is_public_holiday"})
 VALID_DRIVERS = WEATHER_DRIVERS | CALENDAR_DRIVERS
@@ -62,3 +66,45 @@ def _count_support(enriched: pd.DataFrame, store_id: str, driver_overrides: dict
     for col, val in driver_overrides.items():
         mask &= sub[col] == val
     return int(mask.sum())
+
+
+def _build_enriched(daily: pd.DataFrame, calendar: pd.DataFrame,
+                    weather: pd.DataFrame) -> pd.DataFrame:
+    """Merge the separate ontology frames into the single frame GlobalLGBM needs.
+
+    add_calendar_features passes through model features (is_public_holiday etc).
+    We also merge driver columns (is_weekend, is_off_day) from calendar so that
+    _count_support and what-if overrides work against all CALENDAR_DRIVERS.
+    """
+    base = add_weather_features(add_calendar_features(daily, calendar), weather)
+    driver_cols = [c for c in ("is_weekend", "is_off_day")
+                   if c in calendar.columns and c not in base.columns]
+    if driver_cols:
+        date_col = "date"
+        base = base.merge(calendar[[date_col, *driver_cols]], on=date_col, how="left")
+    return base
+
+
+def _fit_demand_model(enriched: pd.DataFrame, train_cutoff: str,
+                      feature_set: str = "v2") -> GlobalLGBM:
+    """Fit on rows strictly before train_cutoff (leakage rule). Caller injects cutoff."""
+    train = enriched[pd.to_datetime(enriched["date"]) < pd.Timestamp(train_cutoff)]
+    if train.empty:
+        raise ValueError(f"no training rows before cutoff {train_cutoff}")
+    return GlobalLGBM(feature_set=feature_set).fit(train)
+
+
+def _period_item_rows(enriched: pd.DataFrame, store_id: str, item_id: str,
+                      period: tuple[str, str]) -> pd.DataFrame:
+    dates = pd.to_datetime(enriched["date"])
+    mask = ((enriched["store_id"] == store_id) & (enriched["item_id"] == item_id)
+            & (dates >= pd.Timestamp(period[0])) & (dates <= pd.Timestamp(period[1])))
+    rows = enriched.loc[mask]
+    if rows.empty:
+        raise ValueError(f"no rows for store={store_id} item={item_id} in {period}")
+    return rows
+
+
+def _predict_demand(model: GlobalLGBM, target: pd.DataFrame) -> float:
+    """Mean predicted demand over the target rows (matches _item_demand_points mean)."""
+    return float(model.predict(target).mean())
