@@ -29,6 +29,7 @@ from ..decision import (
     build_recommendation,
     simulate_item_risk,
 )
+from . import scenario
 from .writeback import WritebackStore
 
 DEMAND_PROXY_COL = "potential_demand"
@@ -204,4 +205,9 @@ FUNCTION_REGISTRY: dict[str, OntologyFunctionSpec] = {
         "commit_order", "Commit a PENDING order (approve, optionally correcting qty).",
         ("record_id", "approver", "approved_qty"), "OrderRecord",
         WritebackStore.approve, side="write"),
+    "what_if_driver": OntologyFunctionSpec(
+        "what_if_driver",
+        "Upstream lever: perturb weather/calendar driver(s), re-forecast demand, propagate to stockout risk/cost.",
+        ("store_id", "item_id", "period", "driver_overrides", "base_order"),
+        "WhatIfDriverResult", scenario.what_if_driver, side="read"),
 }
