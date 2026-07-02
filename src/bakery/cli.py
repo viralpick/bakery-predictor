@@ -1193,6 +1193,23 @@ def _select_gate_policy(policy: str):
     raise ValueError(f"unknown policy: {policy} (auto|human)")
 
 
+def _parse_period(period: str, now: str) -> tuple[str, str, str]:
+    """Split "start,end" and resolve the commit timestamp (default = start 09:00)."""
+    start, end = (s.strip() for s in period.split(","))
+    stamp = now or f"{start}T09:00:00"
+    return start, end, stamp
+
+
+def _write_and_label(wb: WritebackStore, out: str, source: str) -> None:
+    """Optionally persist the writeback store, then print the source/demo label."""
+    if out:
+        wb.to_parquet(out)
+        console.print(f"[green]wrote[/] {out} ({len(wb.records)} records)")
+    console.print(
+        "[yellow]synthetic 메커니즘 시연 (mechanism demo, not accuracy)[/]"
+        if source == "synthetic" else f"[cyan]source={source}[/]")
+
+
 @app.command("closed-loop")
 def cmd_closed_loop(
     store: str,
@@ -1214,8 +1231,7 @@ def cmd_closed_loop(
     from .ontology.loop import run_closed_loop
     from .ontology.writeback import WritebackStore
 
-    start, end = (s.strip() for s in period.split(","))
-    stamp = now or f"{start}T09:00:00"
+    start, end, stamp = _parse_period(period, now)
     gate = _select_gate_policy(policy)
     client = make_llm_client(provider, model)
     dataset = load_dataset(source)
@@ -1228,12 +1244,7 @@ def cmd_closed_loop(
                       f"{r.status} qty={r.approved_qty} by={r.approver}")
     if not recs:
         console.print("[yellow]no valid proposals[/]")
-    if out:
-        wb.to_parquet(out)
-        console.print(f"[green]wrote[/] {out} ({len(wb.records)} records)")
-    console.print(
-        "[yellow]synthetic 메커니즘 시연 (mechanism demo, not accuracy)[/]"
-        if source == "synthetic" else f"[cyan]source={source}[/]")
+    _write_and_label(wb, out, source)
 
 
 def _parse_drivers(spec: str) -> dict[str, float]:
@@ -1271,8 +1282,7 @@ def cmd_scenario_commit(
     from .ontology.loop import run_scenario_commit
     from .ontology.writeback import WritebackStore
 
-    start, end = (s.strip() for s in period.split(","))
-    stamp = now or f"{start}T09:00:00"
+    start, end, stamp = _parse_period(period, now)
     gate = _select_gate_policy(policy)
     driver_overrides = _parse_drivers(drivers)
     dataset = load_dataset(source)
@@ -1286,12 +1296,7 @@ def cmd_scenario_commit(
                   + ("  [yellow]out-of-support[/]" if w.out_of_support else ""))
     console.print(f"  order {res.base_order:.0f} → {res.committed.proposed_qty:.0f}  "
                   f"{res.committed.status} qty={res.committed.approved_qty} by={res.committed.approver}")
-    if out:
-        wb.to_parquet(out)
-        console.print(f"[green]wrote[/] {out} ({len(wb.records)} records)")
-    console.print(
-        "[yellow]synthetic 메커니즘 시연 (mechanism demo, not accuracy)[/]"
-        if source == "synthetic" else f"[cyan]source={source}[/]")
+    _write_and_label(wb, out, source)
 
 
 if __name__ == "__main__":
