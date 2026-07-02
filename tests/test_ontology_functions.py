@@ -13,6 +13,7 @@ from bakery.ontology.functions import (
     FUNCTION_REGISTRY,
     demand_diff_by_condition,
     explain_order,
+    rank_stockout_earliness,
     rank_stockout_risk,
     waste_cost,
     what_if,
@@ -91,7 +92,7 @@ def test_function_registry_impls_match_module():
     assert FUNCTION_REGISTRY["rank_stockout_risk"].impl is rank_stockout_risk
     assert FUNCTION_REGISTRY["what_if"].impl is what_if
     assert set(FUNCTION_REGISTRY) == {
-        "rank_stockout_risk", "explain_order", "what_if", "waste_cost", "demand_diff_by_condition",
+        "rank_stockout_risk", "rank_stockout_earliness", "explain_order", "what_if", "waste_cost", "demand_diff_by_condition",
         "propose_order", "commit_order", "what_if_driver",
     }
 
@@ -127,3 +128,63 @@ def test_what_if_driver_registered_read_side():
     spec = FUNCTION_REGISTRY["what_if_driver"]
     assert spec.side == "read"
     assert spec.impl is scenario.what_if_driver
+
+
+def _earliness_fixture() -> pd.DataFrame:
+    """2일 × 4품목 손계산 fixture. close_hour=22 기준:
+    early: (22-10 + 0)/2 = 6.0 / late: ((22-20)+(22-21))/2 = 1.5
+    afterclose: 23시 매진 → clamp 0 / never: 매진 없음 → 0
+    """
+    return pd.DataFrame({
+        "store_id": ["s1"] * 8,
+        "item_id": ["early", "early", "late", "late",
+                    "afterclose", "afterclose", "never", "never"],
+        "date": ["2026-01-01", "2026-01-02"] * 4,
+        "stockout_time": [
+            pd.Timestamp("2026-01-01 10:00"), pd.NaT,
+            pd.Timestamp("2026-01-01 20:00"), pd.Timestamp("2026-01-02 21:00"),
+            pd.Timestamp("2026-01-01 23:00"), pd.NaT,
+            pd.NaT, pd.NaT,
+        ],
+    })
+
+
+def test_rank_stockout_earliness_hand_calc():
+    ranked = rank_stockout_earliness(
+        _earliness_fixture(), "s1", ("2026-01-01", "2026-01-02"), k=4)
+    assert list(ranked.columns) == ["item_id", "lost_hours_per_day", "stockout_days", "days"]
+    # 동률(0.0)인 afterclose/never는 item_id 오름차순
+    assert list(ranked["item_id"]) == ["early", "late", "afterclose", "never"]
+    assert ranked["lost_hours_per_day"].tolist() == pytest.approx([6.0, 1.5, 0.0, 0.0])
+    assert ranked["stockout_days"].tolist() == [1, 2, 1, 0]
+    assert ranked["days"].tolist() == [2, 2, 2, 2]
+
+
+def test_rank_stockout_earliness_topk_cuts():
+    ranked = rank_stockout_earliness(
+        _earliness_fixture(), "s1", ("2026-01-01", "2026-01-02"), k=2)
+    assert list(ranked["item_id"]) == ["early", "late"]
+
+
+def test_rank_stockout_earliness_no_stockout_raises():
+    frame = _earliness_fixture()
+    frame["stockout_time"] = pd.NaT
+    with pytest.raises(ValueError, match="no stockouts"):
+        rank_stockout_earliness(frame, "s1", ("2026-01-01", "2026-01-02"), k=3)
+
+
+def test_rank_stockout_earliness_synthetic_smoke(dataset, store_period):
+    store_id, period = store_period
+    ranked = rank_stockout_earliness(dataset.daily, store_id, period, k=3)
+    assert len(ranked) == 3
+    assert ranked["lost_hours_per_day"].is_monotonic_decreasing
+    assert (ranked["lost_hours_per_day"] >= 0).all()
+    # 결정론: 두 번 호출 결과 동일
+    again = rank_stockout_earliness(dataset.daily, store_id, period, k=3)
+    assert list(ranked["item_id"]) == list(again["item_id"])
+
+
+def test_rank_stockout_earliness_registered_read_side():
+    spec = FUNCTION_REGISTRY["rank_stockout_earliness"]
+    assert spec.side == "read"
+    assert spec.impl is rank_stockout_earliness
