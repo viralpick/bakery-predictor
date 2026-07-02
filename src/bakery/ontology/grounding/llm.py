@@ -13,6 +13,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
+from ... import config  # noqa: F401 — importing config loads .env (provider keys)
+
 
 @dataclass(frozen=True)
 class ToolSpec:
@@ -146,8 +148,6 @@ class AzureOpenAIClient(OpenAIClient):
     AZURE_OPENAI_* env vars, loaded from .env via bakery.config)."""
 
     def __init__(self, model: str = "", api_key: str | None = None):
-        from ... import config  # noqa: F401 — importing config loads .env
-
         deployment = model or os.getenv("AZURE_OPENAI_DEPLOYMENT", "")
         super().__init__(model=deployment, api_key=api_key)
 
@@ -155,20 +155,20 @@ class AzureOpenAIClient(OpenAIClient):
         if self._client is None:
             from openai import AzureOpenAI
 
-            from ...config import require_env  # side effect: loads .env
-
+            if not self._model:
+                raise RuntimeError(
+                    "Azure deployment is not set. Pass model=... or set "
+                    "AZURE_OPENAI_DEPLOYMENT in .env.")
             self._client = AzureOpenAI(
-                api_key=self._api_key or require_env("AZURE_OPENAI_API_KEY"),
-                azure_endpoint=_normalize_azure_endpoint(require_env("AZURE_OPENAI_ENDPOINT")),
-                api_version=require_env("AZURE_OPENAI_API_VERSION"),
+                api_key=self._api_key or config.require_env("AZURE_OPENAI_API_KEY"),
+                azure_endpoint=_normalize_azure_endpoint(config.require_env("AZURE_OPENAI_ENDPOINT")),
+                api_version=config.require_env("AZURE_OPENAI_API_VERSION"),
             )
         return self._client
 
 
 def make_llm_client(provider: str, model: str, **kw) -> LLMClient:
     if provider == "auto":
-        from ... import config  # noqa: F401 — importing config loads .env
-
         provider = "azure" if os.getenv("AZURE_OPENAI_API_KEY") else "openai"
     if provider == "openai":
         return OpenAIClient(model=model, **kw)

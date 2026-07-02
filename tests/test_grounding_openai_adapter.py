@@ -122,3 +122,12 @@ def test_make_llm_client_auto_falls_back_to_openai(monkeypatch):
     client = make_llm_client("auto", "gpt-5-mini")
     assert isinstance(client, L.OpenAIClient)
     assert not isinstance(client, L.AzureOpenAIClient)
+
+
+def test_azure_missing_deployment_fails_fast(monkeypatch):
+    """deployment 빈 값이면 원격 400 대신 즉시 명확한 에러 (리뷰 반영)."""
+    monkeypatch.delenv("AZURE_OPENAI_DEPLOYMENT", raising=False)
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "k")
+    client = make_llm_client("azure", "")
+    with pytest.raises(RuntimeError, match="deployment"):
+        client._ensure_client()
