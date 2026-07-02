@@ -1,5 +1,6 @@
 """Grounding eval entry point. run_eval_with_client is key-free testable;
-run_eval wires the real provider client (needs OPENAI_API_KEY)."""
+run_eval wires the real provider client (needs OPENAI_API_KEY or AZURE_OPENAI_*;
+provider="auto" picks Azure when AZURE_OPENAI_API_KEY is set)."""
 
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ def run_eval_with_client(client: LLMClient, dataset: DailyDataset) -> EvalReport
     return summarize(results)
 
 
-def run_eval(provider: str = "openai", model: str = "gpt-5-mini",
+def run_eval(provider: str = "auto", model: str = "gpt-5-mini",
              source: str = "synthetic") -> EvalReport:
     client = make_llm_client(provider, model)
     return run_eval_with_client(client, load_dataset(source))

@@ -30,7 +30,7 @@ def require_env(name: str) -> str:
     if not val:
         raise RuntimeError(
             f"{name} is not set. Add it to {PROJECT_ROOT}/.env "
-            f"(see .env.example) or export it before running."
+            f"or export it before running."
         )
     return val
 

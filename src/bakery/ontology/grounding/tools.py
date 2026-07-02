@@ -53,11 +53,15 @@ TOOL_SPECS: list[ToolSpec] = [
                  "store_id": {"type": "string"}, "item_id": {"type": "string"}, "period": _PERIOD,
                  "driver_overrides": {
                      "type": "object",
+                     # strict:True requires every property key in `required`; optional
+                     # drivers are therefore nullable — send null to leave one unchanged.
                      "properties": {
-                         "is_public_holiday": {"type": "number"},
-                         "is_rain": {"type": "number"}, "is_snow": {"type": "number"}},
+                         "is_public_holiday": {"type": ["number", "null"]},
+                         "is_rain": {"type": ["number", "null"]},
+                         "is_snow": {"type": ["number", "null"]}},
+                     "required": ["is_public_holiday", "is_rain", "is_snow"],
                      "additionalProperties": False,
-                     "description": "Hypothetical 0/1 driver values to set. 공휴일=is_public_holiday, 비=is_rain, 눈=is_snow. (주말/휴무일은 모델에 닿지 않아 미지원.)"},
+                     "description": "Hypothetical 0/1 driver values to set; null = leave unchanged. 공휴일=is_public_holiday, 비=is_rain, 눈=is_snow. (주말/휴무일은 모델에 닿지 않아 미지원.)"},
                  "base_order": {"type": "number"}},
               "required": ["store_id", "item_id", "period", "driver_overrides", "base_order"],
               "additionalProperties": False}),
@@ -98,8 +102,10 @@ def _call(name: str, a: dict, dataset: DailyDataset):
         frame = dataset.calendar if a["frame"] == CALENDAR else dataset.weather
         return fn.demand_diff_by_condition(dataset.daily, frame, a["store_id"], a["condition_col"])
     if name == "what_if_driver":
+        # strict schema sends all drivers with null = "leave unchanged" — drop those
+        overrides = {k: v for k, v in a["driver_overrides"].items() if v is not None}
         return scenario.what_if_driver(
             dataset.daily, dataset.calendar, dataset.weather,
-            a["store_id"], a["item_id"], tuple(a["period"]), a["driver_overrides"],
+            a["store_id"], a["item_id"], tuple(a["period"]), overrides,
             base_order=a["base_order"], train_cutoff=a["period"][0])
     raise KeyError(f"unknown tool: {name}")

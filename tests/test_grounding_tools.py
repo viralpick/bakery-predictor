@@ -64,3 +64,38 @@ def test_dispatch_what_if_driver_serializes(dataset):
     result = dispatch(call, dataset)
     payload = json.loads(result.content)
     assert "demand_delta" in payload or "error" in payload   # real fit may be heavy; both shapes valid
+
+
+def test_what_if_driver_schema_is_strict_compatible():
+    """strict:True 규칙: nested object도 모든 property 키가 required에 있어야 한다.
+    (Azure live에서 400 invalid_function_parameters로 드러난 회귀 가드.)"""
+    from bakery.ontology.grounding.tools import TOOL_SPECS
+    spec = next(t for t in TOOL_SPECS if t.name == "what_if_driver")
+    overrides = spec.parameters["properties"]["driver_overrides"]
+    assert set(overrides["required"]) == set(overrides["properties"])
+    # optional 표현은 nullable 타입으로 — 모델이 안 바꿀 드라이버는 null을 보낸다
+    for prop in overrides["properties"].values():
+        assert "null" in prop["type"]
+
+
+def test_dispatch_what_if_driver_drops_null_overrides(dataset, monkeypatch):
+    """모델이 null로 보낸 드라이버는 override에서 제거하고 나머지만 전달한다."""
+    import json
+    from bakery.ontology import scenario
+    from bakery.ontology.grounding.llm import ToolCall
+    from bakery.ontology.grounding.tools import dispatch
+
+    captured = {}
+    def fake_wid(daily, calendar, weather, store_id, item_id, period,
+                 driver_overrides, *, base_order, train_cutoff, **kw):
+        captured["overrides"] = driver_overrides
+        return {"demand_delta": 0.0}
+    monkeypatch.setattr(scenario, "what_if_driver", fake_wid)
+
+    call = ToolCall(id="c1", name="what_if_driver", arguments={
+        "store_id": "S", "item_id": "I", "period": ["2024-01-01", "2024-01-02"],
+        "driver_overrides": {"is_rain": 1, "is_snow": None, "is_public_holiday": None},
+        "base_order": 10.0})
+    result = dispatch(call, dataset)
+    assert "error" not in json.loads(result.content)
+    assert captured["overrides"] == {"is_rain": 1}

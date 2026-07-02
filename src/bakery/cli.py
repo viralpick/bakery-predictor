@@ -1160,7 +1160,7 @@ def cmd_ingest_forecast() -> None:
 
 @app.command("grounding-eval")
 def cmd_grounding_eval(
-    provider: str = "openai",
+    provider: str = "auto",
     model: str = "gpt-5-mini",
     source: str = "synthetic",
 ) -> None:
@@ -1199,7 +1199,7 @@ def cmd_closed_loop(
     period: str,                        # "YYYY-MM-DD,YYYY-MM-DD"
     policy: str = "human",              # auto(frontier) | human(rubber-stamp)
     source: str = "synthetic",
-    provider: str = "openai",
+    provider: str = "auto",
     model: str = "gpt-5-mini",
     now: str = "",                      # ISO; 비면 period start의 09:00
     out: str = "",                      # parquet 경로(옵션)
