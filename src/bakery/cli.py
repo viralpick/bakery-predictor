@@ -1184,20 +1184,46 @@ def cmd_grounding_eval(
 
 
 
-def _select_gate_policy(policy: str):
+def _select_gate_policy(gate: str):
     from .ontology.loop import auto_approve, approve_as_proposed
-    if policy == "auto":
+    if gate == "auto":
         return auto_approve
-    if policy == "human":
+    if gate == "human":
         return approve_as_proposed
-    raise ValueError(f"unknown policy: {policy} (auto|human)")
+    raise ValueError(f"unknown gate: {gate} (auto|human)")
+
+
+def _parse_period(period: str, now: str) -> tuple[str, str, str]:
+    """Split "start,end" and resolve the commit timestamp (default = start 09:00)."""
+    start, end = (s.strip() for s in period.split(","))
+    stamp = now or f"{start}T09:00:00"
+    return start, end, stamp
+
+
+def _write_and_label(wb: WritebackStore, out: str, source: str) -> None:
+    """Optionally persist the writeback store, then print the source/demo label."""
+    if out:
+        wb.to_parquet(out)
+        console.print(f"[green]wrote[/] {out} ({len(wb.records)} records)")
+    console.print(
+        "[yellow]synthetic 메커니즘 시연 (mechanism demo, not accuracy)[/]"
+        if source == "synthetic" else f"[cyan]source={source}[/]")
+
+
+def _lever_warning(before_demand: float) -> str | None:
+    """Warn when the baseline re-forecast collapsed to 0 (unresolved lag features):
+    the driver lever then looks inert (before≈after≈0) though nothing actually moved."""
+    if before_demand <= 0:
+        return ("[yellow]⚠ before_demand=0 — 재예측 붕괴(unresolved lag). "
+                "레버가 무효처럼 보일 수 있음; 기간/품목 데이터 커버리지 확인.[/]")
+    return None
 
 
 @app.command("closed-loop")
 def cmd_closed_loop(
     store: str,
     period: str,                        # "YYYY-MM-DD,YYYY-MM-DD"
-    policy: str = "human",              # auto(frontier) | human(rubber-stamp)
+    gate: str = "human",               # auto(frontier) | human(rubber-stamp)
     source: str = "synthetic",
     provider: str = "auto",
     model: str = "gpt-5-mini",
@@ -1214,26 +1240,20 @@ def cmd_closed_loop(
     from .ontology.loop import run_closed_loop
     from .ontology.writeback import WritebackStore
 
-    start, end = (s.strip() for s in period.split(","))
-    stamp = now or f"{start}T09:00:00"
-    gate = _select_gate_policy(policy)
+    start, end, stamp = _parse_period(period, now)
+    gate_policy = _select_gate_policy(gate)
     client = make_llm_client(provider, model)
     dataset = load_dataset(source)
     wb = WritebackStore(require_approval=True)
-    recs = run_closed_loop(client, dataset, store, (start, end), wb, gate, now=stamp)
+    recs = run_closed_loop(client, dataset, store, (start, end), wb, gate_policy, now=stamp)
 
-    console.print(f"[bold]closed-loop[/] store={store} period={start}~{end} policy={policy}")
+    console.print(f"[bold]closed-loop[/] store={store} period={start}~{end} gate={gate}")
     for r in recs:
         console.print(f"  {r.item_id}: proposed={r.proposed_qty} → "
                       f"{r.status} qty={r.approved_qty} by={r.approver}")
     if not recs:
         console.print("[yellow]no valid proposals[/]")
-    if out:
-        wb.to_parquet(out)
-        console.print(f"[green]wrote[/] {out} ({len(wb.records)} records)")
-    console.print(
-        "[yellow]synthetic 메커니즘 시연 (mechanism demo, not accuracy)[/]"
-        if source == "synthetic" else f"[cyan]source={source}[/]")
+    _write_and_label(wb, out, source)
 
 
 def _parse_drivers(spec: str) -> dict[str, float]:
@@ -1257,7 +1277,7 @@ def cmd_scenario_commit(
     item: str,
     period: str,                        # "YYYY-MM-DD,YYYY-MM-DD"
     drivers: str,                       # "is_rain=1,is_snow=0"
-    policy: str = "human",              # auto(frontier) | human(rubber-stamp)
+    gate: str = "human",               # auto(frontier) | human(rubber-stamp)
     source: str = "synthetic",
     now: str = "",                      # ISO; 비면 period start의 09:00
     out: str = "",                      # parquet 경로(옵션)
@@ -1271,27 +1291,24 @@ def cmd_scenario_commit(
     from .ontology.loop import run_scenario_commit
     from .ontology.writeback import WritebackStore
 
-    start, end = (s.strip() for s in period.split(","))
-    stamp = now or f"{start}T09:00:00"
-    gate = _select_gate_policy(policy)
+    start, end, stamp = _parse_period(period, now)
+    gate_policy = _select_gate_policy(gate)
     driver_overrides = _parse_drivers(drivers)
     dataset = load_dataset(source)
     wb = WritebackStore(require_approval=True)
     res = run_scenario_commit(dataset, store, item, (start, end), driver_overrides,
-                              wb, gate, now=stamp, train_cutoff=start)
+                              wb, gate_policy, now=stamp, train_cutoff=start)
 
     w = res.whatif
     console.print(f"[bold]scenario-commit[/] store={store} item={item} drivers={driver_overrides}")
     console.print(f"  demand {w.before_demand:.1f} → {w.after_demand:.1f} (Δ{w.demand_delta:+.1f})"
                   + ("  [yellow]out-of-support[/]" if w.out_of_support else ""))
+    warn = _lever_warning(w.before_demand)
+    if warn:
+        console.print(warn)
     console.print(f"  order {res.base_order:.0f} → {res.committed.proposed_qty:.0f}  "
                   f"{res.committed.status} qty={res.committed.approved_qty} by={res.committed.approver}")
-    if out:
-        wb.to_parquet(out)
-        console.print(f"[green]wrote[/] {out} ({len(wb.records)} records)")
-    console.print(
-        "[yellow]synthetic 메커니즘 시연 (mechanism demo, not accuracy)[/]"
-        if source == "synthetic" else f"[cyan]source={source}[/]")
+    _write_and_label(wb, out, source)
 
 
 if __name__ == "__main__":
