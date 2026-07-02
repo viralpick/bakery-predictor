@@ -1184,13 +1184,13 @@ def cmd_grounding_eval(
 
 
 
-def _select_gate_policy(policy: str):
+def _select_gate_policy(gate: str):
     from .ontology.loop import auto_approve, approve_as_proposed
-    if policy == "auto":
+    if gate == "auto":
         return auto_approve
-    if policy == "human":
+    if gate == "human":
         return approve_as_proposed
-    raise ValueError(f"unknown policy: {policy} (auto|human)")
+    raise ValueError(f"unknown gate: {gate} (auto|human)")
 
 
 def _parse_period(period: str, now: str) -> tuple[str, str, str]:
@@ -1214,7 +1214,7 @@ def _write_and_label(wb: WritebackStore, out: str, source: str) -> None:
 def cmd_closed_loop(
     store: str,
     period: str,                        # "YYYY-MM-DD,YYYY-MM-DD"
-    policy: str = "human",              # auto(frontier) | human(rubber-stamp)
+    gate: str = "human",               # auto(frontier) | human(rubber-stamp)
     source: str = "synthetic",
     provider: str = "auto",
     model: str = "gpt-5-mini",
@@ -1232,13 +1232,13 @@ def cmd_closed_loop(
     from .ontology.writeback import WritebackStore
 
     start, end, stamp = _parse_period(period, now)
-    gate = _select_gate_policy(policy)
+    gate_policy = _select_gate_policy(gate)
     client = make_llm_client(provider, model)
     dataset = load_dataset(source)
     wb = WritebackStore(require_approval=True)
-    recs = run_closed_loop(client, dataset, store, (start, end), wb, gate, now=stamp)
+    recs = run_closed_loop(client, dataset, store, (start, end), wb, gate_policy, now=stamp)
 
-    console.print(f"[bold]closed-loop[/] store={store} period={start}~{end} policy={policy}")
+    console.print(f"[bold]closed-loop[/] store={store} period={start}~{end} gate={gate}")
     for r in recs:
         console.print(f"  {r.item_id}: proposed={r.proposed_qty} → "
                       f"{r.status} qty={r.approved_qty} by={r.approver}")
@@ -1268,7 +1268,7 @@ def cmd_scenario_commit(
     item: str,
     period: str,                        # "YYYY-MM-DD,YYYY-MM-DD"
     drivers: str,                       # "is_rain=1,is_snow=0"
-    policy: str = "human",              # auto(frontier) | human(rubber-stamp)
+    gate: str = "human",               # auto(frontier) | human(rubber-stamp)
     source: str = "synthetic",
     now: str = "",                      # ISO; 비면 period start의 09:00
     out: str = "",                      # parquet 경로(옵션)
@@ -1283,12 +1283,12 @@ def cmd_scenario_commit(
     from .ontology.writeback import WritebackStore
 
     start, end, stamp = _parse_period(period, now)
-    gate = _select_gate_policy(policy)
+    gate_policy = _select_gate_policy(gate)
     driver_overrides = _parse_drivers(drivers)
     dataset = load_dataset(source)
     wb = WritebackStore(require_approval=True)
     res = run_scenario_commit(dataset, store, item, (start, end), driver_overrides,
-                              wb, gate, now=stamp, train_cutoff=start)
+                              wb, gate_policy, now=stamp, train_cutoff=start)
 
     w = res.whatif
     console.print(f"[bold]scenario-commit[/] store={store} item={item} drivers={driver_overrides}")

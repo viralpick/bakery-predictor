@@ -49,7 +49,7 @@ run_scenario_commit(dataset, store_id, item_id, period, driver_overrides,
 |---|---|
 | `ScenarioCommitResult` (frozen) | `whatif: WhatIfDriverResult`, `base_order: float`, `committed: OrderRecord` |
 | `run_scenario_commit(dataset, store_id, item_id, period, driver_overrides, writeback, gate, *, now, train_cutoff, policy=PolicyParams(), risk=RiskParams()) -> ScenarioCommitResult` | 위 1~5 오케스트레이션 |
-| CLI `scenario-commit` (cli.py) | end-to-end 실행. 옵션 `--store --item --period "start,end" --drivers "is_rain=1,is_snow=1" --policy auto\|human --source --now --out`. `_select_gate_policy`(S5) 재사용. train_cutoff=period[0]. 결과(before/after demand, base/scenario order, 게이트 결과) 출력 + `--out` parquet |
+| CLI `scenario-commit` (cli.py) | end-to-end 실행. 옵션 `--store --item --period "start,end" --drivers "is_rain=1,is_snow=1" --gate auto\|human --source --now --out`. `_select_gate_policy`(S5) 재사용. train_cutoff=period[0]. 결과(before/after demand, base/scenario order, 게이트 결과) 출력 + `--out` parquet |
 
 신규 파일 없음. loop.py는 이미 scenario를 import하지 않으므로 `from . import scenario` 추가(단방향; scenario는 loop을 import 안 함 — 순환 없음).
 
@@ -57,7 +57,7 @@ run_scenario_commit(dataset, store_id, item_id, period, driver_overrides,
 
 ```
 $ uv run bakery scenario-commit --store 광교 --item P012 --period 2026-07-06,2026-07-12 \
-    --drivers "is_rain=1" --policy human
+    --drivers "is_rain=1" --gate human
 1. before_demand=45 → base_order=54 (apply_policy)
 2. what_if_driver(is_rain=1): after_demand=42 (비 오면 -3)
 3. scenario_order = apply_policy(42) = 50
