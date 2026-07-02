@@ -9,6 +9,7 @@ See docs/superpowers/specs/2026-06-30-whatif-driver-design.md.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import pandas as pd
@@ -17,6 +18,8 @@ from ..decision import PolicyParams, RiskParams, apply_policy, simulate_item_ris
 from ..features.calendar_features import add_calendar_features
 from ..features.weather_features import add_weather_features
 from ..models.lightgbm_regressor import GlobalLGBM
+
+log = logging.getLogger(__name__)
 
 WEATHER_DRIVERS = frozenset({"is_rain", "is_snow"})
 CALENDAR_DRIVERS = frozenset({"is_public_holiday"})
@@ -100,19 +103,10 @@ def _predict_demand(model: GlobalLGBM, target: pd.DataFrame) -> float:
     return float(model.predict(target).mean())
 
 
-def what_if_driver(daily, calendar, weather, store_id, item_id, period,
-                   driver_overrides, *, base_order: float | None = None, train_cutoff,
-                   feature_set: str = "v2", risk: RiskParams = RiskParams(),
-                   policy: PolicyParams = PolicyParams()) -> WhatIfDriverResult:
-    """Upstream Scenario lever: perturb driver(s) → re-forecast demand → propagate
-    to stockout risk/cost. Read-only. before/after share one fitted model; only the
-    driver columns differ (ceteris paribus). train_cutoff is caller-injected (leakage).
-    base_order=None derives the order internally via apply_policy(before_demand, policy)
-    — pass the same policy used downstream (e.g. run_scenario_commit) so the whatif
-    risk numbers stay consistent with the eventually committed order."""
-    _validate_drivers(driver_overrides)
-    enriched = _build_enriched(daily, calendar, weather)
-    model = _fit_demand_model(enriched, train_cutoff, feature_set)
+def _what_if_for_item(enriched, model, store_id, item_id, period, driver_overrides,
+                      *, base_order, risk, policy) -> WhatIfDriverResult:
+    """Per-item what-if on a pre-fitted model (batch shares one fit). Ceteris paribus:
+    only driver columns are overridden; lag/rolling recomputed from history."""
     base_rows = _period_item_rows(enriched, store_id, item_id, period)
     before_demand = _predict_demand(model, base_rows)
     if base_order is None:
@@ -132,3 +126,41 @@ def what_if_driver(daily, calendar, weather, store_id, item_id, period,
         out_of_support=_count_support(enriched, store_id, driver_overrides) == 0,
         propagation_path=_propagation_path(driver_overrides),
     )
+
+
+def what_if_driver(daily, calendar, weather, store_id, item_id, period,
+                   driver_overrides, *, base_order: float | None = None, train_cutoff,
+                   feature_set: str = "v2", risk: RiskParams = RiskParams(),
+                   policy: PolicyParams = PolicyParams()) -> WhatIfDriverResult:
+    """Upstream Scenario lever: perturb driver(s) → re-forecast demand → propagate
+    to stockout risk/cost. Read-only. before/after share one fitted model; only the
+    driver columns differ (ceteris paribus). train_cutoff is caller-injected (leakage).
+    base_order=None derives the order internally via apply_policy(before_demand, policy)
+    — pass the same policy used downstream (e.g. run_scenario_commit) so the whatif
+    risk numbers stay consistent with the eventually committed order."""
+    _validate_drivers(driver_overrides)
+    enriched = _build_enriched(daily, calendar, weather)
+    model = _fit_demand_model(enriched, train_cutoff, feature_set)
+    return _what_if_for_item(enriched, model, store_id, item_id, period,
+                             driver_overrides, base_order=base_order, risk=risk, policy=policy)
+
+
+def what_if_driver_batch(daily, calendar, weather, store_id, item_ids, period,
+                         driver_overrides, *, base_order: float | None = None,
+                         train_cutoff, feature_set: str = "v2",
+                         risk: RiskParams = RiskParams(),
+                         policy: PolicyParams = PolicyParams()) -> list[WhatIfDriverResult]:
+    """Multi-item what-if sharing ONE fit (fit is item-independent). Failing items
+    (e.g. no rows in period) are logged and skipped; only successes returned."""
+    _validate_drivers(driver_overrides)
+    enriched = _build_enriched(daily, calendar, weather)
+    model = _fit_demand_model(enriched, train_cutoff, feature_set)
+    out: list[WhatIfDriverResult] = []
+    for item_id in item_ids:
+        try:
+            out.append(_what_if_for_item(enriched, model, store_id, item_id, period,
+                                         driver_overrides, base_order=base_order,
+                                         risk=risk, policy=policy))
+        except Exception as exc:                     # per-item guard: keep the batch alive
+            log.warning("scenario batch: skip item %s (%s)", item_id, exc)
+    return out

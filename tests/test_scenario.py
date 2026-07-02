@@ -189,3 +189,63 @@ def test_what_if_driver_base_order_none_honors_policy(dataset, monkeypatch):
                                  train_cutoff=cutoff)
     assert auto.before_p_stockout == explicit.before_p_stockout
     assert auto.after_expected_cost == explicit.after_expected_cost
+
+
+def _two_items(dataset, store_id):
+    sub = dataset.daily[dataset.daily["store_id"] == store_id]
+    return list(sub["item_id"].drop_duplicates())[:2]
+
+
+def test_batch_fits_model_once(dataset, monkeypatch):
+    """fit 공유: N품목이어도 _fit_demand_model 1회만."""
+    enriched = _build_enriched(dataset.daily, dataset.calendar, dataset.weather)
+    cutoff, period = _cutoff_and_period(enriched)
+    store = sorted(dataset.daily["store_id"].unique())[0]
+    items = _two_items(dataset, store)
+
+    calls = {"n": 0}
+    real_fit = sc._fit_demand_model
+
+    def counting_fit(*a, **k):
+        calls["n"] += 1
+        return real_fit(*a, **k)
+
+    monkeypatch.setattr(sc, "_fit_demand_model", counting_fit)
+    results = sc.what_if_driver_batch(
+        dataset.daily, dataset.calendar, dataset.weather, store, items, period,
+        {"is_rain": 1}, train_cutoff=cutoff)
+    assert calls["n"] == 1                    # ← fit shared, not per-item
+    assert len(results) == len(items)
+
+
+def test_batch_matches_single(dataset):
+    """배치=단일: 각 품목 결과가 단일 what_if_driver와 동일."""
+    enriched = _build_enriched(dataset.daily, dataset.calendar, dataset.weather)
+    cutoff, period = _cutoff_and_period(enriched)
+    store = sorted(dataset.daily["store_id"].unique())[0]
+    items = _two_items(dataset, store)
+
+    batch = {r.item_id: r for r in sc.what_if_driver_batch(
+        dataset.daily, dataset.calendar, dataset.weather, store, items, period,
+        {"is_rain": 1}, train_cutoff=cutoff)}
+    for item in items:
+        single = sc.what_if_driver(
+            dataset.daily, dataset.calendar, dataset.weather, store, item, period,
+            {"is_rain": 1}, train_cutoff=cutoff)
+        assert batch[item].before_demand == single.before_demand
+        assert batch[item].after_demand == single.after_demand
+
+
+def test_batch_skips_unknown_item(dataset):
+    """품목 실패는 skip, 나머지 정상."""
+    enriched = _build_enriched(dataset.daily, dataset.calendar, dataset.weather)
+    cutoff, period = _cutoff_and_period(enriched)
+    store = sorted(dataset.daily["store_id"].unique())[0]
+    good = _two_items(dataset, store)[0]
+
+    results = sc.what_if_driver_batch(
+        dataset.daily, dataset.calendar, dataset.weather, store,
+        [good, "NONEXISTENT_ITEM"], period, {"is_rain": 1}, train_cutoff=cutoff)
+    ids = {r.item_id for r in results}
+    assert good in ids
+    assert "NONEXISTENT_ITEM" not in ids       # skipped, no crash
