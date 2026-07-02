@@ -25,10 +25,23 @@ def test_ranking_top1_match():
     assert grade(q, {"top_items": ["B", "A"]}, {"top_items": ["A", "C"]}) is False
 
 
-def test_decomposition_qty_match():
-    q = _q("decomposition")
-    assert grade(q, {"order_qty": 23.0}, {"order_qty": 23.0}) is True
-    assert grade(q, {"order_qty": 25.0}, {"order_qty": 23.0}) is False
+def _decomp_q():
+    return Question("q", "t", "decomposition", "explain_order", {})
+
+
+def test_decomposition_both_match():
+    gold = {"item_id": "item_C03", "order_qty": 42.0}
+    assert grade(_decomp_q(), {"item_id": "item_C03", "order_qty": 42.0}, gold) is True
+
+
+def test_decomposition_wrong_item_right_qty_fails():
+    gold = {"item_id": "item_C03", "order_qty": 42.0}
+    assert grade(_decomp_q(), {"item_id": "item_B04", "order_qty": 42.0}, gold) is False
+
+
+def test_decomposition_right_item_wrong_qty_fails():
+    gold = {"item_id": "item_C03", "order_qty": 42.0}
+    assert grade(_decomp_q(), {"item_id": "item_C03", "order_qty": 43.0}, gold) is False
 
 
 def test_malformed_answer_is_wrong():

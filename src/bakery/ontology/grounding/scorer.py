@@ -1,8 +1,8 @@
 """Deterministic graders + delta report (design §7).
 
 Grading is type-specific and never calls an LLM: numeric uses relative
-tolerance (exact when gold is 0), ranking uses top-1 match, decomposition uses
-exact order-qty match. A malformed/missing answer counts as wrong.
+tolerance (exact when gold is 0), ranking uses top-1 match, decomposition requires
+item_id exact match AND order-qty match. A malformed/missing answer counts as wrong.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ def grade(question: Question, answer: dict, gold: dict) -> bool:
     if question.grader_type == RANKING:
         return _grade_ranking(answer.get("top_items"), gold["top_items"])
     if question.grader_type == DECOMPOSITION:
-        return _grade_qty(answer.get("order_qty"), gold["order_qty"])
+        return _grade_decomposition(answer.get("item_id"), answer.get("order_qty"), gold)
     raise KeyError(question.grader_type)
 
 
@@ -61,6 +61,12 @@ def _grade_qty(pred, gold: float) -> bool:
     if not isinstance(pred, (int, float)):
         return False
     return abs(pred - gold) <= _QTY_TOL   # spec: exact match; 1e-6 covers float repr
+
+
+def _grade_decomposition(pred_item, pred_qty, gold: dict) -> bool:
+    if not isinstance(pred_item, str) or not isinstance(pred_qty, (int, float)):
+        return False
+    return pred_item == gold["item_id"] and abs(pred_qty - gold["order_qty"]) <= _QTY_TOL
 
 
 def summarize(results: list[QResult]) -> EvalReport:

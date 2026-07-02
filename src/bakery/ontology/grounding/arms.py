@@ -22,8 +22,9 @@ OUTPUT_SCHEMAS: dict[str, dict] = {
               "required": ["answer_value"], "additionalProperties": False},
     RANKING: {"type": "object", "properties": {"top_items": {"type": "array", "items": {"type": "string"}}},
               "required": ["top_items"], "additionalProperties": False},
-    DECOMPOSITION: {"type": "object", "properties": {"order_qty": {"type": "number"}},
-                    "required": ["order_qty"], "additionalProperties": False},
+    DECOMPOSITION: {"type": "object", "properties": {"item_id": {"type": "string"},
+                                                     "order_qty": {"type": "number"}},
+                    "required": ["item_id", "order_qty"], "additionalProperties": False},
 }
 
 _GROUNDED_SYS = (
