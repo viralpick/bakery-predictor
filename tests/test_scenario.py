@@ -149,3 +149,43 @@ def test_what_if_driver_rejects_unknown_driver(dataset):
         sc.what_if_driver(dataset.daily, dataset.calendar, dataset.weather,
                           "A", "P1", ("2024-01-01", "2024-01-02"), {"is_sunny": 1},
                           base_order=10.0, train_cutoff="2024-01-01")
+
+
+def test_what_if_driver_base_order_none_uses_policy(dataset, monkeypatch):
+    """base_order=None → 내부에서 apply_policy(before_demand) 사용; 명시 호출과 동일 위험."""
+    from bakery.decision import apply_policy
+    monkeypatch.setattr(sc, "_fit_demand_model", lambda *a, **k: _StubModel())
+    enriched = sc._build_enriched(dataset.daily, dataset.calendar, dataset.weather)
+    cutoff, period = _cutoff_and_period(enriched)
+    store = enriched["store_id"].iloc[0]
+    item = enriched.loc[enriched["store_id"] == store, "item_id"].iloc[0]
+    auto = sc.what_if_driver(dataset.daily, dataset.calendar, dataset.weather,
+                             store, item, period, {"is_rain": 1}, base_order=None,
+                             train_cutoff=cutoff)
+    # _StubModel: before demand = 10.0 → policy order
+    policy_order = apply_policy(item, 10.0)[0]
+    explicit = sc.what_if_driver(dataset.daily, dataset.calendar, dataset.weather,
+                                 store, item, period, {"is_rain": 1}, base_order=policy_order,
+                                 train_cutoff=cutoff)
+    assert auto.before_p_stockout == explicit.before_p_stockout
+    assert auto.after_expected_cost == explicit.after_expected_cost
+
+
+def test_what_if_driver_base_order_none_honors_policy(dataset, monkeypatch):
+    """base_order=None + custom policy → 내부 base_order가 그 policy로 산출된다."""
+    from bakery.decision import PolicyParams, apply_policy
+    monkeypatch.setattr(sc, "_fit_demand_model", lambda *a, **k: _StubModel())
+    enriched = sc._build_enriched(dataset.daily, dataset.calendar, dataset.weather)
+    cutoff, period = _cutoff_and_period(enriched)
+    store = enriched["store_id"].iloc[0]
+    item = enriched.loc[enriched["store_id"] == store, "item_id"].iloc[0]
+    custom = PolicyParams(safety_margin=1.0)          # 극단 margin → default와 확실히 다른 base_order
+    auto = sc.what_if_driver(dataset.daily, dataset.calendar, dataset.weather,
+                             store, item, period, {"is_rain": 1}, base_order=None,
+                             train_cutoff=cutoff, policy=custom)
+    explicit = sc.what_if_driver(dataset.daily, dataset.calendar, dataset.weather,
+                                 store, item, period, {"is_rain": 1},
+                                 base_order=apply_policy(item, 10.0, custom)[0],
+                                 train_cutoff=cutoff)
+    assert auto.before_p_stockout == explicit.before_p_stockout
+    assert auto.after_expected_cost == explicit.after_expected_cost

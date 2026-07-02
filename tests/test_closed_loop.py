@@ -158,3 +158,114 @@ def test_select_policy_maps_names():
     import pytest
     with pytest.raises(ValueError):
         _select_gate_policy("bogus")
+
+
+# ---------------------------------------------------------------------------
+# Task 2 (S7): run_scenario_commit orchestrator tests
+# ---------------------------------------------------------------------------
+
+from bakery.ontology import scenario as sc
+from bakery.ontology.loop import run_scenario_commit, ScenarioCommitResult, auto_approve, human_correct
+from bakery.ontology.writeback import WritebackStore, APPROVED, REJECTED
+from bakery.ontology.loop import APPROVE, REJECT, GateDecision
+
+
+class _ScenarioStubModel:
+    """before demand=10, after=7 when is_rain flipped to 1 (deterministic)."""
+    def predict(self, target):
+        import pandas as pd
+        rain = float(target["is_rain"].iloc[0]) if "is_rain" in target.columns else 0.0
+        return pd.Series([10.0 - 3.0 * rain] * len(target))
+
+
+def _sc_ctx(dataset):
+    import pandas as pd
+    enriched = sc._build_enriched(dataset.daily, dataset.calendar, dataset.weather)
+    dates = sorted(pd.to_datetime(enriched["date"]).dt.date.unique())
+    cutoff = str(dates[-3]); period = (str(dates[-2]), str(dates[-1]))
+    store = enriched["store_id"].iloc[0]
+    item = enriched.loc[enriched["store_id"] == store, "item_id"].iloc[0]
+    return store, item, period, cutoff
+
+
+def test_scenario_commit_commits_adjusted_order(dataset, monkeypatch):
+    from bakery.decision import apply_policy
+    monkeypatch.setattr(sc, "_fit_demand_model", lambda *a, **k: _ScenarioStubModel())
+    store, item, period, cutoff = _sc_ctx(dataset)
+    wb = WritebackStore(require_approval=True)
+    res = run_scenario_commit(dataset, store, item, period, {"is_rain": 1}, wb, auto_approve,
+                              now="2024-01-01T09:00:00", train_cutoff=cutoff)
+    assert isinstance(res, ScenarioCommitResult)
+    assert res.whatif.before_demand == 10.0 and res.whatif.after_demand == 7.0
+    assert res.base_order == apply_policy(item, 10.0)[0]
+    scenario_order = apply_policy(item, 7.0)[0]
+    assert res.committed.status == APPROVED
+    assert res.committed.approved_qty == scenario_order          # auto_approve → 제안대로
+
+
+def test_scenario_commit_human_correction(dataset, monkeypatch):
+    monkeypatch.setattr(sc, "_fit_demand_model", lambda *a, **k: _ScenarioStubModel())
+    store, item, period, cutoff = _sc_ctx(dataset)
+    wb = WritebackStore(require_approval=True)
+    res = run_scenario_commit(dataset, store, item, period, {"is_rain": 1}, wb,
+                              human_correct({item: 99.0}), now="2024-01-01T09:00:00",
+                              train_cutoff=cutoff)
+    assert res.committed.approved_qty == 99.0
+
+
+def test_scenario_commit_reject(dataset, monkeypatch):
+    monkeypatch.setattr(sc, "_fit_demand_model", lambda *a, **k: _ScenarioStubModel())
+    store, item, period, cutoff = _sc_ctx(dataset)
+    wb = WritebackStore(require_approval=True)
+    reject_gate = lambda proposal: GateDecision(REJECT, None, "human")
+    res = run_scenario_commit(dataset, store, item, period, {"is_rain": 1}, wb, reject_gate,
+                              now="2024-01-01T09:00:00", train_cutoff=cutoff)
+    assert res.committed.status == REJECTED
+
+
+def test_scenario_commit_rejects_autonomous_store(dataset, monkeypatch):
+    monkeypatch.setattr(sc, "_fit_demand_model", lambda *a, **k: _ScenarioStubModel())
+    store, item, period, cutoff = _sc_ctx(dataset)
+    wb = WritebackStore(require_approval=False)
+    with pytest.raises(ValueError):
+        run_scenario_commit(dataset, store, item, period, {"is_rain": 1}, wb, auto_approve,
+                            now="2024-01-01T09:00:00", train_cutoff=cutoff)
+
+
+def test_scenario_commit_rationale_describes_scenario(dataset, monkeypatch):
+    monkeypatch.setattr(sc, "_fit_demand_model", lambda *a, **k: _ScenarioStubModel())
+    store, item, period, cutoff = _sc_ctx(dataset)
+    wb = WritebackStore(require_approval=True)
+    run_scenario_commit(dataset, store, item, period, {"is_rain": 1}, wb, auto_approve,
+                        now="2024-01-01T09:00:00", train_cutoff=cutoff)
+    # rationale lives on the proposal, not persisted; assert via a capturing gate
+    captured = {}
+    def cap_gate(p):
+        captured["rationale"] = p.rationale
+        return GateDecision(APPROVE, None, "human")
+    wb2 = WritebackStore(require_approval=True)
+    run_scenario_commit(dataset, store, item, period, {"is_rain": 1}, wb2, cap_gate,
+                        now="2024-01-01T09:00:00", train_cutoff=cutoff)
+    assert "scenario" in captured["rationale"] and "is_rain" in captured["rationale"]
+
+
+# ---------------------------------------------------------------------------
+# Task 3 (S7): CLI scenario-commit registration + _parse_drivers
+# ---------------------------------------------------------------------------
+
+
+def test_cli_registers_scenario_commit_command():
+    from bakery.cli import app
+    names = {c.name for c in app.registered_commands}
+    assert "scenario-commit" in names
+
+
+def test_parse_drivers_maps_pairs():
+    from bakery.cli import _parse_drivers
+    assert _parse_drivers("is_rain=1,is_snow=0") == {"is_rain": 1.0, "is_snow": 0.0}
+    assert _parse_drivers(" is_public_holiday = 1 ") == {"is_public_holiday": 1.0}
+    import pytest
+    with pytest.raises(ValueError):
+        _parse_drivers("is_rain")        # no '='
+    with pytest.raises(ValueError):
+        _parse_drivers("")               # empty
