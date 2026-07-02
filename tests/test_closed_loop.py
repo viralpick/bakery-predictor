@@ -247,3 +247,25 @@ def test_scenario_commit_rationale_describes_scenario(dataset, monkeypatch):
     run_scenario_commit(dataset, store, item, period, {"is_rain": 1}, wb2, cap_gate,
                         now="2024-01-01T09:00:00", train_cutoff=cutoff)
     assert "scenario" in captured["rationale"] and "is_rain" in captured["rationale"]
+
+
+# ---------------------------------------------------------------------------
+# Task 3 (S7): CLI scenario-commit registration + _parse_drivers
+# ---------------------------------------------------------------------------
+
+
+def test_cli_registers_scenario_commit_command():
+    from bakery.cli import app
+    names = {c.name for c in app.registered_commands}
+    assert "scenario-commit" in names
+
+
+def test_parse_drivers_maps_pairs():
+    from bakery.cli import _parse_drivers
+    assert _parse_drivers("is_rain=1,is_snow=0") == {"is_rain": 1.0, "is_snow": 0.0}
+    assert _parse_drivers(" is_public_holiday = 1 ") == {"is_public_holiday": 1.0}
+    import pytest
+    with pytest.raises(ValueError):
+        _parse_drivers("is_rain")        # no '='
+    with pytest.raises(ValueError):
+        _parse_drivers("")               # empty

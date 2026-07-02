@@ -1235,5 +1235,64 @@ def cmd_closed_loop(
         "[yellow]synthetic 메커니즘 시연 (mechanism demo, not accuracy)[/]"
         if source == "synthetic" else f"[cyan]source={source}[/]")
 
+
+def _parse_drivers(spec: str) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            raise ValueError(f"bad driver spec: {part!r} (expected key=value)")
+        key, val = part.split("=", 1)
+        out[key.strip()] = float(val.strip())
+    if not out:
+        raise ValueError("no drivers parsed; expected e.g. 'is_rain=1,is_snow=0'")
+    return out
+
+
+@app.command("scenario-commit")
+def cmd_scenario_commit(
+    store: str,
+    item: str,
+    period: str,                        # "YYYY-MM-DD,YYYY-MM-DD"
+    drivers: str,                       # "is_rain=1,is_snow=0"
+    policy: str = "human",              # auto(frontier) | human(rubber-stamp)
+    source: str = "synthetic",
+    now: str = "",                      # ISO; 비면 period start의 09:00
+    out: str = "",                      # parquet 경로(옵션)
+) -> None:
+    """v7 Scenario→commit: 가상 드라이버 시나리오 하 조정 발주량을 사람 게이트 통과해 확정.
+
+    상류 what_if_driver(재예측) + 하류 writeback(게이트)를 잇는 결정론 closed-loop.
+    --source synthetic 이면 시연용. 정확도 주장이 아니라 메커니즘 시연.
+    """
+    from .data.loader import load_dataset
+    from .ontology.loop import run_scenario_commit
+    from .ontology.writeback import WritebackStore
+
+    start, end = (s.strip() for s in period.split(","))
+    stamp = now or f"{start}T09:00:00"
+    gate = _select_gate_policy(policy)
+    driver_overrides = _parse_drivers(drivers)
+    dataset = load_dataset(source)
+    wb = WritebackStore(require_approval=True)
+    res = run_scenario_commit(dataset, store, item, (start, end), driver_overrides,
+                              wb, gate, now=stamp, train_cutoff=start)
+
+    w = res.whatif
+    console.print(f"[bold]scenario-commit[/] store={store} item={item} drivers={driver_overrides}")
+    console.print(f"  demand {w.before_demand:.1f} → {w.after_demand:.1f} (Δ{w.demand_delta:+.1f})"
+                  + ("  [yellow]out-of-support[/]" if w.out_of_support else ""))
+    console.print(f"  order {res.base_order:.0f} → {res.committed.proposed_qty:.0f}  "
+                  f"{res.committed.status} qty={res.committed.approved_qty} by={res.committed.approver}")
+    if out:
+        wb.to_parquet(out)
+        console.print(f"[green]wrote[/] {out} ({len(wb.records)} records)")
+    console.print(
+        "[yellow]synthetic 메커니즘 시연 (mechanism demo, not accuracy)[/]"
+        if source == "synthetic" else f"[cyan]source={source}[/]")
+
+
 if __name__ == "__main__":
     app()
