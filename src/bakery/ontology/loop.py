@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from typing import Callable
 
 from ..data.loader import DailyDataset
+from ..decision import PolicyParams, RiskParams, apply_policy
+from . import scenario
 from .grounding import arms
 from .writeback import OrderRecord, WritebackStore
 
@@ -98,3 +100,40 @@ def run_closed_loop(client, dataset: DailyDataset, store_id: str,
             rec = writeback.reject(rec.record_id, decision.approver)
         out.append(rec)
     return out
+
+
+@dataclass(frozen=True)
+class ScenarioCommitResult:
+    whatif: "scenario.WhatIfDriverResult"
+    base_order: float
+    committed: OrderRecord
+
+
+def run_scenario_commit(dataset: DailyDataset, store_id: str, item_id: str,
+                        period: tuple[str, str], driver_overrides: dict,
+                        writeback: WritebackStore, gate: GatePolicy, *, now: str,
+                        train_cutoff: str, policy: PolicyParams = PolicyParams(),
+                        risk: RiskParams = RiskParams()) -> ScenarioCommitResult:
+    """Upstream scenario → adjusted order → human gate → writeback commit.
+    Deterministic (no LLM). Reuses what_if_driver(S6) + apply_policy + writeback(S5)."""
+    if not writeback.require_approval:
+        raise ValueError(
+            "scenario-commit drives approval via the GatePolicy; "
+            "pass WritebackStore(require_approval=True)")
+    wif = scenario.what_if_driver(
+        dataset.daily, dataset.calendar, dataset.weather, store_id, item_id, period,
+        driver_overrides, base_order=None, train_cutoff=train_cutoff, risk=risk)
+    base_order = apply_policy(item_id, wif.before_demand, policy)[0]
+    scenario_order = apply_policy(item_id, wif.after_demand, policy)[0]
+    drivers_str = ", ".join(f"{k}={v}" for k, v in driver_overrides.items())
+    rationale = (f"scenario [{drivers_str}]: demand {wif.before_demand:.1f}→{wif.after_demand:.1f}, "
+                 f"order {base_order:.0f}→{scenario_order:.0f}")
+    proposal = OrderProposal(item_id, scenario_order, rationale)
+    rec = writeback.propose_order(store_id, item_id, period[0], scenario_order, proposed_at=now)
+    decision = gate(proposal)
+    if decision.action == APPROVE:
+        rec = writeback.approve(rec.record_id, decision.approver,
+                                approved_at=now, approved_qty=decision.approved_qty)
+    else:
+        rec = writeback.reject(rec.record_id, decision.approver)
+    return ScenarioCommitResult(whatif=wif, base_order=base_order, committed=rec)
