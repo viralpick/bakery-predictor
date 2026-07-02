@@ -1210,6 +1210,15 @@ def _write_and_label(wb: WritebackStore, out: str, source: str) -> None:
         if source == "synthetic" else f"[cyan]source={source}[/]")
 
 
+def _lever_warning(before_demand: float) -> str | None:
+    """Warn when the baseline re-forecast collapsed to 0 (unresolved lag features):
+    the driver lever then looks inert (before≈after≈0) though nothing actually moved."""
+    if before_demand <= 0:
+        return ("[yellow]⚠ before_demand=0 — 재예측 붕괴(unresolved lag). "
+                "레버가 무효처럼 보일 수 있음; 기간/품목 데이터 커버리지 확인.[/]")
+    return None
+
+
 @app.command("closed-loop")
 def cmd_closed_loop(
     store: str,
@@ -1294,6 +1303,9 @@ def cmd_scenario_commit(
     console.print(f"[bold]scenario-commit[/] store={store} item={item} drivers={driver_overrides}")
     console.print(f"  demand {w.before_demand:.1f} → {w.after_demand:.1f} (Δ{w.demand_delta:+.1f})"
                   + ("  [yellow]out-of-support[/]" if w.out_of_support else ""))
+    warn = _lever_warning(w.before_demand)
+    if warn:
+        console.print(warn)
     console.print(f"  order {res.base_order:.0f} → {res.committed.proposed_qty:.0f}  "
                   f"{res.committed.status} qty={res.committed.approved_qty} by={res.committed.approver}")
     _write_and_label(wb, out, source)

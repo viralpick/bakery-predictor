@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from bakery.cli import _parse_period, _write_and_label
+from bakery.cli import _lever_warning, _parse_period, _write_and_label
 from bakery.ontology.writeback import WritebackStore
 
 
@@ -37,3 +37,13 @@ def test_write_and_label_skips_parquet_when_no_out(tmp_path, capsys):
     printed = capsys.readouterr().out
     assert "wrote" not in printed
     assert "source=real" in printed                # non-synthetic label
+
+
+def test_lever_warning_fires_on_zero_baseline():
+    warn = _lever_warning(0.0)
+    assert warn is not None
+    assert "before_demand" in warn                 # names the collapsed baseline
+
+
+def test_lever_warning_silent_on_positive_baseline():
+    assert _lever_warning(42.0) is None
