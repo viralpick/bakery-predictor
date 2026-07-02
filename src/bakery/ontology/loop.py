@@ -138,3 +138,38 @@ def run_scenario_commit(dataset: DailyDataset, store_id: str, item_id: str,
     else:
         rec = writeback.reject(rec.record_id, decision.approver)
     return ScenarioCommitResult(whatif=wif, base_order=base_order, committed=rec)
+
+
+def run_scenario_commit_batch(dataset: DailyDataset, store_id: str, item_ids: list,
+                              period: tuple[str, str], driver_overrides: dict,
+                              writeback: WritebackStore, gate: GatePolicy, *, now: str,
+                              train_cutoff: str, policy: PolicyParams = PolicyParams(),
+                              risk: RiskParams = RiskParams()) -> list[ScenarioCommitResult]:
+    """Multi-item scenario → adjusted order → gate → commit, sharing ONE model fit.
+    Deterministic (no LLM). Failing items skipped by what_if_driver_batch."""
+    if not writeback.require_approval:
+        raise ValueError(
+            "scenario-commit-batch drives approval via the GatePolicy; "
+            "pass WritebackStore(require_approval=True)")
+    wifs = scenario.what_if_driver_batch(
+        dataset.daily, dataset.calendar, dataset.weather, store_id, item_ids, period,
+        driver_overrides, base_order=None, train_cutoff=train_cutoff, risk=risk,
+        policy=policy)
+    out: list[ScenarioCommitResult] = []
+    drivers_str = ", ".join(f"{k}={v}" for k, v in driver_overrides.items())
+    for wif in wifs:
+        base_order = apply_policy(wif.item_id, wif.before_demand, policy)[0]
+        scenario_order = apply_policy(wif.item_id, wif.after_demand, policy)[0]
+        rationale = (f"scenario [{drivers_str}]: demand {wif.before_demand:.1f}→"
+                     f"{wif.after_demand:.1f}, order {base_order:.0f}→{scenario_order:.0f}")
+        proposal = OrderProposal(wif.item_id, scenario_order, rationale)
+        rec = writeback.propose_order(store_id, wif.item_id, period[0], scenario_order,
+                                      proposed_at=now)
+        decision = gate(proposal)
+        if decision.action == APPROVE:
+            rec = writeback.approve(rec.record_id, decision.approver,
+                                    approved_at=now, approved_qty=decision.approved_qty)
+        else:
+            rec = writeback.reject(rec.record_id, decision.approver)
+        out.append(ScenarioCommitResult(whatif=wif, base_order=base_order, committed=rec))
+    return out

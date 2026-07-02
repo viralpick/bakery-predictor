@@ -165,7 +165,7 @@ def test_select_policy_maps_names():
 # ---------------------------------------------------------------------------
 
 from bakery.ontology import scenario as sc
-from bakery.ontology.loop import run_scenario_commit, ScenarioCommitResult, auto_approve, human_correct
+from bakery.ontology.loop import run_scenario_commit, run_scenario_commit_batch, ScenarioCommitResult, auto_approve, human_correct
 from bakery.ontology.writeback import WritebackStore, APPROVED, REJECTED
 from bakery.ontology.loop import APPROVE, REJECT, GateDecision
 
@@ -269,3 +269,41 @@ def test_parse_drivers_maps_pairs():
         _parse_drivers("is_rain")        # no '='
     with pytest.raises(ValueError):
         _parse_drivers("")               # empty
+
+
+# ---------------------------------------------------------------------------
+# Task 2 (S7): run_scenario_commit_batch orchestrator tests
+# ---------------------------------------------------------------------------
+
+def _batch_ctx(dataset):
+    import pandas as pd
+    store = sorted(dataset.daily["store_id"].unique())[0]
+    sub = dataset.daily[dataset.daily["store_id"] == store]
+    items = list(sub["item_id"].drop_duplicates())[:2]
+    dates = pd.to_datetime(sub["date"]).sort_values().unique()
+    cutoff = str(pd.Timestamp(dates[-3]).date())
+    period = (str(pd.Timestamp(dates[-2]).date()), str(pd.Timestamp(dates[-1]).date()))
+    return store, items, period, cutoff
+
+
+def test_scenario_commit_batch_commits_each_item(dataset, monkeypatch):
+    monkeypatch.setattr(sc, "_fit_demand_model", lambda *a, **k: _ScenarioStubModel())
+    store, items, period, cutoff = _batch_ctx(dataset)
+    wb = WritebackStore(require_approval=True)
+    results = run_scenario_commit_batch(
+        dataset, store, items, period, {"is_rain": 1}, wb, auto_approve,
+        now=f"{period[0]}T09:00:00", train_cutoff=cutoff)
+    assert len(results) == len(items)
+    assert all(isinstance(r, ScenarioCommitResult) for r in results)
+    assert all(r.committed.status == "APPROVED" for r in results)
+    assert len(wb.records) == len(items)
+
+
+def test_scenario_commit_batch_requires_approval_gate(dataset, monkeypatch):
+    monkeypatch.setattr(sc, "_fit_demand_model", lambda *a, **k: _ScenarioStubModel())
+    store, items, period, cutoff = _batch_ctx(dataset)
+    wb = WritebackStore(require_approval=False)
+    with pytest.raises(ValueError):
+        run_scenario_commit_batch(
+            dataset, store, items, period, {"is_rain": 1}, wb, auto_approve,
+            now=f"{period[0]}T09:00:00", train_cutoff=cutoff)

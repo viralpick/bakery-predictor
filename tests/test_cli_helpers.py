@@ -47,3 +47,15 @@ def test_lever_warning_fires_on_zero_baseline():
 
 def test_lever_warning_silent_on_positive_baseline():
     assert _lever_warning(42.0) is None
+
+
+def test_scenario_commit_batch_command_registered():
+    import typer
+    import bakery.cli as c
+    group = typer.main.get_group(c.app)
+    cmd = group.get_command(None, "scenario-commit-batch")
+    assert cmd is not None
+    opts = [p.name for p in cmd.params]
+    assert "items" in opts
+    assert "gate" in opts
+    assert "policy" not in opts
