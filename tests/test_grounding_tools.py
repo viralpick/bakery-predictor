@@ -11,11 +11,11 @@ def dataset():
     return load_dataset("synthetic")
 
 
-def test_tool_specs_cover_six_functions():
+def test_tool_specs_cover_seven_functions():
     names = {t.name for t in TOOL_SPECS}
     assert names == {
-        "rank_stockout_risk", "explain_order", "what_if",
-        "waste_cost", "demand_diff_by_condition", "what_if_driver",
+        "rank_stockout_risk", "rank_stockout_earliness", "explain_order",
+        "what_if", "waste_cost", "demand_diff_by_condition", "what_if_driver",
     }
     for t in TOOL_SPECS:
         assert t.parameters["type"] == "object"
@@ -99,3 +99,16 @@ def test_dispatch_what_if_driver_drops_null_overrides(dataset, monkeypatch):
     result = dispatch(call, dataset)
     assert "error" not in json.loads(result.content)
     assert captured["overrides"] == {"is_rain": 1}
+
+
+def test_dispatch_rank_stockout_earliness_returns_json(dataset):
+    store = dataset.daily["store_id"].iloc[0]
+    dates = pd.to_datetime(dataset.daily.loc[dataset.daily["store_id"] == store, "date"])
+    call = ToolCall(id="c9", name="rank_stockout_earliness",
+                    arguments={"store_id": store,
+                               "period": [str(dates.min().date()), str(dates.max().date())],
+                               "k": 3})
+    result = dispatch(call, dataset)
+    payload = json.loads(result.content)
+    assert len(payload) == 3
+    assert {"item_id", "lost_hours_per_day", "stockout_days", "days"} <= set(payload[0])
