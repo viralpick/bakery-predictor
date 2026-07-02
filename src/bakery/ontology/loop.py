@@ -122,7 +122,8 @@ def run_scenario_commit(dataset: DailyDataset, store_id: str, item_id: str,
             "pass WritebackStore(require_approval=True)")
     wif = scenario.what_if_driver(
         dataset.daily, dataset.calendar, dataset.weather, store_id, item_id, period,
-        driver_overrides, base_order=None, train_cutoff=train_cutoff, risk=risk)
+        driver_overrides, base_order=None, train_cutoff=train_cutoff, risk=risk,
+        policy=policy)
     base_order = apply_policy(item_id, wif.before_demand, policy)[0]
     scenario_order = apply_policy(item_id, wif.after_demand, policy)[0]
     drivers_str = ", ".join(f"{k}={v}" for k, v in driver_overrides.items())

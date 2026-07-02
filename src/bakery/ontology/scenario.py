@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from ..decision import RiskParams, apply_policy, simulate_item_risk
+from ..decision import PolicyParams, RiskParams, apply_policy, simulate_item_risk
 from ..features.calendar_features import add_calendar_features
 from ..features.weather_features import add_weather_features
 from ..models.lightgbm_regressor import GlobalLGBM
@@ -102,18 +102,21 @@ def _predict_demand(model: GlobalLGBM, target: pd.DataFrame) -> float:
 
 def what_if_driver(daily, calendar, weather, store_id, item_id, period,
                    driver_overrides, *, base_order: float | None = None, train_cutoff,
-                   feature_set: str = "v2", risk: RiskParams = RiskParams()) -> WhatIfDriverResult:
+                   feature_set: str = "v2", risk: RiskParams = RiskParams(),
+                   policy: PolicyParams = PolicyParams()) -> WhatIfDriverResult:
     """Upstream Scenario lever: perturb driver(s) → re-forecast demand → propagate
     to stockout risk/cost. Read-only. before/after share one fitted model; only the
     driver columns differ (ceteris paribus). train_cutoff is caller-injected (leakage).
-    base_order=None derives the order internally via apply_policy(before_demand)."""
+    base_order=None derives the order internally via apply_policy(before_demand, policy)
+    — pass the same policy used downstream (e.g. run_scenario_commit) so the whatif
+    risk numbers stay consistent with the eventually committed order."""
     _validate_drivers(driver_overrides)
     enriched = _build_enriched(daily, calendar, weather)
     model = _fit_demand_model(enriched, train_cutoff, feature_set)
     base_rows = _period_item_rows(enriched, store_id, item_id, period)
     before_demand = _predict_demand(model, base_rows)
     if base_order is None:
-        base_order = apply_policy(item_id, before_demand)[0]
+        base_order = apply_policy(item_id, before_demand, policy)[0]
     pert_rows = base_rows.copy()
     for col, val in driver_overrides.items():
         pert_rows[col] = val
