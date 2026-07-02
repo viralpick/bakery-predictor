@@ -131,7 +131,47 @@ class OpenAIClient:
         return _parse_response(completion)
 
 
+def _normalize_azure_endpoint(endpoint: str) -> str:
+    """Strip a trailing /openai — the SDK appends /openai/deployments/... itself,
+    so an .env endpoint that already ends in /openai would double the segment."""
+    endpoint = endpoint.rstrip("/")
+    if endpoint.endswith("/openai"):
+        endpoint = endpoint[: -len("/openai")]
+    return endpoint
+
+
+class AzureOpenAIClient(OpenAIClient):
+    """Azure OpenAI adapter. Same wire format as OpenAI (chat.completions.parse);
+    only the client construction differs (endpoint/api-version/deployment from
+    AZURE_OPENAI_* env vars, loaded from .env via bakery.config)."""
+
+    def __init__(self, model: str = "", api_key: str | None = None):
+        from ... import config  # noqa: F401 — importing config loads .env
+
+        deployment = model or os.getenv("AZURE_OPENAI_DEPLOYMENT", "")
+        super().__init__(model=deployment, api_key=api_key)
+
+    def _ensure_client(self):
+        if self._client is None:
+            from openai import AzureOpenAI
+
+            from ...config import require_env  # side effect: loads .env
+
+            self._client = AzureOpenAI(
+                api_key=self._api_key or require_env("AZURE_OPENAI_API_KEY"),
+                azure_endpoint=_normalize_azure_endpoint(require_env("AZURE_OPENAI_ENDPOINT")),
+                api_version=require_env("AZURE_OPENAI_API_VERSION"),
+            )
+        return self._client
+
+
 def make_llm_client(provider: str, model: str, **kw) -> LLMClient:
+    if provider == "auto":
+        from ... import config  # noqa: F401 — importing config loads .env
+
+        provider = "azure" if os.getenv("AZURE_OPENAI_API_KEY") else "openai"
     if provider == "openai":
         return OpenAIClient(model=model, **kw)
+    if provider == "azure":
+        return AzureOpenAIClient(model=model, **kw)
     raise ValueError(f"unknown provider: {provider} (anthropic adapter: add when 발급)")
