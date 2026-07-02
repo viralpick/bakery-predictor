@@ -1311,5 +1311,50 @@ def cmd_scenario_commit(
     _write_and_label(wb, out, source)
 
 
+
+@app.command("scenario-commit-batch")
+def cmd_scenario_commit_batch(
+    store: str,
+    period: str,                        # "YYYY-MM-DD,YYYY-MM-DD"
+    drivers: str,                       # "is_rain=1,is_snow=0"
+    items: str = "",                    # "a,b,c"; 비면 매장 전 품목
+    gate: str = "human",               # auto(frontier) | human(rubber-stamp)
+    source: str = "synthetic",
+    now: str = "",                      # ISO; 비면 period start의 09:00
+    out: str = "",                      # parquet 경로(옵션)
+) -> None:
+    """v7 다품목 Scenario→commit: 여러 품목에 같은 드라이버 시나리오를 배치 커밋.
+
+    모델 fit 1회 공유. --items 생략 시 해당 매장 전 품목. 결정론(LLM 미개입).
+    --source synthetic 이면 메커니즘 시연.
+    """
+    from .data.loader import load_dataset
+    from .ontology.loop import run_scenario_commit_batch
+    from .ontology.writeback import WritebackStore
+
+    start, end, stamp = _parse_period(period, now)
+    gate_policy = _select_gate_policy(gate)
+    driver_overrides = _parse_drivers(drivers)
+    dataset = load_dataset(source)
+    item_ids = ([s.strip() for s in items.split(",")] if items
+                else sorted(dataset.daily.loc[dataset.daily["store_id"] == store,
+                                              "item_id"].unique()))
+    wb = WritebackStore(require_approval=True)
+    results = run_scenario_commit_batch(
+        dataset, store, item_ids, (start, end), driver_overrides, wb, gate_policy,
+        now=stamp, train_cutoff=start)
+
+    console.print(f"[bold]scenario-commit-batch[/] store={store} "
+                  f"items={len(item_ids)} drivers={driver_overrides}")
+    for res in results:
+        w = res.whatif
+        console.print(f"  {w.item_id}: demand {w.before_demand:.1f}→{w.after_demand:.1f} "
+                      f"order {res.base_order:.0f}→{res.committed.proposed_qty:.0f} "
+                      f"{res.committed.status} by={res.committed.approver}")
+    if not results:
+        console.print("[yellow]no committed items (all skipped?)[/]")
+    _write_and_label(wb, out, source)
+
+
 if __name__ == "__main__":
     app()
