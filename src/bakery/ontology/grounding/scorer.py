@@ -57,12 +57,6 @@ def _grade_ranking(pred, gold: list) -> bool:
     return pred[0] == gold[0]            # top-1 match
 
 
-def _grade_qty(pred, gold: float) -> bool:
-    if not isinstance(pred, (int, float)):
-        return False
-    return abs(pred - gold) <= _QTY_TOL   # spec: exact match; 1e-6 covers float repr
-
-
 def _grade_decomposition(pred_item, pred_qty, gold: dict) -> bool:
     if not isinstance(pred_item, str) or not isinstance(pred_qty, (int, float)):
         return False
