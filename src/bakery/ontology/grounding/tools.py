@@ -24,6 +24,13 @@ TOOL_SPECS: list[ToolSpec] = [
              {"type": "object", "properties": {
                  "store_id": {"type": "string"}, "period": _PERIOD, "k": {"type": "integer"}},
               "required": ["store_id", "period", "k"], "additionalProperties": False}),
+    ToolSpec("rank_stockout_earliness",
+             "Top-k items by observed stockout earliness: average selling-hours lost "
+             "per day to stockouts (higher = stocks out earlier/more often). "
+             "Historical observation from stockout_time, NOT a forecast.",
+             {"type": "object", "properties": {
+                 "store_id": {"type": "string"}, "period": _PERIOD, "k": {"type": "integer"}},
+              "required": ["store_id", "period", "k"], "additionalProperties": False}),
     ToolSpec("explain_order", "Decision lineage breaking down one item's recommended order.",
              {"type": "object", "properties": {
                  "store_id": {"type": "string"}, "item_id": {"type": "string"}, "period": _PERIOD},
@@ -92,6 +99,8 @@ def dispatch(call: ToolCall, dataset: DailyDataset) -> ToolResult:
 def _call(name: str, a: dict, dataset: DailyDataset):
     if name == "rank_stockout_risk":
         return fn.rank_stockout_risk(dataset.daily, a["store_id"], tuple(a["period"]), a["k"])
+    if name == "rank_stockout_earliness":
+        return fn.rank_stockout_earliness(dataset.daily, a["store_id"], tuple(a["period"]), a["k"])
     if name == "explain_order":
         return fn.explain_order(dataset.daily, a["store_id"], a["item_id"], tuple(a["period"]))
     if name == "what_if":

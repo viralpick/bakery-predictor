@@ -29,14 +29,12 @@ class Question:
 
 
 def _ctx(dataset: DailyDataset):
-    """Resolve a stable (store, period, top_item) from the dataset."""
+    """Resolve a stable (store, period) from the dataset."""
     daily = dataset.daily
     store = sorted(dataset.daily["store_id"].unique())[0]
     dd = pd.to_datetime(daily.loc[daily["store_id"] == store, "date"])
     period = (str(dd.min().date()), str(dd.max().date()))
-    sub = daily[daily["store_id"] == store]
-    top_item = sub.groupby("item_id", observed=True)["sold_units"].sum().idxmax()
-    return store, period, top_item
+    return store, period
 
 
 QUESTIONS: list[Question] = [
@@ -49,7 +47,13 @@ QUESTIONS: list[Question] = [
              NUMERIC, "demand_diff_by_condition", {"condition_col": "is_weekend", "frame": CALENDAR}),
     Question("q_diff_rain", "비 올 때 평균에서 비 안 올 때 평균을 뺀 일 판매량 차이는? (비 올 때가 더 높으면 양수)",
              NUMERIC, "demand_diff_by_condition", {"condition_col": "is_rain", "frame": WEATHER}),
-    Question("q_order_top", "상위 품목의 권장 발주량은?", DECOMPOSITION, "explain_order", {}),
+    Question("q_order_top",
+             "관측 매진 위험(일평균 손실 영업시간 기준)이 가장 높은 품목은 무엇이고, "
+             "그 품목의 권장 발주량은?",
+             DECOMPOSITION, "explain_order", {}),
+    Question("q_rank_earliness",
+             "일평균 손실 영업시간 기준 매진 위험 상위 3개 품목은?",
+             RANKING, "rank_stockout_earliness", {"k": 3}),
     Question("q_whatif_up", "수요 30, 발주 30에서 발주를 10 늘리면 기대비용은?",
              NUMERIC, "what_if", {"demand_point": 30.0, "base_order": 30.0, "delta_order": 10.0}),
     Question("q_whatif_down", "수요 30, 발주 40에서 발주를 -10 줄이면 기대비용은?",
@@ -62,12 +66,11 @@ QUESTIONS: list[Question] = [
 
 def resolve_eval_context(dataset: DailyDataset) -> tuple[str, tuple[str, str]]:
     """The (store_id, period) the eval targets — same basis as build_gold's gold."""
-    store, period, _ = _ctx(dataset)
-    return store, period
+    return _ctx(dataset)
 
 
 def build_gold(question: Question, dataset: DailyDataset) -> dict:
-    store, period, top_item = _ctx(dataset)
+    store, period = _ctx(dataset)
     k = question.fn_kwargs
     if question.source_fn == "rank_stockout_risk":
         ranked = fn.rank_stockout_risk(dataset.daily, store, period, k["k"])
@@ -88,12 +91,17 @@ def build_gold(question: Question, dataset: DailyDataset) -> dict:
         if not math.isfinite(value):
             raise ValueError(f"non-finite gold for {question.id}: {value}")
         return {"answer_value": value}
+    if question.source_fn == "rank_stockout_earliness":
+        ranked = fn.rank_stockout_earliness(dataset.daily, store, period, k=k["k"])
+        return {"top_items": list(ranked["item_id"])}
     if question.source_fn == "explain_order":
-        lin = fn.explain_order(dataset.daily, store, top_item, period)
-        value = float(lin["contribution"].sum())
+        top_risk = fn.rank_stockout_earliness(dataset.daily, store, period, k=1)
+        risk_item = str(top_risk["item_id"].iloc[0])
+        lineage = fn.explain_order(dataset.daily, store, risk_item, period)
+        value = float(lineage["contribution"].sum())
         if not math.isfinite(value):
             raise ValueError(f"non-finite gold for {question.id}: {value}")
-        return {"order_qty": value}
+        return {"item_id": risk_item, "order_qty": value}
     if question.source_fn == "what_if":
         r = fn.what_if(k["demand_point"], k["base_order"], k["delta_order"])
         value = float(r.new_expected_cost)

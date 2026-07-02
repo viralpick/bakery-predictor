@@ -34,6 +34,7 @@ from .writeback import WritebackStore
 
 DEMAND_PROXY_COL = "potential_demand"
 CONDITION_ON, CONDITION_OFF = 1, 0   # 0/1 flag values for demand_diff_by_condition
+DEFAULT_CLOSE_HOUR = 22  # 라벨된 가정: bonavi loader 하드코딩·synthetic store_A와 일치 (spec D3)
 
 
 def _period_slice(daily: pd.DataFrame, store_id: str, start: str, end: str) -> pd.DataFrame:
@@ -67,6 +68,41 @@ def rank_stockout_risk(
     rec = build_recommendation(items, policy=policy, risk=risk)
     ranked = rec.table.sort_values("p_stockout", ascending=False).head(k)
     return ranked.reset_index(drop=True)
+
+
+def rank_stockout_earliness(
+    daily: pd.DataFrame,
+    store_id: str,
+    period: tuple[str, str],
+    k: int = 5,
+    *,
+    close_hour: int = DEFAULT_CLOSE_HOUR,
+) -> pd.DataFrame:
+    """Top-k items by observed stockout earliness: avg selling-hours lost per day.
+
+    Score = mean over ALL the item's days of max(close_hour − stockout
+    time-of-day, 0); days without a stockout contribute 0 — earliness and
+    frequency in one number. Historical observation (stockout_time), NOT a
+    forecast; complements the MC-based rank_stockout_risk.
+    """
+    sliced = _period_slice(daily, store_id, *period)
+    stockout_at = pd.to_datetime(sliced["stockout_time"])
+    hour_of_day = stockout_at.dt.hour + stockout_at.dt.minute / 60.0
+    lost = (close_hour - hour_of_day).clip(lower=0.0).fillna(0.0)
+    per_item = (
+        sliced.assign(lost_hours=lost)
+        .groupby("item_id", observed=True)
+        .agg(lost_hours_total=("lost_hours", "sum"),
+             stockout_days=("stockout_time", "count"),
+             days=("lost_hours", "size"))
+        .reset_index()
+    )
+    per_item["lost_hours_per_day"] = per_item["lost_hours_total"] / per_item["days"]
+    if float(per_item["lost_hours_per_day"].max()) == 0.0:
+        raise ValueError(f"no stockouts observed for store={store_id} in {period}")
+    ranked = per_item.sort_values(["lost_hours_per_day", "item_id"],
+                                  ascending=[False, True]).head(k)
+    return ranked[["item_id", "lost_hours_per_day", "stockout_days", "days"]].reset_index(drop=True)
 
 
 def explain_order(
@@ -185,6 +221,11 @@ FUNCTION_REGISTRY: dict[str, OntologyFunctionSpec] = {
     "rank_stockout_risk": OntologyFunctionSpec(
         "rank_stockout_risk", "Top-k items by stockout probability for a store/period.",
         ("store_id", "period", "k"), "table[item_id, p_stockout, order_qty, ...]", rank_stockout_risk),
+    "rank_stockout_earliness": OntologyFunctionSpec(
+        "rank_stockout_earliness",
+        "Top-k items by observed stockout earliness (avg selling-hours lost per day).",
+        ("store_id", "period", "k"),
+        "table[item_id, lost_hours_per_day, stockout_days, days]", rank_stockout_earliness),
     "explain_order": OntologyFunctionSpec(
         "explain_order", "Decision lineage breaking down one item's recommended order.",
         ("store_id", "item_id", "period"), "table[step, contribution, detail]", explain_order),
