@@ -199,3 +199,27 @@ def test_aggregate_alpha_interval():
     assert est.a1 == pytest.approx(0.40, abs=1e-6)
     assert est.a2 == pytest.approx(0.45, abs=1e-6)
     assert 0.0 <= est.alpha_low <= est.alpha_high <= 1.0
+
+
+def test_aggregate_alpha_both_nan_lower_bounds():
+    """Regression test: both lower-bound methods (kink.alpha, depth.alpha) fail (NaN).
+
+    The 'both NaN' case exercised the nan > x bug class. Verify that:
+    1. When BOTH lowers are NaN, alpha_low correctly becomes NaN (not 0).
+    2. Supply-driven case: alpha_high also becomes NaN (due to clipping with NaN bound).
+    3. Demand-limited case: alpha_high remains 1.0, even when alpha_low is NaN.
+    """
+    # Case 1: Supply-driven surplus (slope > 0.5)
+    kink_nan = KinkResult(30, 2.0, 5.0, float("nan"), "kink failed")
+    depth_nan = DepthResult(200, 50.0, 2.0, 10.0, float("nan"), "depth failed")
+    surplus_supply = SurplusResult(200, 0.8, 0.05, 0.3, "supply-driven")
+    est_supply = aggregate_alpha(kink_nan, depth_nan, surplus_supply)
+    assert math.isnan(est_supply.alpha_low), "Expected both-NaN lowers to produce NaN alpha_low"
+    # In supply-driven case, alpha_high is clipped with NaN lower bound → also NaN
+    assert math.isnan(est_supply.alpha_high), "Supply-driven with NaN alpha_low should produce NaN alpha_high"
+
+    # Case 2: Demand-limited surplus (slope ≈ 0)
+    surplus_demand = SurplusResult(200, 0.0, 0.05, 0.5, "demand-limited")
+    est_demand = aggregate_alpha(kink_nan, depth_nan, surplus_demand)
+    assert math.isnan(est_demand.alpha_low), "Expected both-NaN lowers to produce NaN alpha_low"
+    assert est_demand.alpha_high == 1.0, "Demand-limited should allow alpha_high = 1.0 even when alpha_low is NaN"

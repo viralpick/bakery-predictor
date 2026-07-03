@@ -301,9 +301,11 @@ def aggregate_alpha(kink, depth, surplus):
     # A3 (surplus) informs upper bound
     alpha_high = 1.0
     if surplus.slope == surplus.slope and surplus.slope > SUPPLY_DRIVEN_SLOPE_THRESHOLD:
+        # NaN-safe guard for clearance_high (NaN ≠ NaN, so use x==x check)
+        clearance = surplus.clearance_high if surplus.clearance_high == surplus.clearance_high else 0.0
         # Supply-driven (high slope) → pull upper bound down
         alpha_high = float(np.clip(
-            1.0 - (surplus.clearance_high or 0.0) + alpha_low,
+            1.0 - clearance + alpha_low,
             alpha_low,
             1.0
         ))
