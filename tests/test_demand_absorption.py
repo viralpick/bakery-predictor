@@ -62,3 +62,50 @@ def test_panel_baseline_is_leakage_safe():
     same_dow_earlier = panel[(panel["dow"] == r["dow"]) & (panel["date"] < r["date"])]
     expected = same_dow_earlier["cat_sold"].tail(BASELINE_WEEKS).mean()
     assert r["cat_baseline"] == pytest.approx(expected)
+
+
+def test_panel_other_cat_sold_excludes_own_category():
+    """other_cat_sold must equal sum of OTHER categories' cat_sold on same store+date."""
+    # Build bread category (2 items, 12 weeks)
+    bread_daily = _daily_two_items_one_cat(n_weeks=12, seed=0)
+    assert bread_daily["category_id"].unique().tolist() == ["bread"]
+
+    # Build pastry category (2 items, 12 weeks) with different seeds for variety
+    pastry_daily = _daily_two_items_one_cat(n_weeks=12, seed=42)
+    pastry_daily["category_id"] = "pastry"
+    # Rename item_ids to avoid collision with bread items
+    pastry_daily["item_id"] = pastry_daily["item_id"].map({"i1": "i3", "i2": "i4"})
+    assert pastry_daily["category_id"].unique().tolist() == ["pastry"]
+    assert pastry_daily["item_id"].unique().tolist() == ["i3", "i4"]
+
+    # Concat both categories (same store, same dates, different items & categories)
+    daily = pd.concat([bread_daily, pastry_daily], ignore_index=True)
+    assert daily["category_id"].unique().tolist() == ["bread", "pastry"]
+
+    # Build panel
+    panel = build_absorption_panel(daily)
+
+    # Pick a date to test (any row after baseline warmup)
+    test_date = panel["date"].iloc[0]
+    store_id = panel["store_id"].iloc[0]
+
+    # Get both category rows for the same store+date
+    bread_row = panel[
+        (panel["store_id"] == store_id)
+        & (panel["category_id"] == "bread")
+        & (panel["date"] == test_date)
+    ].iloc[0]
+    pastry_row = panel[
+        (panel["store_id"] == store_id)
+        & (panel["category_id"] == "pastry")
+        & (panel["date"] == test_date)
+    ].iloc[0]
+
+    # For bread row: other_cat_sold should equal pastry's cat_sold on same store+date
+    assert bread_row["other_cat_sold"] == pytest.approx(pastry_row["cat_sold"])
+    # For pastry row: other_cat_sold should equal bread's cat_sold on same store+date
+    assert pastry_row["other_cat_sold"] == pytest.approx(bread_row["cat_sold"])
+
+    # Both other_cat_sold values should be > 0 (proving multi-category path is real)
+    assert bread_row["other_cat_sold"] > 0.0
+    assert pastry_row["other_cat_sold"] > 0.0
