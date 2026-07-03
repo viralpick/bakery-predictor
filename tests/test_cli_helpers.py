@@ -59,3 +59,13 @@ def test_scenario_commit_batch_command_registered():
     assert "items" in opts
     assert "gate" in opts
     assert "policy" not in opts
+
+
+def test_demand_absorption_command_registered():
+    import typer
+    import bakery.cli as c
+    group = typer.main.get_group(c.app)
+    cmd = group.get_command(None, "demand-absorption")
+    assert cmd is not None
+    opts = [p.name for p in cmd.params]
+    assert "source" in opts
