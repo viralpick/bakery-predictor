@@ -5,8 +5,10 @@ import pandas as pd
 import pytest
 from bakery.analysis.closing_demand import (
     build_closing_panel,
+    build_intraday_curve,
     depth_time_overlap,
     fit_depth_elasticity,
+    fit_kink,
     fit_surplus_counterfactual,
 )
 
@@ -125,3 +127,25 @@ def test_surplus_ill_posed_regression():
     res = fit_surplus_counterfactual(return_panel)
     assert res.note == "ill-posed", f"Expected note='ill-posed', got '{res.note}'"
     assert math.isnan(res.slope), f"Expected slope to be NaN, got {res.slope}"
+
+
+def _intraday_rows(days=30):
+    # pre-onset(17-19h) flat rate 2/bin; closing window(20-21h) observed 5/bin.
+    # counterfactual base in closing window = 2/bin. induced=3/bin. α = base/closing = 2/5=0.4
+    recs = []
+    for d in range(days):
+        date = pd.Timestamp("2025-02-01") + pd.Timedelta(days=d)
+        for h in [17, 18, 19]:
+            recs.append({"date": date, "hour": h, "minute": 0, "qty": 2,
+                         "label": "none", "item_id": "A"})
+        for h in [20, 21]:
+            recs.append({"date": date, "hour": h, "minute": 0, "qty": 5,
+                         "label": "closing", "item_id": "A"})
+    return pd.DataFrame(recs)
+
+
+def test_kink_recovers_alpha():
+    rows = _intraday_rows()
+    curve = build_intraday_curve(rows, pd.Series({"A": "bread"}), "bread", bin_min=60)
+    res = fit_kink(curve)
+    assert res.alpha == pytest.approx(0.4, abs=0.05)

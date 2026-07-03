@@ -23,6 +23,9 @@ MIN_SURPLUS_ROWS = 20
 HIGH_SURPLUS_QUANTILE = 0.75
 SUPPLY_DRIVEN_SLOPE_THRESHOLD = 0.5
 
+# Kink-in-time estimation
+PRE_ONSET_START_HOUR = 17
+
 
 def build_closing_panel(rows, waste, item_to_category):
     df = rows.copy()
@@ -73,6 +76,16 @@ class SurplusResult:
     slope: float
     se: float | None
     clearance_high: float
+    note: str
+
+
+@dataclass(frozen=True)
+class KinkResult:
+    """Result of kink-in-time (RD at closing onset) estimation."""
+    n_days: int
+    base: float
+    closing_total: float
+    alpha: float
     note: str
 
 
@@ -201,3 +214,57 @@ def depth_time_overlap(rows):
         "median_hour_30": round(m30) if not np.isnan(m30) else None,
         "time_separated": time_separated,
     }
+
+
+def build_intraday_curve(rows, item_to_category, category, bin_min=15):
+    """Build intraday sales curve: per-category-date, binned by time, mark closing onset.
+
+    Args:
+        rows: raw transaction rows (date, hour, minute, item_id, qty, label)
+        item_to_category: Series mapping item_id → category
+        category: category name to filter for
+        bin_min: bin width in minutes (default 15)
+
+    Returns:
+        DataFrame with cols [date, bin, qty, closing, hour] where
+        closing=True marks bins with any marked-down (label=="closing") sales.
+    """
+    df = rows.copy()
+    df["category_id"] = df["item_id"].map(item_to_category)
+    df = df[df["category_id"] == category].copy()
+    df["tod"] = df["hour"] + df["minute"] / 60.0
+    df["bin"] = (df["tod"] // (bin_min / 60.0)).astype(int)
+    df["is_closing"] = df["label"] == "closing"
+    g = df.groupby(["date", "bin"], observed=True).agg(
+        qty=("qty", "sum"), closing=("is_closing", "max"),
+        hour=("hour", "min")).reset_index()
+    return g
+
+
+def fit_kink(curve):
+    """Estimate α_A1 = B/C via RD at closing onset.
+
+    Uses pre-onset (late afternoon) sales rate, extrapolates into closing window
+    to form counterfactual base B. Observed closing window = C. α = B/C is a
+    lower bound (evening commute uplift).
+
+    Args:
+        curve: output from build_intraday_curve
+
+    Returns:
+        KinkResult with n_days, base, closing_total, alpha, note
+    """
+    days = curve["date"].nunique()
+    if days == 0:
+        return KinkResult(0, float("nan"), float("nan"), float("nan"), "no data")
+    pre = curve[(~curve["closing"].astype(bool)) & (curve["hour"] >= PRE_ONSET_START_HOUR)]
+    win = curve[curve["closing"].astype(bool)]
+    if len(pre) == 0 or len(win) == 0:
+        return KinkResult(days, float("nan"), float("nan"), float("nan"), "no pre/closing bins")
+    pre_rate = pre["qty"].mean()
+    bins_per_day = win.groupby("date").size().mean()
+    base = pre_rate * bins_per_day * days
+    closing_total = win["qty"].sum()
+    alpha = float(np.clip(base / closing_total, 0.0, 1.0)) if closing_total > 0 else float("nan")
+    return KinkResult(days, float(base), float(closing_total), alpha,
+                      "lower-bound (evening commute uplift)")
