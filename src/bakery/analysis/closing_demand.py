@@ -170,12 +170,14 @@ def fit_surplus_counterfactual(panel):
     keep[1] = True
     X_filtered = X[:, keep]
     out = _ols_hc3(y, X_filtered, treat_idx=1)
-    slope, se = (out if out is not None else (float("nan"), None))
     q75 = p["surplus"].quantile(HIGH_SURPLUS_QUANTILE)
     high = p[p["surplus"] >= q75]
-    clearance = float((high["closing_qty"] / high["surplus"]).mean()) if len(high) else float("nan")
+    clearance_high = float((high["closing_qty"] / high["surplus"]).mean()) if len(high) else float("nan")
+    if out is None:
+        return SurplusResult(len(p), float("nan"), None, clearance_high, "ill-posed")
+    slope, se = out
     note = "supply-driven (low α)" if slope > SUPPLY_DRIVEN_SLOPE_THRESHOLD else "demand-limited (higher α)"
-    return SurplusResult(len(p), float(slope), se, clearance, note)
+    return SurplusResult(len(p), float(slope), se, clearance_high, note)
 
 
 def depth_time_overlap(rows):

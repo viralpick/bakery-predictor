@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -100,3 +102,26 @@ def test_surplus_slope_saturated():
     p = _surplus_panel(slope=0.9); p["closing_qty"] = 8.0
     res = fit_surplus_counterfactual(p)
     assert res.slope == pytest.approx(0.0, abs=0.05)
+
+
+def test_surplus_ill_posed_regression():
+    """Test that ill-posed regression (singular design matrix) returns note='ill-posed' not 'demand-limited'."""
+    # Create a panel where surplus is perfectly collinear with trend,
+    # making the design matrix singular and _ols_hc3 return None.
+    rng = np.arange(200)
+    dates = pd.to_datetime("2025-01-01") + pd.to_timedelta(rng, "D")
+    # surplus = trend (perfect collinearity)
+    surplus_vals = rng % 40 + 10
+    trend_vals = rng % 40 + 10
+    return_panel = pd.DataFrame({
+        "category_id": ["bread"] * 200,
+        "date": dates,
+        "closing_qty": 5.0,  # constant, arbitrary
+        "surplus": surplus_vals,
+        "normal_qty": 100.0,
+        "dow": rng % 7,
+        "trend": trend_vals,
+    })
+    res = fit_surplus_counterfactual(return_panel)
+    assert res.note == "ill-posed", f"Expected note='ill-posed', got '{res.note}'"
+    assert math.isnan(res.slope), f"Expected slope to be NaN, got {res.slope}"
