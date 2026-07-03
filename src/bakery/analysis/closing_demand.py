@@ -97,6 +97,11 @@ def _depth_design_matrix(long: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, in
     return y, X_filtered, 1  # depth is at column index 1 after filtering
 
 
+def _nan_depth_result(n: int, note: str) -> DepthResult:
+    """Return DepthResult with NaN values for regression failures."""
+    return DepthResult(n, float("nan"), None, float("nan"), float("nan"), note)
+
+
 def fit_depth_elasticity(panel):
     """Estimate depth elasticity via OLS; extrapolate to depth=0 for base demand B.
 
@@ -107,23 +112,12 @@ def fit_depth_elasticity(panel):
     long = _depth_long(panel)
     long = long[long["y"].notna()]
     if long["depth"].nunique() < 2 or len(long) < MIN_DEPTH_ROWS:
-        return DepthResult(
-            len(long),
-            float("nan"),
-            None,
-            float("nan"),
-            float("nan"),
-            "insufficient depth variation",
-        )
+        return _nan_depth_result(len(long), "insufficient depth variation")
     y, X_filtered, treat_idx = _depth_design_matrix(long)
     out = _ols_hc3(y, X_filtered, treat_idx=treat_idx)
     if out is None:
-        return DepthResult(
-            len(long), float("nan"), None, float("nan"), float("nan"), "ill-posed"
-        )
+        return _nan_depth_result(len(long), "ill-posed")
     slope, se = out
-    # Predict at depth=0: intercept + slope * 0 = intercept
-    # Intercept = mean(y) - slope * mean(depth) when centered
     base = float(np.clip(y.mean() - slope * long["depth"].mean(), 0.0, None))
     alpha = (
         float(np.clip(base / y.mean(), 0.0, 1.0))
