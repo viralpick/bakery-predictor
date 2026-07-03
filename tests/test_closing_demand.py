@@ -4,12 +4,16 @@ import numpy as np
 import pandas as pd
 import pytest
 from bakery.analysis.closing_demand import (
+    aggregate_alpha,
     build_closing_panel,
     build_intraday_curve,
     depth_time_overlap,
     fit_depth_elasticity,
     fit_kink,
     fit_surplus_counterfactual,
+    DepthResult,
+    KinkResult,
+    SurplusResult,
 )
 
 
@@ -183,3 +187,15 @@ def test_kink_scope_consistent_base_partial_coverage():
     res = fit_kink(curve)
     # α should be 0.4 (scope-consistent), not 0.6 (days-biased)
     assert res.alpha == pytest.approx(0.4, abs=0.05)
+
+
+def test_aggregate_alpha_interval():
+    kink = KinkResult(30, 2.0, 5.0, 0.40, "")
+    depth = DepthResult(200, 50.0, 2.0, 10.0, 0.45, "")
+    surplus = SurplusResult(200, 0.9, 0.05, 0.9, "supply-driven (low α)")
+    est = aggregate_alpha(kink, depth, surplus)
+    # lower bound = max of the two lower-bound methods (A1, A2)
+    assert est.alpha_low == pytest.approx(0.45, abs=1e-6)
+    assert est.a1 == pytest.approx(0.40, abs=1e-6)
+    assert est.a2 == pytest.approx(0.45, abs=1e-6)
+    assert 0.0 <= est.alpha_low <= est.alpha_high <= 1.0

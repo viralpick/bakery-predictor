@@ -90,6 +90,17 @@ class KinkResult:
     note: str
 
 
+@dataclass(frozen=True)
+class AlphaEstimate:
+    """Aggregated α interval from three estimators (A1/A2/A3)."""
+    alpha_low: float
+    alpha_high: float
+    a1: float
+    a2: float
+    a3_slope: float
+    note: str
+
+
 def _depth_long(panel):
     """Reshape closing_qty_30/closing_qty_20 to long format (depth observation per row)."""
     a = panel[["closing_qty_30", "surplus", "dow", "trend"]].rename(
@@ -273,3 +284,35 @@ def fit_kink(curve):
     alpha = float(np.clip(base / closing_total, 0.0, 1.0))
     return KinkResult(days, float(base), float(closing_total), alpha,
                       "lower-bound (evening commute uplift)")
+
+
+def aggregate_alpha(kink, depth, surplus):
+    """Aggregate three estimators (A1/A2/A3) into a single α interval.
+
+    A1 (kink) and A2 (depth) are lower-bound methods → alpha_low = max(their α).
+    A3 (surplus) informs the upper side: if supply-driven (high slope),
+    pull the upper bound down; if demand-limited, allow up to 1.0.
+    Both bounds are clipped to [0,1] and α_low ≤ α_high is maintained.
+    """
+    # A1, A2 are lower bounds; take the max (drop NaN)
+    lowers = [v for v in (kink.alpha, depth.alpha) if v == v]
+    alpha_low = max(lowers) if lowers else float("nan")
+
+    # A3 (surplus) informs upper bound
+    alpha_high = 1.0
+    if surplus.slope == surplus.slope and surplus.slope > SUPPLY_DRIVEN_SLOPE_THRESHOLD:
+        # Supply-driven (high slope) → pull upper bound down
+        alpha_high = float(np.clip(
+            1.0 - (surplus.clearance_high or 0.0) + alpha_low,
+            alpha_low,
+            1.0
+        ))
+
+    # Ensure invariant: both in [0,1], alpha_low ≤ alpha_high
+    alpha_low = float(np.clip(alpha_low, 0.0, 1.0))
+    alpha_high = float(np.clip(alpha_high, 0.0, 1.0))
+    if not np.isnan(alpha_low):
+        alpha_high = max(alpha_high, alpha_low)
+
+    note = f"lower=max(A1,A2) bounds; A3 {surplus.note}"
+    return AlphaEstimate(alpha_low, alpha_high, kink.alpha, depth.alpha, surplus.slope, note)
