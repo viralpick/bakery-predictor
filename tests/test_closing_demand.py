@@ -1,0 +1,37 @@
+import pandas as pd
+import pytest
+from bakery.analysis.closing_demand import build_closing_panel
+
+
+def _rows():
+    # 1 day, 1 category(bread) via item->cat map; 2 normal + 3 closing(30%) + 2 closing(20%)
+    return pd.DataFrame({
+        "date": pd.to_datetime(["2026-01-05"] * 7),
+        "hour": [10, 11, 20, 20, 21, 20, 21],
+        "minute": [0, 0, 5, 10, 0, 15, 30],
+        "item_id": ["A"] * 7,
+        "qty": [2, 3, 1, 1, 1, 1, 1],   # normal:5, closing30:3, closing20:2
+        "label": ["none", "none", "closing", "closing", "closing", "closing", "closing"],
+        "discount_code": ["", "", "0077", "0077", "0077", "0069", "0069"],
+    })
+
+
+def test_panel_decomposition_identity():
+    rows = _rows()
+    waste = pd.DataFrame({"date": pd.to_datetime(["2026-01-05"]), "item_id": ["A"], "waste_qty": [4]})
+    itc = pd.Series({"A": "bread"})
+    panel = build_closing_panel(rows, waste, itc)
+    r = panel.iloc[0]
+    assert r["normal_qty"] == 5
+    assert r["closing_qty"] == 5           # 3 + 2
+    assert r["closing_qty_30"] == 3
+    assert r["closing_qty_20"] == 2
+    assert r["waste_qty"] == 4
+    assert r["surplus"] == 9               # closing 5 + waste 4
+
+
+def test_surplus_equals_closing_plus_waste_all_rows():
+    rows = _rows()
+    waste = pd.DataFrame({"date": pd.to_datetime(["2026-01-05"]), "item_id": ["A"], "waste_qty": [4]})
+    panel = build_closing_panel(rows, waste, pd.Series({"A": "bread"}))
+    assert (panel["surplus"] == panel["closing_qty"] + panel["waste_qty"]).all()
