@@ -24,6 +24,7 @@ HIGH_SURPLUS_QUANTILE = 0.75
 SUPPLY_DRIVEN_SLOPE_THRESHOLD = 0.5
 
 # Kink-in-time estimation
+DEFAULT_BIN_MIN = 15
 PRE_ONSET_START_HOUR = 17
 
 
@@ -216,19 +217,21 @@ def depth_time_overlap(rows):
     }
 
 
-def build_intraday_curve(rows, item_to_category, category, bin_min=15):
+def build_intraday_curve(rows, item_to_category, category, bin_min=None):
     """Build intraday sales curve: per-category-date, binned by time, mark closing onset.
 
     Args:
         rows: raw transaction rows (date, hour, minute, item_id, qty, label)
         item_to_category: Series mapping item_id → category
         category: category name to filter for
-        bin_min: bin width in minutes (default 15)
+        bin_min: bin width in minutes (default DEFAULT_BIN_MIN)
 
     Returns:
         DataFrame with cols [date, bin, qty, closing, hour] where
         closing=True marks bins with any marked-down (label=="closing") sales.
     """
+    if bin_min is None:
+        bin_min = DEFAULT_BIN_MIN
     df = rows.copy()
     df["category_id"] = df["item_id"].map(item_to_category)
     df = df[df["category_id"] == category].copy()
@@ -261,10 +264,12 @@ def fit_kink(curve):
     win = curve[curve["closing"].astype(bool)]
     if len(pre) == 0 or len(win) == 0:
         return KinkResult(days, float("nan"), float("nan"), float("nan"), "no pre/closing bins")
-    pre_rate = pre["qty"].mean()
-    bins_per_day = win.groupby("date").size().mean()
-    base = pre_rate * bins_per_day * days
     closing_total = win["qty"].sum()
-    alpha = float(np.clip(base / closing_total, 0.0, 1.0)) if closing_total > 0 else float("nan")
+    if closing_total <= 0:
+        return KinkResult(days, float("nan"), float(closing_total), float("nan"),
+                          "degenerate: closing total is zero")
+    pre_rate = pre["qty"].mean()
+    base = pre_rate * len(win)
+    alpha = float(np.clip(base / closing_total, 0.0, 1.0))
     return KinkResult(days, float(base), float(closing_total), alpha,
                       "lower-bound (evening commute uplift)")

@@ -149,3 +149,37 @@ def test_kink_recovers_alpha():
     curve = build_intraday_curve(rows, pd.Series({"A": "bread"}), "bread", bin_min=60)
     res = fit_kink(curve)
     assert res.alpha == pytest.approx(0.4, abs=0.05)
+
+
+def test_kink_scope_consistent_base_partial_coverage():
+    """Verify α uses scope-consistent base (pre_rate × num_closing_bins), not all-days bias.
+
+    If some days have pre-onset bins but NO closing bins, the old formula
+    base = pre_rate * bins_per_day * days would inflate base (wrong denominator).
+    Scope-consistent base = pre_rate * len(win) avoids this.
+
+    Setup: 20 days with pre+closing, 10 days pre-only.
+    Expected α = (2 × 40 bins) / 200 = 0.4 (scope-consistent).
+    Wrong α = (2 × 2 × 30) / 200 = 0.6 (days-based, would fail this test).
+    """
+    recs = []
+    # Days 0-19: both pre-onset (17-19) and closing (20-21)
+    for d in range(20):
+        date = pd.Timestamp("2025-02-01") + pd.Timedelta(days=d)
+        for h in [17, 18, 19]:
+            recs.append({"date": date, "hour": h, "minute": 0, "qty": 2,
+                         "label": "none", "item_id": "A"})
+        for h in [20, 21]:
+            recs.append({"date": date, "hour": h, "minute": 0, "qty": 5,
+                         "label": "closing", "item_id": "A"})
+    # Days 20-29: pre-onset only, NO closing
+    for d in range(20, 30):
+        date = pd.Timestamp("2025-02-01") + pd.Timedelta(days=d)
+        for h in [17, 18, 19]:
+            recs.append({"date": date, "hour": h, "minute": 0, "qty": 2,
+                         "label": "none", "item_id": "A"})
+    rows = pd.DataFrame(recs)
+    curve = build_intraday_curve(rows, pd.Series({"A": "bread"}), "bread", bin_min=60)
+    res = fit_kink(curve)
+    # α should be 0.4 (scope-consistent), not 0.6 (days-biased)
+    assert res.alpha == pytest.approx(0.4, abs=0.05)
