@@ -27,6 +27,11 @@ SUPPLY_DRIVEN_SLOPE_THRESHOLD = 0.5
 DEFAULT_BIN_MIN = 15
 PRE_ONSET_START_HOUR = 17
 
+# Evening-traffic floor diagnostic (A1 counterfactual validity)
+AFTERNOON_END_HOUR = 19
+EVENING_START_HOUR = 20
+EVENING_END_HOUR = 21
+
 
 def build_closing_panel(rows, waste, item_to_category):
     df = rows.copy()
@@ -142,6 +147,18 @@ def _nan_depth_result(n: int, note: str) -> DepthResult:
     return DepthResult(n, float("nan"), None, float("nan"), float("nan"), note)
 
 
+def _degenerate_negative_base_result(n: int, slope: float, se: float | None, raw_base: float) -> DepthResult:
+    """Steep positive slope extrapolated to a negative base at depth=0.
+
+    That's the extrapolation itself being degenerate (depth endogeneity), not a
+    valid "0% real demand" estimate -- must surface as NaN, not clip to 0.0.
+    """
+    return DepthResult(
+        n, slope, se, raw_base, float("nan"),
+        "degenerate: negative extrapolation (depth endogeneity) → uninformative",
+    )
+
+
 def fit_depth_elasticity(panel):
     """Estimate depth elasticity via OLS; extrapolate to depth=0 for base demand B.
 
@@ -158,15 +175,45 @@ def fit_depth_elasticity(panel):
     if out is None:
         return _nan_depth_result(len(long), "ill-posed")
     slope, se = out
-    base = float(np.clip(y.mean() - slope * long["depth"].mean(), 0.0, None))
+    raw_base = float(y.mean() - slope * long["depth"].mean())
+    if raw_base < 0.0:
+        return _degenerate_negative_base_result(len(long), slope, se, raw_base)
     alpha = (
-        float(np.clip(base / y.mean(), 0.0, 1.0))
+        float(np.clip(raw_base / y.mean(), 0.0, 1.0))
         if y.mean() > 0
         else float("nan")
     )
     return DepthResult(
-        len(long), slope, se, base, alpha, "lower-bound (depth endogeneity)"
+        len(long), slope, se, raw_base, alpha, "lower-bound (depth endogeneity)"
     )
+
+
+def _with_clearance_marker(note: str, clearance_high: float) -> str:
+    """Flag clearance_high > 1.0 (can occur when waste `out` is negative -> data-quality issue)."""
+    if clearance_high == clearance_high and clearance_high > 1.0:
+        return note + " [clearance>1: check waste data]"
+    return note
+
+
+def _surplus_design_matrix(p: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """Build design matrix for surplus counterfactual: [intercept, surplus, normal_qty, trend, dow-dummies].
+
+    Returns (y, X_filtered) with constant/near-constant columns removed.
+    """
+    y = p["closing_qty"].to_numpy(dtype=float)
+    dow = pd.get_dummies(p["dow"], prefix="dow", drop_first=True).to_numpy(dtype=float)
+    cols = [
+        np.ones(len(p)),
+        p["surplus"].to_numpy(dtype=float),
+        p["normal_qty"].to_numpy(dtype=float),
+        p["trend"].to_numpy(dtype=float),
+        dow,
+    ]
+    X = np.column_stack(cols)
+    keep = X.std(axis=0) > ZERO_VARIANCE_THRESHOLD
+    keep[0] = True  # keep intercept
+    keep[1] = True  # keep treatment (surplus)
+    return y, X[:, keep]
 
 
 def fit_surplus_counterfactual(panel):
@@ -180,28 +227,17 @@ def fit_surplus_counterfactual(panel):
     p = panel[panel["surplus"] > 0].copy()
     if len(p) < MIN_SURPLUS_ROWS:
         return SurplusResult(len(p), float("nan"), None, float("nan"), "insufficient rows")
-    y = p["closing_qty"].to_numpy(dtype=float)
-    dow = pd.get_dummies(p["dow"], prefix="dow", drop_first=True).to_numpy(dtype=float)
-    cols = [
-        np.ones(len(p)),
-        p["surplus"].to_numpy(dtype=float),
-        p["normal_qty"].to_numpy(dtype=float),
-        p["trend"].to_numpy(dtype=float),
-        dow,
-    ]
-    X = np.column_stack(cols)
-    keep = X.std(axis=0) > ZERO_VARIANCE_THRESHOLD
-    keep[0] = True
-    keep[1] = True
-    X_filtered = X[:, keep]
+    y, X_filtered = _surplus_design_matrix(p)
     out = _ols_hc3(y, X_filtered, treat_idx=1)
     q75 = p["surplus"].quantile(HIGH_SURPLUS_QUANTILE)
     high = p[p["surplus"] >= q75]
     clearance_high = float((high["closing_qty"] / high["surplus"]).mean()) if len(high) else float("nan")
     if out is None:
-        return SurplusResult(len(p), float("nan"), None, clearance_high, "ill-posed")
+        note = _with_clearance_marker("ill-posed", clearance_high)
+        return SurplusResult(len(p), float("nan"), None, clearance_high, note)
     slope, se = out
     note = "supply-driven (low α)" if slope > SUPPLY_DRIVEN_SLOPE_THRESHOLD else "demand-limited (higher α)"
+    note = _with_clearance_marker(note, clearance_high)
     return SurplusResult(len(p), float(slope), se, clearance_high, note)
 
 
@@ -225,6 +261,47 @@ def depth_time_overlap(rows):
         "median_hour_20": round(m20) if not np.isnan(m20) else None,
         "median_hour_30": round(m30) if not np.isnan(m30) else None,
         "time_separated": time_separated,
+    }
+
+
+def _window_hourly_rate(df: pd.DataFrame, start_hour: int, end_hour: int) -> float:
+    """Mean per-hour sales rate in [start_hour, end_hour], summed across days then averaged.
+
+    Returns NaN if the window has no rows (degenerate).
+    """
+    win = df[(df["hour"] >= start_hour) & (df["hour"] <= end_hour)]
+    if win.empty:
+        return float("nan")
+    n_days = win["date"].nunique()
+    if n_days == 0:
+        return float("nan")
+    per_hour = win.groupby("hour")["qty"].sum() / n_days
+    return float(per_hour.mean())
+
+
+def evening_traffic_check(rows, item_to_category, category: str) -> dict:
+    """Diagnostic: does non-closing evening (20-21h) traffic hold up vs afternoon (17-19h)?
+
+    fit_kink (A1) uses the afternoon non-closing rate as the counterfactual for
+    the closing window. That interpretation is a valid LOWER bound on α only if
+    evening traffic (absent the discount) is >= afternoon traffic; if evening
+    traffic naturally declines, A1 overstates α instead. Uses ONLY non-closing
+    (full-price, label != "closing") rows so the discount itself can't bias it.
+    """
+    df = rows.copy()
+    df["category_id"] = df["item_id"].map(item_to_category)
+    df = df[(df["category_id"] == category) & (df["label"] != "closing")]
+    afternoon_rate = _window_hourly_rate(df, PRE_ONSET_START_HOUR, AFTERNOON_END_HOUR)
+    evening_rate = _window_hourly_rate(df, EVENING_START_HOUR, EVENING_END_HOUR)
+    have_rates = afternoon_rate == afternoon_rate and evening_rate == evening_rate
+    valid_inputs = have_rates and afternoon_rate > 0
+    ratio = float(evening_rate / afternoon_rate) if valid_inputs else float("nan")
+    a1_floor_valid = (ratio >= 1.0) if valid_inputs else None
+    return {
+        "afternoon_rate": afternoon_rate,
+        "evening_rate": evening_rate,
+        "evening_to_afternoon_ratio": ratio,
+        "a1_floor_valid": a1_floor_valid,
     }
 
 
@@ -282,8 +359,12 @@ def fit_kink(curve):
     pre_rate = pre["qty"].mean()
     base = pre_rate * len(win)
     alpha = float(np.clip(base / closing_total, 0.0, 1.0))
-    return KinkResult(days, float(base), float(closing_total), alpha,
-                      "lower-bound (evening commute uplift)")
+    note = (
+        "degenerate: base exceeds closing (no discount lift)"
+        if base > closing_total
+        else "lower-bound (evening commute uplift)"
+    )
+    return KinkResult(days, float(base), float(closing_total), alpha, note)
 
 
 def aggregate_alpha(kink, depth, surplus):
