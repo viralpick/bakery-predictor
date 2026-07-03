@@ -5,6 +5,7 @@ from bakery.analysis.closing_demand import (
     build_closing_panel,
     depth_time_overlap,
     fit_depth_elasticity,
+    fit_surplus_counterfactual,
 )
 
 
@@ -74,3 +75,28 @@ def test_depth_time_confound_flag():
     assert ov["median_hour_20"] == 20.0
     assert ov["median_hour_30"] == 21.0
     assert ov["time_separated"] is True   # medians differ ≥ 1h
+
+
+def _surplus_panel(slope, n=200):
+    rng = np.arange(n)
+    surplus = 10.0 + rng % 40          # varies 10..49
+    closing = slope * surplus          # supply-driven if slope~1
+    return pd.DataFrame({
+        "category_id": ["bread"]*n,
+        "date": pd.to_datetime("2025-01-01") + pd.to_timedelta(rng, "D"),
+        "closing_qty": closing, "surplus": surplus,
+        "normal_qty": 100.0, "dow": rng % 7, "trend": rng,
+    })
+
+
+def test_surplus_slope_supply_driven():
+    res = fit_surplus_counterfactual(_surplus_panel(slope=0.9))
+    assert res.slope == pytest.approx(0.9, abs=0.05)   # tracks surplus → supply-driven
+    assert res.clearance_high == pytest.approx(0.9, abs=0.05)
+
+
+def test_surplus_slope_saturated():
+    # closing fixed regardless of surplus → demand-driven base
+    p = _surplus_panel(slope=0.9); p["closing_qty"] = 8.0
+    res = fit_surplus_counterfactual(p)
+    assert res.slope == pytest.approx(0.0, abs=0.05)

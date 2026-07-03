@@ -18,6 +18,11 @@ MIN_DEPTH_ROWS = 20
 ZERO_VARIANCE_THRESHOLD = 1e-12
 TIME_SEPARATION_HOURS = 1.0
 
+# Surplus counterfactual estimation
+MIN_SURPLUS_ROWS = 20
+HIGH_SURPLUS_QUANTILE = 0.75
+SUPPLY_DRIVEN_SLOPE_THRESHOLD = 0.5
+
 
 def build_closing_panel(rows, waste, item_to_category):
     df = rows.copy()
@@ -58,6 +63,16 @@ class DepthResult:
     se: float | None
     base: float
     alpha: float
+    note: str
+
+
+@dataclass(frozen=True)
+class SurplusResult:
+    """Result of surplus counterfactual estimation."""
+    n: int
+    slope: float
+    se: float | None
+    clearance_high: float
     note: str
 
 
@@ -127,6 +142,40 @@ def fit_depth_elasticity(panel):
     return DepthResult(
         len(long), slope, se, base, alpha, "lower-bound (depth endogeneity)"
     )
+
+
+def fit_surplus_counterfactual(panel):
+    """Estimate surplus counterfactual: how closing qty scales with actual end-of-day surplus.
+
+    Slope > 0.5 → supply-driven dumping (low α). Slope ≈ 0 → demand-limited base (higher α).
+    Controls for normal_qty, trend, day-of-week.
+    """
+    from ._ols import _ols_hc3
+
+    p = panel[panel["surplus"] > 0].copy()
+    if len(p) < MIN_SURPLUS_ROWS:
+        return SurplusResult(len(p), float("nan"), None, float("nan"), "insufficient rows")
+    y = p["closing_qty"].to_numpy(dtype=float)
+    dow = pd.get_dummies(p["dow"], prefix="dow", drop_first=True).to_numpy(dtype=float)
+    cols = [
+        np.ones(len(p)),
+        p["surplus"].to_numpy(dtype=float),
+        p["normal_qty"].to_numpy(dtype=float),
+        p["trend"].to_numpy(dtype=float),
+        dow,
+    ]
+    X = np.column_stack(cols)
+    keep = X.std(axis=0) > ZERO_VARIANCE_THRESHOLD
+    keep[0] = True
+    keep[1] = True
+    X_filtered = X[:, keep]
+    out = _ols_hc3(y, X_filtered, treat_idx=1)
+    slope, se = (out if out is not None else (float("nan"), None))
+    q75 = p["surplus"].quantile(HIGH_SURPLUS_QUANTILE)
+    high = p[p["surplus"] >= q75]
+    clearance = float((high["closing_qty"] / high["surplus"]).mean()) if len(high) else float("nan")
+    note = "supply-driven (low α)" if slope > SUPPLY_DRIVEN_SLOPE_THRESHOLD else "demand-limited (higher α)"
+    return SurplusResult(len(p), float(slope), se, clearance, note)
 
 
 def depth_time_overlap(rows):
