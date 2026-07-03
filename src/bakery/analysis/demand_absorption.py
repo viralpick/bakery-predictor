@@ -113,16 +113,28 @@ def _ols_hc3(y: np.ndarray, X: np.ndarray, treat_idx: int) -> tuple[float, float
     if n - k < 5:
         return None
     XtX = X.T @ X
-    if not np.isfinite(np.linalg.cond(XtX)) or np.linalg.cond(XtX) > MAX_CONDITION_NUMBER:
+    try:
+        cond = np.linalg.cond(XtX)
+    except np.linalg.LinAlgError:
         return None
-    XtX_inv = np.linalg.inv(XtX)
+    if not np.isfinite(cond) or cond > MAX_CONDITION_NUMBER:
+        return None
+    try:
+        XtX_inv = np.linalg.inv(XtX)
+    except np.linalg.LinAlgError:
+        return None
     beta = XtX_inv @ X.T @ y
     resid = y - X @ beta
     h = np.einsum("ij,jk,ik->i", X, XtX_inv, X)          # leverages
     denom = np.clip((1.0 - h) ** 2, 1e-8, None)
     meat = X.T @ (X * (resid ** 2 / denom)[:, None])     # HC3 sandwich meat
     cov = XtX_inv @ meat @ XtX_inv
-    se = float(np.sqrt(cov[treat_idx, treat_idx]))
+    treat_var = cov[treat_idx, treat_idx]
+    if not np.isfinite(treat_var) or treat_var < 0:
+        return None
+    se = float(np.sqrt(treat_var))
+    if not np.isfinite(se) or se <= 0:
+        return None
     return float(beta[treat_idx]), se
 
 

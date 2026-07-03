@@ -115,11 +115,14 @@ def test_panel_other_cat_sold_excludes_own_category():
 def _panel_with_effect(beta_true: float, n_weeks: int = 40, seed: int = 1):
     """Synthetic (store,cat,date) panel: cat_sold = base + beta_true*T + traffic + noise.
     beta_true=0 → absorption; beta_true<0 → walk-away. T correlated with traffic to
-    stress the confound control."""
+    stress the confound control. traffic is a near-perfect proxy for demand_level
+    (tiny noise) so the confound is (near-)fully absorbed by the other_cat_sold
+    control — this makes beta_true=0.0 a genuine β≈0 fixture rather than one that
+    depends on errors-in-variables luck at a particular seed."""
     rng = np.random.default_rng(seed)
     dates = pd.date_range("2024-01-01", periods=n_weeks * 7, freq="D")
     demand_level = rng.normal(100, 15, len(dates))          # daily category demand
-    traffic = demand_level + rng.normal(0, 5, len(dates))   # other-cat proxy (correlated)
+    traffic = demand_level + rng.normal(0, 1, len(dates))   # near-perfect other-cat proxy
     # high-demand days → more stockout hours (the confound)
     stockout_hours = np.clip((demand_level - 100) * 0.3 + rng.normal(0, 1, len(dates)), 0, None)
     cat_sold = demand_level + beta_true * stockout_hours + rng.normal(0, 3, len(dates))
@@ -138,10 +141,17 @@ def _panel_with_effect(beta_true: float, n_weeks: int = 40, seed: int = 1):
 
 
 def test_fit_recovers_absorption_zero_beta():
-    panel = _panel_with_effect(beta_true=0.0)
-    res = fit_absorption(panel, "s1", "bread")
-    assert res.verdict == "absorb"
-    assert abs(res.beta) < res.delta            # inside equivalence band
+    """β_true=0.0 with a near-perfect traffic proxy must yield 'absorb' robustly —
+    not just at one lucky seed. Loop over seeds to guard against errors-in-variables
+    residual confound flipping the verdict."""
+    for seed in range(5):
+        panel = _panel_with_effect(beta_true=0.0, seed=seed)
+        res = fit_absorption(panel, "s1", "bread")
+        assert res is not None, f"seed={seed}: fit returned None"
+        assert res.verdict == "absorb", (
+            f"seed={seed}: verdict={res.verdict} beta={res.beta} delta={res.delta}")
+        assert abs(res.beta) < 1.0, f"seed={seed}: beta={res.beta} not near 0"
+        assert abs(res.beta) < res.delta            # inside equivalence band
 
 
 def test_fit_recovers_walkaway_negative_beta():
