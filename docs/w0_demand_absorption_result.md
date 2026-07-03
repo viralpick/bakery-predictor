@@ -62,4 +62,48 @@ leave-one-out 총량보존 계수 β 회귀:
 
 1. **v4 3-stage 유지·정당화**: Stage 1(카테고리 총량 quantile) → Stage 2(품목 비율 배분). bread/pastry에 적용.
 2. **카테고리별 차등**: sandwich는 단일품목 직접 예측, cake는 시즌 모델 분리.
-3. **다매장 도착 시**: 동일 검증을 store_daily 경로로 재실행, 특히 삼성타운 β 부호 확인(walk-away 신호 상호검증).
+3. **다매장 도착 시**: 동일 검증을 store_daily 경로로 재실행, 특히 삼성타운 β 부호 확인(walk-away 신호 상호검증). → 아래 §다매장 확장에서 완료.
+
+---
+
+## 다매장 확장 (2026-07-03)
+
+`scripts/absorption_4stores.py` — `store_daily.build_store_daily`로 4매장(광교/삼성타운/메세나폴리스/광화문) daily(bulk 제외)를 만들어 광교 단독에서 머지된 동일 `run_absorption` 로직에 태움. 실행: `PYTHONPATH=scripts uv run python scripts/absorption_4stores.py`, 산출 `reports/demand_absorption/results_4stores.csv`.
+
+### 게이트 대상(bread/pastry) 결과
+
+| 매장 | 카테고리 | β | 90% CI | δ | 판정 |
+|---|---|---|---|---|---|
+| 광교 | bread | +0.024 | [+0.016,+0.033] | 0.047 | **absorb** ✅ |
+| 광교 | pastry | +0.033 | [+0.022,+0.043] | 0.067 | **absorb** ✅ |
+| 메세나 | bread | +0.053 | [+0.039,+0.068] | 0.094 | **absorb** ✅ |
+| 메세나 | pastry | +0.043 | [+0.025,+0.061] | 0.137 | **absorb** ✅ |
+| 광화문 | bread | +0.099 | [+0.074,+0.124] | 0.120 | inconclusive (경계) |
+| 광화문 | pastry | +0.098 | [+0.072,+0.125] | 0.116 | inconclusive (경계) |
+| 삼성 | bread | +0.121 | [+0.111,+0.132] | 0.024 | inconclusive |
+| 삼성 | pastry | +0.074 | [+0.058,+0.091] | 0.072 | inconclusive |
+
+### 핵심
+
+1. **walk-away(β<0)가 20건 전 카테고리·전 매장에서 0건.** 4매장 어디서도 품절이 카테고리 총량을 감소시키지 않는다 — W0의 핵심 결론(카테고리 총량이 품절로 무너지지 않음)이 **4매장 일반화**. (기존 substitution 4매장 DiD 유의비율 3~4% 노이즈 바닥 결론과 일관.)
+2. **광교·메세나: 깨끗한 absorb** (β 작고 CI⊂δ).
+3. **광화문: inconclusive지만 CI 상한이 δ를 근소 초과**하는 경계 (거의 absorb).
+4. **삼성: β가 유독 큼(+0.121), δ 작음(0.024)** → 명확한 inconclusive. placebo 삼성 bread β=+0.041(실제 +0.121)로 잔차 confound만으로 설명 안 되는 실제 양의 신호. **방향이 +이므로 walk-away 아님.**
+
+### 삼성타운 해석 (매출검정 lost-sales와의 화해)
+
+삼성은 매장 매출검정에서 유일하게 lost-sales(잠재구매자 이탈) 신호가 있던 매장인데, 흡수검증 β는 오히려 크게 양수다. 모순이 아니다: **흡수검증은 관측 sold 기반이라 영수증 없이 떠난 손님(extensive margin)을 구조적으로 못 본다.** sold 안에서는 품절일에 총량이 유지/증가(β>0)하고, 잠재 이탈은 별도 마진에서 매출검정으로만 잡힌다. 두 신호는 상호보완 (project_stockout_revenue_perstore, project_substitution_mnl §walk-away와 일관).
+
+### inconclusive의 의미 (정직한 한계)
+
+삼성·광화문의 inconclusive는 **"흡수 아님"이 아니라 "이 방법(TOST)으로 흡수 크기를 엄밀히 확정 못함"**이다. β 양수 크기가 매장마다 다른 것은 이중 통제 후에도 남는 **잔차 고수요 confound가 매장마다 다르게 크기 때문**(삼성이 가장 큼). δ가 매장별로 다른 것도(삼성 0.024 vs 메세나 0.137) 품절강도 IQR·평균 차이 탓. 견고한 부분은 **walk-away 부재**이고, 흡수의 정밀 크기는 매장별 confound 차이로 유보된다.
+
+### 경로 일관성 sanity check
+
+광교는 bonavi_daily 경로(PR#18: bread +0.014, pastry +0.043 absorb)와 store_daily 경로(bread +0.024, pastry +0.033 absorb) 두 결과가 **모두 absorb로 일관** (소폭 차이는 데이터 소스·bulk 제외 차이).
+
+### 다매장 게이트 판정: **통과 (walk-away 부재 4매장 일반화)**
+
+- 일반 카테고리 8건 중 absorb 4건(광교·메세나), 경계/inconclusive 4건(광화문·삼성) — **walk-away 0건**.
+- 카테고리 총량 모델링(v4 Stage 1→2) 정당성이 4매장에서 흡수 반대 신호 부재로 지지됨.
+- 삼성·광화문은 흡수 **크기**를 엄밀 확정 못하나(잔차 confound 큼), 흡수를 **부정하지도 않음**. 매장별 α/보수성 차등의 근거로 활용(삼성은 confound 큼 = 수요 변동 큼 → 더 보수적 quantile 검토).
