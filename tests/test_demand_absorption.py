@@ -11,7 +11,7 @@ import pytest
 
 from bakery.analysis.demand_absorption import (
     DEFAULT_CLOSE_HOUR, BASELINE_WEEKS, build_absorption_panel,
-    AbsorptionResult, EQUIV_FRAC, fit_absorption,
+    AbsorptionResult, EQUIV_FRAC, fit_absorption, run_absorption,
 )
 
 
@@ -165,3 +165,36 @@ def test_fit_recovers_walkaway_negative_beta():
 def test_fit_returns_none_on_tiny_panel():
     panel = _panel_with_effect(beta_true=0.0).head(10)
     assert fit_absorption(panel, "s1", "bread") is None
+
+
+def _inject_random_stockouts(daily: pd.DataFrame, seed: int, frac: float = 0.4) -> None:
+    """Mutate `daily` in place: item i1 sells out at a random hour on `frac` of
+    dates. `_daily_two_items_one_cat` has zero stockout variance by design (its
+    other tests need a clean base), which makes stockout_hours a constant-zero
+    column — singular for OLS. run_absorption needs real variance to exercise
+    the regression path instead of always hitting fit_absorption's None guard."""
+    rng = np.random.default_rng(seed)
+    daily["stockout_time"] = daily["stockout_time"].astype("datetime64[ns]")
+    dates = daily["date"].unique()
+    stockout_dates = rng.choice(dates, size=int(len(dates) * frac), replace=False)
+    mask = (daily["item_id"] == "i1") & (daily["date"].isin(stockout_dates))
+    hours = rng.uniform(10, 21, mask.sum())
+    daily.loc[mask, "is_stockout"] = True
+    daily.loc[mask, "stockout_time"] = [
+        pd.Timestamp(d) + pd.Timedelta(hours=h)
+        for d, h in zip(daily.loc[mask, "date"], hours)
+    ]
+
+
+def test_run_absorption_covers_store_categories():
+    daily = _daily_two_items_one_cat(n_weeks=40)
+    _inject_random_stockouts(daily, seed=1)
+    # add a second category so other_cat_sold is non-trivial
+    d2 = _daily_two_items_one_cat(n_weeks=40, seed=9)
+    _inject_random_stockouts(d2, seed=2)
+    d2["category_id"] = "pastry"
+    d2["item_id"] = d2["item_id"] + "_p"
+    results = run_absorption(pd.concat([daily, d2], ignore_index=True))
+    cats = {r.category_id for r in results}
+    assert cats == {"bread", "pastry"}
+    assert all(r.verdict in {"absorb", "walkaway", "inconclusive"} for r in results)

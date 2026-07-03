@@ -1356,5 +1356,35 @@ def cmd_scenario_commit_batch(
     _write_and_label(wb, out, source)
 
 
+@app.command("demand-absorption")
+def cmd_demand_absorption(
+    source: str = "real",
+    data_dir: Path | None = None,
+    close_hour: int = 22,
+    out_dir: Path = REPORTS_DIR / "demand_absorption",
+) -> None:
+    """W0 게이트: 카테고리 총량 수요이전 흡수 검정 (leave-one-out 총량보존 β + TOST).
+
+    β≈0(TOST 통과)=흡수→Stage 2 진입 허가, β<0=walk-away. raw sold 타깃.
+    """
+    from .analysis.demand_absorption import build_absorption_panel, run_absorption
+
+    ds = _load_dataset(source, data_dir)
+    panel = build_absorption_panel(ds.daily, close_hour=close_hour)
+    results = run_absorption(ds.daily, close_hour=close_hour)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    panel.to_parquet(out_dir / "panel.parquet", index=False)
+    rows = pd.DataFrame([r.__dict__ for r in results])
+    rows.to_csv(out_dir / "results.csv", index=False)
+
+    console.print(f"[bold]demand-absorption[/] source={source} close_hour={close_hour}")
+    for r in results:
+        color = {"absorb": "green", "walkaway": "red"}.get(r.verdict, "yellow")
+        console.print(f"  {r.store_id}/{r.category_id}: β={r.beta:+.3f} "
+                      f"CI90[{r.ci_low:+.3f},{r.ci_high:+.3f}] δ={r.delta:.3f} "
+                      f"[{color}]{r.verdict}[/] (n={r.n})")
+    console.print(f"[green]wrote[/] {out_dir}/panel.parquet, results.csv")
+
+
 if __name__ == "__main__":
     app()

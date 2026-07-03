@@ -165,3 +165,16 @@ def fit_absorption(panel: pd.DataFrame, store_id: str, category_id: str, *,
         verdict = "inconclusive"
     return AbsorptionResult(store_id, category_id, len(sub), beta, se,
                             ci_low, ci_high, delta, verdict)
+
+
+def run_absorption(daily: pd.DataFrame, *, close_hour: int = DEFAULT_CLOSE_HOUR,
+                   baseline_weeks: int = BASELINE_WEEKS) -> list[AbsorptionResult]:
+    """Fit absorption for every (store, category) with enough data. Skips None."""
+    panel = build_absorption_panel(daily, close_hour=close_hour, baseline_weeks=baseline_weeks)
+    out: list[AbsorptionResult] = []
+    pairs = panel[["store_id", "category_id"]].drop_duplicates().itertuples(index=False)
+    for store_id, category_id in pairs:
+        res = fit_absorption(panel, store_id, category_id)
+        if res is not None:
+            out.append(res)
+    return out
