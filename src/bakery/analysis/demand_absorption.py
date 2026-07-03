@@ -155,8 +155,14 @@ def fit_absorption(panel: pd.DataFrame, store_id: str, category_id: str, *,
     z = norm.ppf(0.95)                                   # 90% CI (two-sided)
     ci_low, ci_high = beta - z * se, beta + z * se
     t_iqr = np.subtract(*np.percentile(sub["stockout_hours"], [75, 25]))
+    if t_iqr <= 1e-9:
+        # Degenerate treatment spread: delta would collapse to an unbounded
+        # band, making TOST trivially pass regardless of beta. Never let
+        # that count as "absorb" -- report inconclusive instead.
+        return AbsorptionResult(store_id, category_id, len(sub), beta, se,
+                                ci_low, ci_high, float("inf"), "inconclusive")
     mean_y = float(sub["cat_sold"].mean())
-    delta = (equiv_frac * mean_y / t_iqr) if t_iqr > 1e-9 else float("inf")
+    delta = equiv_frac * mean_y / t_iqr
     if ci_low > -delta and ci_high < delta:
         verdict = "absorb"
     elif ci_high < 0:

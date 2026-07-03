@@ -198,3 +198,43 @@ def test_run_absorption_covers_store_categories():
     cats = {r.category_id for r in results}
     assert cats == {"bread", "pastry"}
     assert all(r.verdict in {"absorb", "walkaway", "inconclusive"} for r in results)
+
+
+def _panel_degenerate_treatment(n_weeks: int = 40, seed: int = 1) -> pd.DataFrame:
+    """Panel where stockout_hours is near-constant (IQR(75,25) == 0) but not
+    exactly zero everywhere, so the design matrix stays non-singular and the
+    OLS fit actually runs — this exercises fit_absorption's t_iqr<=1e-9 guard
+    directly rather than bailing out earlier on a singular XtX. cat_sold does
+    not depend on stockout_hours (beta_true=0), so a pre-fix reader would see
+    a tiny beta and, via delta=inf, wrongly call it "absorb"."""
+    rng = np.random.default_rng(seed)
+    dates = pd.date_range("2024-01-01", periods=n_weeks * 7, freq="D")
+    demand_level = rng.normal(100, 15, len(dates))
+    traffic = demand_level + rng.normal(0, 1, len(dates))
+    stockout_hours = np.zeros(len(dates))
+    outlier_idx = np.arange(0, len(dates), 10)          # sparse outliers only
+    stockout_hours[outlier_idx] = rng.uniform(50, 100, len(outlier_idx))
+    cat_sold = demand_level + rng.normal(0, 3, len(dates))
+    daily = pd.DataFrame({
+        "store_id": "s1", "category_id": "bread", "date": dates,
+        "cat_sold": cat_sold, "stockout_hours": stockout_hours,
+        "other_cat_sold": traffic,
+        "dow": dates.dayofweek, "month": dates.month,
+        "trend": (dates - dates.min()).days.astype(float),
+    })
+    daily = daily.sort_values("date")
+    daily["cat_baseline"] = (daily.groupby("dow")["cat_sold"]
+                             .shift(1).rolling(4, min_periods=4).mean())
+    return daily.dropna(subset=["cat_baseline"]).reset_index(drop=True)
+
+
+def test_fit_degenerate_treatment_is_inconclusive():
+    """A zero-variance (degenerate IQR) treatment must never yield 'absorb' —
+    with delta collapsing to inf the TOST band is unbounded and would
+    trivially pass regardless of beta. Either the fit is None (OLS bails on
+    a near-singular design) or the verdict is 'inconclusive'; 'absorb' is the
+    one outcome that must not occur."""
+    panel = _panel_degenerate_treatment()
+    res = fit_absorption(panel, "s1", "bread")
+    assert res is None or res.verdict == "inconclusive"
+    assert res is None or res.verdict != "absorb"
