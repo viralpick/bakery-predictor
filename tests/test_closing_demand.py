@@ -11,6 +11,7 @@ from bakery.analysis.closing_demand import (
     fit_depth_elasticity,
     fit_kink,
     fit_surplus_counterfactual,
+    run_closing_demand,
     DepthResult,
     KinkResult,
     SurplusResult,
@@ -223,3 +224,30 @@ def test_aggregate_alpha_both_nan_lower_bounds():
     est_demand = aggregate_alpha(kink_nan, depth_nan, surplus_demand)
     assert math.isnan(est_demand.alpha_low), "Expected both-NaN lowers to produce NaN alpha_low"
     assert est_demand.alpha_high == 1.0, "Demand-limited should allow alpha_high = 1.0 even when alpha_low is NaN"
+
+
+def _orchestrator_rows(days=30):
+    """Synthetic bread-category rows: pre-onset flat rate + closing window split
+    across both discount depths (30%/20%) with day-varying qty for depth
+    identification, sized to clear MIN_DEPTH_ROWS/MIN_SURPLUS_ROWS."""
+    recs = []
+    for d in range(days):
+        date = pd.Timestamp("2025-03-01") + pd.Timedelta(days=d)
+        for h in (17, 18, 19):
+            recs.append({"date": date, "hour": h, "minute": 0, "item_id": "A",
+                         "qty": 2, "label": "none", "discount_code": ""})
+        recs.append({"date": date, "hour": 20, "minute": 0, "item_id": "A",
+                     "qty": 3 + (d % 5), "label": "closing", "discount_code": "0077"})
+        recs.append({"date": date, "hour": 21, "minute": 0, "item_id": "A",
+                     "qty": 2 + (d % 3), "label": "closing", "discount_code": "0069"})
+    return pd.DataFrame(recs)
+
+
+def test_run_closing_demand_smoke():
+    rows = _orchestrator_rows()
+    dates = rows["date"].drop_duplicates()
+    waste = pd.DataFrame({"date": dates, "item_id": "A", "waste_qty": 1})
+    itc = pd.Series({"A": "bread"})
+    result = run_closing_demand(rows, waste, itc, category="bread")
+    assert set(result.keys()) == {"alpha", "depth", "surplus", "kink", "panel"}
+    assert 0.0 <= result["alpha"].alpha_low <= 1.0

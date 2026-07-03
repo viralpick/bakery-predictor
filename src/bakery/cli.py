@@ -1386,5 +1386,64 @@ def cmd_demand_absorption(
     console.print(f"[green]wrote[/] {out_dir}/panel.parquet, results.csv")
 
 
+CLOSING_DEMAND_CATEGORIES = ("bread", "pastry")
+CLOSING_DEMAND_WASTE_PARQUET = Path("data/internal/v2/waste_alpha_4stores.parquet")
+CLOSING_DEMAND_STORE = "광교"
+CLOSING_ALPHA_CSV = "closing_alpha_estimates.csv"
+CLOSING_PANEL_CSV = "closing_panel.csv"
+
+
+def _load_closing_demand_inputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
+    """Load real 광교 line-items + waste + item→category map for closing-demand α."""
+    from .analysis.discount import DEFAULT_XLSX, load_sales_with_discount
+    from .data import bonavi_loader as bl
+
+    rows = load_sales_with_discount(DEFAULT_XLSX).rows
+    items = bl.load_items(DEFAULT_XLSX)
+    item_to_category = pd.Series(items.set_index("item_id")["category_id"])
+    w = pd.read_parquet(CLOSING_DEMAND_WASTE_PARQUET)
+    w = w[w["store"] == CLOSING_DEMAND_STORE]
+    waste = pd.DataFrame({"date": w["date"], "item_id": w["item_id"], "waste_qty": w["out"]})
+    return rows, waste, item_to_category
+
+
+def _print_closing_demand_result(category: str, result: dict, overlap: dict) -> None:
+    a = result["alpha"]
+    console.print(
+        f"[bold]{category}[/] α∈[{a.alpha_low:.3f}, {a.alpha_high:.3f}] "
+        f"(A1={a.a1:.3f} A2={a.a2:.3f} A3_slope={a.a3_slope:.3f}) {a.note}"
+    )
+    console.print(f"  depth_time_overlap: {overlap}")
+
+
+@app.command("closing-demand")
+def cmd_closing_demand(out_dir: Path = REPORTS_DIR) -> None:
+    """마감할인 실수요 α 추정 (A1 kink-in-time + A2 depth elasticity + A3 surplus counterfactual).
+
+    광교 실측 데이터로 bread/pastry 각각 α 구간을 추정하고 CSV로 저장한다.
+    """
+    from .analysis.closing_demand import depth_time_overlap, run_closing_demand
+
+    rows, waste, item_to_category = _load_closing_demand_inputs()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    alpha_rows = []
+    panels = []
+    for category in CLOSING_DEMAND_CATEGORIES:
+        result = run_closing_demand(rows, waste, item_to_category, category=category)
+        a = result["alpha"]
+        alpha_rows.append({
+            "category": category, "a1": a.a1, "a2": a.a2,
+            "alpha_low": a.alpha_low, "alpha_high": a.alpha_high,
+            "a3_slope": a.a3_slope, "note": a.note,
+        })
+        panels.append(result["panel"])
+        cat_rows = rows[rows["item_id"].map(item_to_category) == category]
+        _print_closing_demand_result(category, result, depth_time_overlap(cat_rows))
+
+    pd.DataFrame(alpha_rows).to_csv(out_dir / CLOSING_ALPHA_CSV, index=False)
+    pd.concat(panels, ignore_index=True).to_csv(out_dir / CLOSING_PANEL_CSV, index=False)
+    console.print(f"[green]wrote[/] {out_dir}/{CLOSING_ALPHA_CSV}, {CLOSING_PANEL_CSV}")
+
+
 if __name__ == "__main__":
     app()

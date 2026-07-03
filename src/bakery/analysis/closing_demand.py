@@ -318,3 +318,23 @@ def aggregate_alpha(kink, depth, surplus):
 
     note = f"lower=max(A1,A2) bounds; A3 {surplus.note}"
     return AlphaEstimate(alpha_low, alpha_high, kink.alpha, depth.alpha, surplus.slope, note)
+
+
+def run_closing_demand(rows, waste, item_to_category, category: str = "bread") -> dict:
+    """Orchestrate the A1/A2/A3 estimators for a single category into one α report.
+
+    Builds the closing panel (all categories), filters to `category`, fits
+    kink (A1) / depth elasticity (A2) / surplus counterfactual (A3), and
+    aggregates them into a single α interval.
+
+    Returns dict with keys: alpha (AlphaEstimate), depth (DepthResult),
+    surplus (SurplusResult), kink (KinkResult), panel (category-filtered DataFrame).
+    """
+    panel = build_closing_panel(rows, waste, item_to_category)
+    cat_panel = panel[panel["category_id"] == category].reset_index(drop=True)
+    curve = build_intraday_curve(rows, item_to_category, category)
+    kink = fit_kink(curve)
+    depth = fit_depth_elasticity(cat_panel)
+    surplus = fit_surplus_counterfactual(cat_panel)
+    alpha = aggregate_alpha(kink, depth, surplus)
+    return {"alpha": alpha, "depth": depth, "surplus": surplus, "kink": kink, "panel": cat_panel}
