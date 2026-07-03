@@ -1,7 +1,11 @@
 import numpy as np
 import pandas as pd
 import pytest
-from bakery.analysis.closing_demand import build_closing_panel, fit_depth_elasticity
+from bakery.analysis.closing_demand import (
+    build_closing_panel,
+    depth_time_overlap,
+    fit_depth_elasticity,
+)
 
 
 def _rows():
@@ -62,7 +66,6 @@ def test_depth_elasticity_recovers_slope():
 
 
 def test_depth_time_confound_flag():
-    from bakery.analysis.closing_demand import depth_time_overlap
     rows = pd.DataFrame({
         "discount_code": ["0069","0069","0077","0077"],
         "label": ["closing"]*4, "hour": [20,20,21,21], "minute":[0,5,0,5],

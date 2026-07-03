@@ -13,6 +13,11 @@ import pandas as pd
 CLOSING_DEPTH_30 = "0077"
 CLOSING_DEPTH_20 = "0069"
 
+# Depth elasticity estimation
+MIN_DEPTH_ROWS = 20
+ZERO_VARIANCE_THRESHOLD = 1e-12
+TIME_SEPARATION_HOURS = 1.0
+
 
 def build_closing_panel(rows, waste, item_to_category):
     df = rows.copy()
@@ -69,6 +74,29 @@ def _depth_long(panel):
     return pd.concat([a, b], ignore_index=True)
 
 
+def _depth_design_matrix(long: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, int]:
+    """Build design matrix for depth elasticity: [intercept, depth, surplus, trend, dow-dummies].
+
+    Returns (y, X_filtered, treat_idx) where X_filtered has constant/near-constant columns removed.
+    """
+    y = long["y"].to_numpy(dtype=float)
+    dow = pd.get_dummies(long["dow"], prefix="dow", drop_first=True).to_numpy(dtype=float)
+    cols = [
+        np.ones(len(long)),
+        long["depth"].to_numpy(dtype=float),
+        long["surplus"].to_numpy(dtype=float),
+        long["trend"].to_numpy(dtype=float),
+        dow,
+    ]
+    X = np.column_stack(cols)
+    # Filter out constant/near-constant columns to avoid singularity
+    keep = X.std(axis=0) > ZERO_VARIANCE_THRESHOLD
+    keep[0] = True  # keep intercept
+    keep[1] = True  # keep treatment (depth)
+    X_filtered = X[:, keep]
+    return y, X_filtered, 1  # depth is at column index 1 after filtering
+
+
 def fit_depth_elasticity(panel):
     """Estimate depth elasticity via OLS; extrapolate to depth=0 for base demand B.
 
@@ -78,7 +106,7 @@ def fit_depth_elasticity(panel):
 
     long = _depth_long(panel)
     long = long[long["y"].notna()]
-    if long["depth"].nunique() < 2 or len(long) < 20:
+    if long["depth"].nunique() < 2 or len(long) < MIN_DEPTH_ROWS:
         return DepthResult(
             len(long),
             float("nan"),
@@ -87,21 +115,8 @@ def fit_depth_elasticity(panel):
             float("nan"),
             "insufficient depth variation",
         )
-    y = long["y"].to_numpy(dtype=float)
-    # Design: intercept, depth(treat), surplus, trend, dow one-hot(-1)
-    dow = pd.get_dummies(long["dow"], prefix="dow", drop_first=True).to_numpy(dtype=float)
-    cols = [np.ones(len(long)), long["depth"].to_numpy(dtype=float),
-            long["surplus"].to_numpy(dtype=float), long["trend"].to_numpy(dtype=float)]
-    cols.append(dow)
-    X = np.column_stack(cols)
-    # Filter out constant/near-constant columns to avoid singularity
-    keep = X.std(axis=0) > 1e-12
-    keep[0] = True  # keep intercept
-    keep[1] = True  # keep treatment (depth)
-    X_filtered = X[:, keep]
-    treat_idx_filtered = 1  # depth is at column index 1 after filtering
-
-    out = _ols_hc3(y, X_filtered, treat_idx=treat_idx_filtered)
+    y, X_filtered, treat_idx = _depth_design_matrix(long)
+    out = _ols_hc3(y, X_filtered, treat_idx=treat_idx)
     if out is None:
         return DepthResult(
             len(long), float("nan"), None, float("nan"), float("nan"), "ill-posed"
@@ -123,14 +138,21 @@ def fit_depth_elasticity(panel):
 def depth_time_overlap(rows):
     """Diagnostic: check if 20% and 30% discounts occur at different times of day.
 
-    Returns dict with median hour for each depth and flag if medians differ ≥ 1 hour.
+    Returns dict with median hour for each depth and flag if medians differ ≥ TIME_SEPARATION_HOURS.
+    If either discount code is absent, time_separated is None (missing data).
     """
     c = rows[rows["label"] == "closing"].copy()
     c["tod"] = c["hour"] + c["minute"] / 60.0
     m20 = float(c.loc[c["discount_code"] == CLOSING_DEPTH_20, "tod"].median())
     m30 = float(c.loc[c["discount_code"] == CLOSING_DEPTH_30, "tod"].median())
+    # Guard: if either median is NaN (discount code absent), mark as missing data
+    time_separated = (
+        None
+        if np.isnan(m20) or np.isnan(m30)
+        else abs(m30 - m20) >= TIME_SEPARATION_HOURS
+    )
     return {
-        "median_hour_20": round(m20),
-        "median_hour_30": round(m30),
-        "time_separated": abs(m30 - m20) >= 1.0,
+        "median_hour_20": round(m20) if not np.isnan(m20) else None,
+        "median_hour_30": round(m30) if not np.isnan(m30) else None,
+        "time_separated": time_separated,
     }
