@@ -11,6 +11,7 @@ import pytest
 
 from bakery.analysis.demand_absorption import (
     DEFAULT_CLOSE_HOUR, BASELINE_WEEKS, build_absorption_panel,
+    AbsorptionResult, EQUIV_FRAC, fit_absorption,
 )
 
 
@@ -109,3 +110,48 @@ def test_panel_other_cat_sold_excludes_own_category():
     # Both other_cat_sold values should be > 0 (proving multi-category path is real)
     assert bread_row["other_cat_sold"] > 0.0
     assert pastry_row["other_cat_sold"] > 0.0
+
+
+def _panel_with_effect(beta_true: float, n_weeks: int = 40, seed: int = 1):
+    """Synthetic (store,cat,date) panel: cat_sold = base + beta_true*T + traffic + noise.
+    beta_true=0 → absorption; beta_true<0 → walk-away. T correlated with traffic to
+    stress the confound control."""
+    rng = np.random.default_rng(seed)
+    dates = pd.date_range("2024-01-01", periods=n_weeks * 7, freq="D")
+    demand_level = rng.normal(100, 15, len(dates))          # daily category demand
+    traffic = demand_level + rng.normal(0, 5, len(dates))   # other-cat proxy (correlated)
+    # high-demand days → more stockout hours (the confound)
+    stockout_hours = np.clip((demand_level - 100) * 0.3 + rng.normal(0, 1, len(dates)), 0, None)
+    cat_sold = demand_level + beta_true * stockout_hours + rng.normal(0, 3, len(dates))
+    daily = pd.DataFrame({
+        "store_id": "s1", "category_id": "bread", "date": dates,
+        "cat_sold": cat_sold, "stockout_hours": stockout_hours,
+        "other_cat_sold": traffic,
+        "dow": dates.dayofweek, "month": dates.month,
+        "trend": (dates - dates.min()).days.astype(float),
+    })
+    # leakage-safe baseline on this pre-aggregated frame
+    daily = daily.sort_values("date")
+    daily["cat_baseline"] = (daily.groupby("dow")["cat_sold"]
+                             .shift(1).rolling(4, min_periods=4).mean())
+    return daily.dropna(subset=["cat_baseline"]).reset_index(drop=True)
+
+
+def test_fit_recovers_absorption_zero_beta():
+    panel = _panel_with_effect(beta_true=0.0)
+    res = fit_absorption(panel, "s1", "bread")
+    assert res.verdict == "absorb"
+    assert abs(res.beta) < res.delta            # inside equivalence band
+
+
+def test_fit_recovers_walkaway_negative_beta():
+    # strong negative: each stockout-hour loses ~4 units, no absorption
+    panel = _panel_with_effect(beta_true=-4.0)
+    res = fit_absorption(panel, "s1", "bread")
+    assert res.beta < 0
+    assert res.verdict == "walkaway"
+
+
+def test_fit_returns_none_on_tiny_panel():
+    panel = _panel_with_effect(beta_true=0.0).head(10)
+    assert fit_absorption(panel, "s1", "bread") is None
