@@ -43,3 +43,94 @@ def build_closing_panel(rows, waste, item_to_category):
     panel["month"] = d.dt.month
     panel["trend"] = (d - d.min()).dt.days
     return panel.sort_values(["category_id", "date"]).reset_index(drop=True)
+
+
+@dataclass(frozen=True)
+class DepthResult:
+    """Result of depth elasticity estimation."""
+    n: int
+    slope: float
+    se: float | None
+    base: float
+    alpha: float
+    note: str
+
+
+def _depth_long(panel):
+    """Reshape closing_qty_30/closing_qty_20 to long format (depth observation per row)."""
+    a = panel[["closing_qty_30", "surplus", "dow", "trend"]].rename(
+        columns={"closing_qty_30": "y"}
+    )
+    a["depth"] = 0.30
+    b = panel[["closing_qty_20", "surplus", "dow", "trend"]].rename(
+        columns={"closing_qty_20": "y"}
+    )
+    b["depth"] = 0.20
+    return pd.concat([a, b], ignore_index=True)
+
+
+def fit_depth_elasticity(panel):
+    """Estimate depth elasticity via OLS; extrapolate to depth=0 for base demand B.
+
+    Returns α_A2 = B / mean(closing), a lower-bound estimate accounting for endogeneity.
+    """
+    from ._ols import _ols_hc3
+
+    long = _depth_long(panel)
+    long = long[long["y"].notna()]
+    if long["depth"].nunique() < 2 or len(long) < 20:
+        return DepthResult(
+            len(long),
+            float("nan"),
+            None,
+            float("nan"),
+            float("nan"),
+            "insufficient depth variation",
+        )
+    y = long["y"].to_numpy(dtype=float)
+    # Design: intercept, depth(treat), surplus, trend, dow one-hot(-1)
+    dow = pd.get_dummies(long["dow"], prefix="dow", drop_first=True).to_numpy(dtype=float)
+    cols = [np.ones(len(long)), long["depth"].to_numpy(dtype=float),
+            long["surplus"].to_numpy(dtype=float), long["trend"].to_numpy(dtype=float)]
+    cols.append(dow)
+    X = np.column_stack(cols)
+    # Filter out constant/near-constant columns to avoid singularity
+    keep = X.std(axis=0) > 1e-12
+    keep[0] = True  # keep intercept
+    keep[1] = True  # keep treatment (depth)
+    X_filtered = X[:, keep]
+    treat_idx_filtered = 1  # depth is at column index 1 after filtering
+
+    out = _ols_hc3(y, X_filtered, treat_idx=treat_idx_filtered)
+    if out is None:
+        return DepthResult(
+            len(long), float("nan"), None, float("nan"), float("nan"), "ill-posed"
+        )
+    slope, se = out
+    # Predict at depth=0: intercept + slope * 0 = intercept
+    # Intercept = mean(y) - slope * mean(depth) when centered
+    base = float(np.clip(y.mean() - slope * long["depth"].mean(), 0.0, None))
+    alpha = (
+        float(np.clip(base / y.mean(), 0.0, 1.0))
+        if y.mean() > 0
+        else float("nan")
+    )
+    return DepthResult(
+        len(long), slope, se, base, alpha, "lower-bound (depth endogeneity)"
+    )
+
+
+def depth_time_overlap(rows):
+    """Diagnostic: check if 20% and 30% discounts occur at different times of day.
+
+    Returns dict with median hour for each depth and flag if medians differ ≥ 1 hour.
+    """
+    c = rows[rows["label"] == "closing"].copy()
+    c["tod"] = c["hour"] + c["minute"] / 60.0
+    m20 = float(c.loc[c["discount_code"] == CLOSING_DEPTH_20, "tod"].median())
+    m30 = float(c.loc[c["discount_code"] == CLOSING_DEPTH_30, "tod"].median())
+    return {
+        "median_hour_20": round(m20),
+        "median_hour_30": round(m30),
+        "time_separated": abs(m30 - m20) >= 1.0,
+    }

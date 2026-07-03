@@ -1,6 +1,7 @@
+import numpy as np
 import pandas as pd
 import pytest
-from bakery.analysis.closing_demand import build_closing_panel
+from bakery.analysis.closing_demand import build_closing_panel, fit_depth_elasticity
 
 
 def _rows():
@@ -35,3 +36,38 @@ def test_surplus_equals_closing_plus_waste_all_rows():
     waste = pd.DataFrame({"date": pd.to_datetime(["2026-01-05"]), "item_id": ["A"], "waste_qty": [4]})
     panel = build_closing_panel(rows, waste, pd.Series({"A": "bread"}))
     assert (panel["surplus"] == panel["closing_qty"] + panel["waste_qty"]).all()
+
+
+def _depth_panel(slope, base_per_depth, n=200):
+    """Generate synthetic depth panel: closing_qty_d = base + slope*depth."""
+    rng = np.arange(n)
+    dates = pd.to_datetime("2025-01-01") + pd.to_timedelta(rng, "D")
+    c30 = base_per_depth + slope * 0.30
+    c20 = base_per_depth + slope * 0.20
+    return pd.DataFrame({
+        "category_id": ["bread"] * n, "date": dates,
+        "closing_qty_30": [c30] * n, "closing_qty_20": [c20] * n,
+        "closing_qty": [c30 + c20] * n, "surplus": [100.0] * n,
+        "dow": (rng % 7), "month": 1, "trend": rng,
+    })
+
+
+def test_depth_elasticity_recovers_slope():
+    panel = _depth_panel(slope=50.0, base_per_depth=10.0)
+    res = fit_depth_elasticity(panel)
+    assert res.slope == pytest.approx(50.0, abs=1.0)
+    # base at depth=0 == 10 per depth-observation; α = base / mean(observed depth qty)
+    assert res.base == pytest.approx(10.0, abs=0.5)
+    assert 0.0 <= res.alpha <= 1.0
+
+
+def test_depth_time_confound_flag():
+    from bakery.analysis.closing_demand import depth_time_overlap
+    rows = pd.DataFrame({
+        "discount_code": ["0069","0069","0077","0077"],
+        "label": ["closing"]*4, "hour": [20,20,21,21], "minute":[0,5,0,5],
+    })
+    ov = depth_time_overlap(rows)   # returns dict: median hour per depth + separated flag
+    assert ov["median_hour_20"] == 20.0
+    assert ov["median_hour_30"] == 21.0
+    assert ov["time_separated"] is True   # medians differ ≥ 1h
