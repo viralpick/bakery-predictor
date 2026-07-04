@@ -1474,5 +1474,117 @@ def cmd_closing_demand(out_dir: Path = REPORTS_DIR) -> None:
     console.print(f"[green]wrote[/] {out_dir}/{CLOSING_ALPHA_CSV}, {CLOSING_PANEL_CSV}")
 
 
+PHASEB_C_GRID = [0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55]
+PHASEB_IMPLIED_C_CSV = "phaseB_implied_c.csv"
+PHASEB_SAVINGS_CSV = "phaseB_order_savings.csv"
+
+
+def _load_phaseb_inputs() -> tuple[pd.DataFrame, pd.Series]:
+    """Load real 광교 waste rows + item→category map for Phase B order optimization."""
+    from .analysis.discount import DEFAULT_XLSX
+    from .data import bonavi_loader as bl
+
+    rows = pd.read_parquet(CLOSING_DEMAND_WASTE_PARQUET)
+    rows = rows[rows["store"] == CLOSING_DEMAND_STORE]
+    items = bl.load_items(DEFAULT_XLSX)
+    item_to_category = pd.Series(items.set_index("item_id")["category_id"])
+    return rows, item_to_category
+
+
+def _phaseb_exclusion_stats(rows: pd.DataFrame, item_to_category: pd.Series, category: str) -> dict:
+    """Raw vs identity-kept category-day counts, for honest exclusion-rate reporting.
+
+    Reports both the whole-day metric (a day only counts as excluded if it
+    lost ALL its item-rows -- rare, since most days mix clean and dirty
+    items) and the row-level metrics that actually reveal the coverage gap:
+    what fraction of item-rows are dropped, and what fraction of days lose
+    at least one item-row (and therefore have understated demand/made
+    aggregates even though the day itself still appears in kept_days).
+    """
+    from .analysis.order_optimization import _identity_excluded_mask
+
+    df = rows.copy()
+    df["category_id"] = df["item_id"].astype(str).map(item_to_category)
+    df = df[df["category_id"] == category]
+    raw_days = int(df["date"].nunique())
+    raw_rows = len(df)
+
+    excluded = _identity_excluded_mask(df)
+    kept_days = int(df.loc[~excluded, "date"].nunique())
+    excl_rate = 1.0 - (kept_days / raw_days) if raw_days else float("nan")
+
+    row_exclusion_rate = (excluded.sum() / raw_rows) if raw_rows else float("nan")
+    days_with_excluded_row = int(df.loc[excluded, "date"].nunique())
+    days_with_partial_exclusion_rate = (days_with_excluded_row / raw_days) if raw_days else float("nan")
+
+    return {
+        "raw_days": raw_days,
+        "kept_days": kept_days,
+        "exclusion_rate": excl_rate,
+        "row_exclusion_rate": float(row_exclusion_rate),
+        "days_with_partial_exclusion_rate": float(days_with_partial_exclusion_rate),
+    }
+
+
+def _phaseb_for_category(
+    rows: pd.DataFrame, item_to_category: pd.Series, category: str,
+) -> tuple[dict, pd.DataFrame]:
+    """Run Phase B orchestrator for one category; return (implied_c row, savings table)."""
+    from .analysis.order_optimization import run_phaseb
+
+    excl = _phaseb_exclusion_stats(rows, item_to_category, category)
+    result = run_phaseb(rows, item_to_category, category, c_grid=PHASEB_C_GRID)
+    implied_c = result["implied_c_current"]
+    savings = result["savings_table"].copy()
+    savings.insert(0, "category", category)
+    implied_row = {
+        "category": category,
+        "mean_implied_c_current": implied_c,
+        "service_level": 1.0 - implied_c if pd.notna(implied_c) else float("nan"),
+        **excl,
+    }
+    return implied_row, savings
+
+
+def _print_phaseb_result(category: str, implied_row: dict, savings: pd.DataFrame) -> None:
+    console.print(
+        f"[bold]{category}[/] implied_c_current={implied_row['mean_implied_c_current']:.3f} "
+        f"service_level={implied_row['service_level']:.3f} "
+        f"(raw_days={implied_row['raw_days']} kept_days={implied_row['kept_days']} "
+        f"exclusion_rate={implied_row['exclusion_rate']:.1%} "
+        f"row_exclusion_rate={implied_row['row_exclusion_rate']:.1%} "
+        f"days_with_partial_exclusion_rate={implied_row['days_with_partial_exclusion_rate']:.1%})"
+    )
+    for _, r in savings.iterrows():
+        console.print(
+            f"  c={r['c']:.2f} mean_implied_c={r['mean_implied_c']:.3f} "
+            f"savings_vs_made={r['savings_vs_made']:+.1f} savings_l1={r['savings_l1']:+.1f} "
+            f"n_days={int(r['n_days'])}"
+        )
+
+
+@app.command("phaseb-order")
+def cmd_phaseb_order(out_dir: Path = REPORTS_DIR) -> None:
+    """Phase B: 카테고리 발주 최적화 — 현행 implied c 갭 + Q* 절감 시뮬레이션.
+
+    광교 실측 데이터로 bread/pastry 각각 implied c와 c-그리드별 절감액을 계산한다.
+    절감액(savings_vs_made)이 작거나 음수일 수 있다 — placebo(Q=made) 대비 값이므로
+    있는 그대로 보고한다.
+    """
+    rows, item_to_category = _load_phaseb_inputs()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    implied_rows, savings_tables = [], []
+    for category in CLOSING_DEMAND_CATEGORIES:
+        implied_row, savings = _phaseb_for_category(rows, item_to_category, category)
+        _print_phaseb_result(category, implied_row, savings)
+        implied_rows.append(implied_row)
+        savings_tables.append(savings)
+
+    pd.DataFrame(implied_rows).to_csv(out_dir / PHASEB_IMPLIED_C_CSV, index=False)
+    pd.concat(savings_tables, ignore_index=True).to_csv(out_dir / PHASEB_SAVINGS_CSV, index=False)
+    console.print(f"[green]wrote[/] {out_dir}/{PHASEB_IMPLIED_C_CSV}, {PHASEB_SAVINGS_CSV}")
+
+
 if __name__ == "__main__":
     app()
