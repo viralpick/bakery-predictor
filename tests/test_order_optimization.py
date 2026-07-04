@@ -9,6 +9,7 @@ from bakery.analysis.order_optimization import (
     implied_cost_rate,
     newsvendor_order,
     backtest_savings,
+    _backtest_one_c,
     CLOSING_DELTA,
 )
 
@@ -110,17 +111,39 @@ def test_backtest_placebo_and_savings_sign():
 
 
 def test_backtest_is_leakage_safe():
-    """Verify that Q* decisions for early days don't leak from future corruption."""
+    """Corrupted future rows must not change decisions on days before the corruption.
+
+    The corrupted rows (index >= 150, demand=9999) are NOT truncated away before
+    calling _backtest_one_c -- they genuinely pass through the function. Day i's
+    decision depends only on hist = rows.iloc[:i] (strictly-past data). For
+    i < 150, that slice never touches a corrupted row, so the resulting "impl"
+    entries for the early evaluated window (days 90..149, MIN_HISTORY_DAYS=90)
+    must be bit-identical between the clean and corrupted runs -- if the
+    implementation ever used an inclusive slice (rows.iloc[:i+1]) or leaked the
+    full array into sample construction, corruption would reach these early
+    days and the equality below would fail.
+    """
     cd = _cat_daily()
-    # Baseline: evaluate days 0-149 using clean data
-    r_baseline = backtest_savings(cd.iloc[:150], c_grid=[0.35]).iloc[0]
-    # Create a dataset with corrupted future (last 10 days)
     cd2 = cd.copy()
-    cd2.loc[cd2.index[-10:], "demand"] = 9999  # corrupt only the tail future
-    # Concatenate clean (0-149) + corrupted (150-199), then truncate back to 0-149
-    # This ensures hist[:i] for i<150 remains unchanged despite future corruption
-    concatenated_truncated = pd.concat([cd.iloc[:150], cd2.iloc[150:]]).iloc[:150]
-    r_early = backtest_savings(concatenated_truncated, c_grid=[0.35]).iloc[0]
-    # The early-day decisions must be identical (strict: no leakage)
-    assert r_baseline["n_days"] == r_early["n_days"]
-    assert r_baseline["cost_qstar"] == pytest.approx(r_early["cost_qstar"], abs=1e-10)
+    cd2.loc[cd2.index[150:], "demand"] = 9999  # corrupt all "future" rows from day 150 on
+    cd_corrupt = pd.concat([cd.iloc[:150], cd2.iloc[150:]])
+
+    acc_clean = _backtest_one_c(cd, c=0.35, delta=CLOSING_DELTA)
+    acc_corrupt = _backtest_one_c(cd_corrupt, c=0.35, delta=CLOSING_DELTA)
+
+    # Days 90..149 -> 60 evaluated entries at the head of "impl". These only
+    # ever see rows.iloc[:i] with i<150, i.e. exclusively clean data.
+    n_early = 60
+    early_clean = np.asarray(acc_clean["impl"][:n_early], dtype=float)
+    early_corrupt = np.asarray(acc_corrupt["impl"][:n_early], dtype=float)
+    assert early_clean.shape == early_corrupt.shape == (n_early,)
+    finite_mask = np.isfinite(early_clean) & np.isfinite(early_corrupt)
+    assert finite_mask.sum() == n_early  # sanity: window isn't degenerate/NaN
+    assert np.array_equal(early_clean[finite_mask], early_corrupt[finite_mask])
+
+    # Sanity check: corruption must have actually reached the function and
+    # changed later days. Otherwise the early-window equality above would be
+    # vacuous (e.g. if corrupted rows were silently dropped instead of used).
+    late_clean = np.asarray(acc_clean["impl"][-10:], dtype=float)
+    late_corrupt = np.asarray(acc_corrupt["impl"][-10:], dtype=float)
+    assert not np.array_equal(late_clean, late_corrupt)
