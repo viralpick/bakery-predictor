@@ -6,6 +6,8 @@ from bakery.analysis.order_optimization import (
     conditional_demand_samples,
     demand_quantile,
     demand_cdf,
+    newsvendor_order,
+    CLOSING_DELTA,
 )
 
 
@@ -61,3 +63,18 @@ def test_quantile_and_cdf():
     s = np.array([10.,20.,30.,40.,50.])
     assert demand_quantile(s, 0.5) == pytest.approx(30.0)
     assert demand_cdf(s, 30.0) == pytest.approx(0.6)   # P(<=30)=3/5
+
+
+def test_level1_is_1minus_c_quantile():
+    s = np.arange(1, 101, dtype=float)  # 1..100 uniform
+    res = newsvendor_order(s, c=0.35, closing_frac=0.0, delta=0.30)
+    # closing_frac=0 → no salvage band → Level2==Level1==(1-0.35) quantile
+    assert res.q_l1 == pytest.approx(np.quantile(s, 0.65), abs=1.0)
+    assert res.q_l2 == pytest.approx(res.q_l1, abs=2.0)
+
+
+def test_level2_le_level1_with_closing_band():
+    s = np.arange(1, 101, dtype=float)
+    res = newsvendor_order(s, c=0.35, closing_frac=0.3, delta=0.30)
+    # closing band earns only discount margin → optimal produces no more than L1
+    assert res.q_l2 <= res.q_l1 + 1e-6

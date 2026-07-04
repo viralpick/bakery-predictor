@@ -5,12 +5,16 @@
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
 
 IDENTITY_TOL = 1.0
 WINDOW_WEEKS = 13
 MIN_SAMPLES = 6
+Q_GRID_STEPS = 50
+CLOSING_DELTA = 0.28
 
 
 def load_category_daily(rows, item_to_category, category):
@@ -119,3 +123,72 @@ def demand_cdf(samples, x):
     if len(samples) == 0:
         return float("nan")
     return float(np.mean(samples <= x))
+
+
+@dataclass(frozen=True)
+class OrderResult:
+    """Newsvendor order result (Level 1 & 2)."""
+    q_l1: float
+    q_l2: float
+    c: float
+
+
+def _expected_profit(q, samples, c, closing_frac, delta):
+    """Compute expected profit for order quantity q.
+
+    Parameters
+    ----------
+    q : float
+        Order quantity.
+    samples : np.ndarray
+        Demand samples.
+    c : float
+        Cost ratio.
+    closing_frac : float
+        Fraction of demand in closing band (0 to 1).
+    delta : float
+        Discount depth (salvage margin = 1 - delta - c).
+
+    Returns
+    -------
+    float
+        Expected profit (normalized to price=1).
+    """
+    d = samples
+    normal = (1.0 - closing_frac) * d
+    full = np.minimum(q, normal) * (1.0 - c)
+    band = np.clip(np.minimum(q, d) - normal, 0.0, None) * (1.0 - delta - c)
+    waste = np.clip(q - d, 0.0, None) * (-c)
+    return float(np.mean(full + band + waste))
+
+
+def newsvendor_order(samples, c, closing_frac, delta=CLOSING_DELTA, q_grid_steps=Q_GRID_STEPS):
+    """Compute two-class salvage-newsvendor order quantities.
+
+    Parameters
+    ----------
+    samples : np.ndarray
+        Demand samples.
+    c : float
+        Cost ratio.
+    closing_frac : float
+        Fraction of demand in closing band (0 to 1).
+    delta : float, optional
+        Discount depth (default CLOSING_DELTA).
+    q_grid_steps : int, optional
+        Grid size for Level 2 search (default Q_GRID_STEPS).
+
+    Returns
+    -------
+    OrderResult
+        q_l1: (1-c) quantile upper bound.
+        q_l2: profit-maximizing quantity.
+        c: cost ratio.
+    """
+    if len(samples) < MIN_SAMPLES:
+        return OrderResult(float("nan"), float("nan"), c)
+    q_l1 = demand_quantile(samples, 1.0 - c)
+    grid = np.linspace(samples.min(), samples.max(), q_grid_steps)
+    profits = [_expected_profit(q, samples, c, closing_frac, delta) for q in grid]
+    q_l2 = float(grid[int(np.argmax(profits))])
+    return OrderResult(float(q_l1), q_l2, c)
