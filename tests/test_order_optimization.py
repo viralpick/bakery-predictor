@@ -1,7 +1,12 @@
 import numpy as np
 import pandas as pd
 import pytest
-from bakery.analysis.order_optimization import load_category_daily, IDENTITY_TOL
+from bakery.analysis.order_optimization import (
+    load_category_daily,
+    conditional_demand_samples,
+    demand_quantile,
+    demand_cdf,
+)
 
 
 def _rows():
@@ -41,7 +46,6 @@ def _hist():
 
 
 def test_conditional_samples_dow_and_leakage():
-    from bakery.analysis.order_optimization import conditional_demand_samples
     hist = _hist()
     target = pd.Timestamp("2025-04-07")  # a Monday
     s = conditional_demand_samples(hist, target, dow=0, window_weeks=8)
@@ -54,7 +58,6 @@ def test_conditional_samples_dow_and_leakage():
 
 
 def test_quantile_and_cdf():
-    from bakery.analysis.order_optimization import demand_quantile, demand_cdf
     s = np.array([10.,20.,30.,40.,50.])
     assert demand_quantile(s, 0.5) == pytest.approx(30.0)
     assert demand_cdf(s, 30.0) == pytest.approx(0.6)   # P(<=30)=3/5

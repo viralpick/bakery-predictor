@@ -63,7 +63,7 @@ def conditional_demand_samples(hist, target_date, dow, window_weeks=WINDOW_WEEKS
     Parameters
     ----------
     hist : pd.DataFrame
-        Historical data with columns: date, demand, dow.
+        Historical data with columns: date, demand, dow. Must be sorted ascending by date.
     target_date : pd.Timestamp or str
         Prediction date (exclusive).
     dow : int
