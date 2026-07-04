@@ -19,6 +19,7 @@ import pandas as pd
 
 from bakery.analysis.discount import load_sales_with_discount
 from bakery.analysis.seasonal import filter_seasonal
+from bakery.data.calendar import LUNAR_EVENT_DATES
 
 
 TARGET_CATEGORIES = ("bread", "pastry", "sandwich")   # cake 제외 (사전 예약 + 시즌 특수)
@@ -36,19 +37,9 @@ EVENTS: dict[str, tuple[int, int]] = {
     # pepero 제외 (검증 결과 효과 약함 + 통계 유의 X, 데이터 한계)
 }
 
-# 음력 명절 (양력 변동, lookup table) — 광교 효과 검증: 추석 +11.4% (p=0.029), 설날 +11.0% (p=0.005)
-LUNAR_EVENTS: dict[str, dict[int, str]] = {
-    "days_to_chuseok": {
-        2021:"2021-09-21", 2022:"2022-09-10", 2023:"2023-09-29",
-        2024:"2024-09-17", 2025:"2025-10-06", 2026:"2026-09-25",
-        2027:"2027-09-15", 2028:"2028-10-03",
-    },
-    "days_to_seollal": {
-        2021:"2021-02-12", 2022:"2022-02-01", 2023:"2023-01-22",
-        2024:"2024-02-10", 2025:"2025-01-29", 2026:"2026-02-17",
-        2027:"2027-02-06", 2028:"2028-01-26",
-    },
-}
+# 음력 명절 (양력 변동) — 검증: 추석 +11.4% (p=0.029), 설날 +11.0% (p=0.005).
+# 단일 출처는 data/calendar.py. v0~v3(calendar_features)와 날짜가 어긋나지 않도록 공유한다.
+LUNAR_EVENTS: dict[str, dict[int, str]] = LUNAR_EVENT_DATES
 
 # 광교 좌표 (store_mapping.yaml)
 GWANGYO_LAT = 37.2853
