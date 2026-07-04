@@ -1436,6 +1436,7 @@ def _closing_demand_for_category(
         "category": category, "a1": a.a1, "a2": a.a2,
         "alpha_low": a.alpha_low, "alpha_high": a.alpha_high,
         "a3_slope": a.a3_slope, "note": a.note,
+        "a1_floor_valid": evening_check["a1_floor_valid"],
         "depth_median_hour_20": overlap["median_hour_20"],
         "depth_median_hour_30": overlap["median_hour_30"],
         "depth_time_separated": overlap["time_separated"],

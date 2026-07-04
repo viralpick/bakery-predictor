@@ -367,16 +367,46 @@ def fit_kink(curve):
     return KinkResult(days, float(base), float(closing_total), alpha, note)
 
 
-def aggregate_alpha(kink, depth, surplus):
-    """Aggregate three estimators (A1/A2/A3) into a single α interval.
+def _reconcile_lower_bound(
+    kink_alpha: float, depth_alpha: float, a1_floor_valid: bool | None
+) -> tuple[list[float], bool]:
+    """Drop A1 from the lower-bound candidates when its floor assumption fails.
 
-    A1 (kink) and A2 (depth) are lower-bound methods → alpha_low = max(their α).
-    A3 (surplus) informs the upper side: if supply-driven (high slope),
-    pull the upper bound down; if demand-limited, allow up to 1.0.
-    Both bounds are clipped to [0,1] and α_low ≤ α_high is maintained.
+    `a1_floor_valid` comes from `evening_traffic_check`: None/True → A1's
+    counterfactual (afternoon rate extrapolated into the closing window) is
+    treated as a valid floor (current/default behavior). False → evening
+    traffic actually declines vs afternoon, so A1 overstates α and must not
+    anchor the lower bound.
+
+    Returns (valid_lowers, a1_excluded) with NaN candidates dropped.
     """
-    # A1, A2 are lower bounds; take the max (drop NaN)
-    lowers = [v for v in (kink.alpha, depth.alpha) if v == v]
+    a1_excluded = a1_floor_valid is False
+    candidates = (depth_alpha,) if a1_excluded else (kink_alpha, depth_alpha)
+    return [v for v in candidates if v == v], a1_excluded
+
+
+def _lower_bound_note(a1_excluded: bool, lowers: list[float]) -> str:
+    """Describe how alpha_low was derived, honestly reflecting A1 exclusion."""
+    if not a1_excluded:
+        return "lower=max(A1,A2) bounds"
+    if lowers:
+        return "lower=A2 only (A1 floor assumption violated: evening traffic declines)"
+    return (
+        "no valid lower bound: A1 floor assumption violated (evening traffic "
+        "declines), A2 degenerate"
+    )
+
+
+def aggregate_alpha(kink, depth, surplus, a1_floor_valid=None):
+    """Aggregate A1/A2/A3 into a single α interval.
+
+    alpha_low = max of valid lower-bound methods (A1 kink, A2 depth). A1 only
+    counts if `a1_floor_valid` (from evening_traffic_check) is not False, so a
+    real floor violation can't anchor alpha_low on an overstated value.
+    A3 pulls alpha_high down when supply-driven, else allows up to 1.0.
+    Bounds are clipped to [0,1] (NaN preserved) with alpha_low ≤ alpha_high.
+    """
+    lowers, a1_excluded = _reconcile_lower_bound(kink.alpha, depth.alpha, a1_floor_valid)
     alpha_low = max(lowers) if lowers else float("nan")
 
     # A3 (surplus) informs upper bound
@@ -391,13 +421,13 @@ def aggregate_alpha(kink, depth, surplus):
             1.0
         ))
 
-    # Ensure invariant: both in [0,1], alpha_low ≤ alpha_high
+    # Ensure invariant: both in [0,1] (NaN preserved by np.clip), alpha_low ≤ alpha_high
     alpha_low = float(np.clip(alpha_low, 0.0, 1.0))
     alpha_high = float(np.clip(alpha_high, 0.0, 1.0))
     if not np.isnan(alpha_low):
         alpha_high = max(alpha_high, alpha_low)
 
-    note = f"lower=max(A1,A2) bounds; A3 {surplus.note}"
+    note = f"{_lower_bound_note(a1_excluded, lowers)}; A3 {surplus.note}"
     return AlphaEstimate(alpha_low, alpha_high, kink.alpha, depth.alpha, surplus.slope, note)
 
 
@@ -405,8 +435,9 @@ def run_closing_demand(rows, waste, item_to_category, category: str = "bread") -
     """Orchestrate the A1/A2/A3 estimators for a single category into one α report.
 
     Builds the closing panel (all categories), filters to `category`, fits
-    kink (A1) / depth elasticity (A2) / surplus counterfactual (A3), and
-    aggregates them into a single α interval.
+    kink (A1) / depth elasticity (A2) / surplus counterfactual (A3), checks
+    whether A1's floor assumption holds (evening_traffic_check), and
+    aggregates the three estimators into a single, reconciled α interval.
 
     Returns dict with keys: alpha (AlphaEstimate), depth (DepthResult),
     surplus (SurplusResult), kink (KinkResult), panel (category-filtered DataFrame).
@@ -417,5 +448,6 @@ def run_closing_demand(rows, waste, item_to_category, category: str = "bread") -
     kink = fit_kink(curve)
     depth = fit_depth_elasticity(cat_panel)
     surplus = fit_surplus_counterfactual(cat_panel)
-    alpha = aggregate_alpha(kink, depth, surplus)
+    evening_check = evening_traffic_check(rows, item_to_category, category)
+    alpha = aggregate_alpha(kink, depth, surplus, a1_floor_valid=evening_check["a1_floor_valid"])
     return {"alpha": alpha, "depth": depth, "surplus": surplus, "kink": kink, "panel": cat_panel}

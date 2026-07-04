@@ -323,6 +323,30 @@ def test_aggregate_alpha_both_nan_lower_bounds():
     assert est_demand.alpha_high == 1.0, "Demand-limited should allow alpha_high = 1.0 even when alpha_low is NaN"
 
 
+def test_aggregate_alpha_a1_excluded_when_floor_invalid_and_a2_nan():
+    """When evening_traffic_check says A1's floor assumption is violated and A2 is
+    degenerate (NaN), there is no valid lower-bound method left — alpha_low must be
+    NaN (not silently anchored on the overstated A1 value), and the note must say so.
+    """
+    kink = KinkResult(30, 2.0, 5.0, 0.85, "lower-bound (evening commute uplift)")
+    depth = DepthResult(200, 50.0, 2.0, 10.0, float("nan"), "insufficient depth variation")
+    surplus = SurplusResult(200, 0.0, 0.05, 0.5, "demand-limited (higher α)")
+    est = aggregate_alpha(kink, depth, surplus, a1_floor_valid=False)
+    assert math.isnan(est.alpha_low)
+    assert "no valid lower bound" in est.note
+    assert est.a1 == pytest.approx(0.85, abs=1e-6), "raw A1 value preserved for transparency"
+
+
+def test_aggregate_alpha_a1_participates_when_floor_valid():
+    """When a1_floor_valid=True, A1 participates in the lower bound exactly as before."""
+    kink = KinkResult(30, 2.0, 5.0, 0.40, "")
+    depth = DepthResult(200, 50.0, 2.0, 10.0, 0.45, "")
+    surplus = SurplusResult(200, 0.9, 0.05, 0.9, "supply-driven (low α)")
+    est = aggregate_alpha(kink, depth, surplus, a1_floor_valid=True)
+    assert est.alpha_low == pytest.approx(0.45, abs=1e-6)
+    assert est.note.startswith("lower=max(A1,A2) bounds")
+
+
 def _orchestrator_rows(days=30):
     """Synthetic bread-category rows: pre-onset flat rate + closing window split
     across both discount depths (30%/20%) with day-varying qty for depth
