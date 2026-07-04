@@ -30,3 +30,31 @@ def test_out_negative_clipped():
     cd = load_category_daily(_rows(), itc, "bread")
     d2 = cd[cd["date"]=="2025-01-02"].iloc[0]
     assert d2["out"] == 0              # item B out=-3 clipped to 0, item A out=0
+
+
+def _hist():
+    dates = pd.date_range("2025-01-06", periods=140, freq="D")  # Mondays start
+    # demand = 100 on Mondays(dow=0), 50 otherwise, deterministic
+    dow = dates.dayofweek
+    demand = np.where(dow==0, 100.0, 50.0)
+    return pd.DataFrame({"date":dates,"demand":demand,"dow":dow})
+
+
+def test_conditional_samples_dow_and_leakage():
+    from bakery.analysis.order_optimization import conditional_demand_samples
+    hist = _hist()
+    target = pd.Timestamp("2025-04-07")  # a Monday
+    s = conditional_demand_samples(hist, target, dow=0, window_weeks=8)
+    assert (s==100.0).all()                      # only Monday demand
+    assert len(s)==8                             # last 8 Mondays before target
+    # leakage: only strictly-before target
+    assert hist[hist["date"]>=target].shape[0]>0 # future rows exist...
+    s2 = conditional_demand_samples(hist[hist["date"]<target], target, 0, 8)
+    assert np.array_equal(s, s2)                 # ...but they don't change the estimate
+
+
+def test_quantile_and_cdf():
+    from bakery.analysis.order_optimization import demand_quantile, demand_cdf
+    s = np.array([10.,20.,30.,40.,50.])
+    assert demand_quantile(s, 0.5) == pytest.approx(30.0)
+    assert demand_cdf(s, 30.0) == pytest.approx(0.6)   # P(<=30)=3/5

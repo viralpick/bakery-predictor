@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 
 IDENTITY_TOL = 1.0
+WINDOW_WEEKS = 13
+MIN_SAMPLES = 6
 
 
 def load_category_daily(rows, item_to_category, category):
@@ -53,3 +55,67 @@ def load_category_daily(rows, item_to_category, category):
     g["month"] = d.dt.month
 
     return g.drop(columns=["rev"]).sort_values("date").reset_index(drop=True)
+
+
+def conditional_demand_samples(hist, target_date, dow, window_weeks=WINDOW_WEEKS):
+    """Extract demand samples for same DOW strictly before target_date.
+
+    Parameters
+    ----------
+    hist : pd.DataFrame
+        Historical data with columns: date, demand, dow.
+    target_date : pd.Timestamp or str
+        Prediction date (exclusive).
+    dow : int
+        Day-of-week (0=Monday, 6=Sunday).
+    window_weeks : int
+        Number of past weeks to include.
+
+    Returns
+    -------
+    np.ndarray
+        Sorted demand samples for same DOW before target_date.
+    """
+    past = hist[(pd.to_datetime(hist["date"]) < pd.Timestamp(target_date))
+                & (hist["dow"] == dow)]
+    return past["demand"].to_numpy(float)[-window_weeks:]
+
+
+def demand_quantile(samples, q):
+    """Compute quantile of empirical demand distribution.
+
+    Parameters
+    ----------
+    samples : np.ndarray
+        Demand samples.
+    q : float
+        Quantile level in [0, 1].
+
+    Returns
+    -------
+    float
+        Quantile value, or NaN if empty.
+    """
+    if len(samples) == 0:
+        return float("nan")
+    return float(np.quantile(samples, q, method="linear"))
+
+
+def demand_cdf(samples, x):
+    """Compute empirical CDF P(demand <= x).
+
+    Parameters
+    ----------
+    samples : np.ndarray
+        Demand samples.
+    x : float
+        Threshold.
+
+    Returns
+    -------
+    float
+        P(demand <= x), or NaN if empty.
+    """
+    if len(samples) == 0:
+        return float("nan")
+    return float(np.mean(samples <= x))
