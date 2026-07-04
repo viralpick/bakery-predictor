@@ -1586,5 +1586,126 @@ def cmd_phaseb_order(out_dir: Path = REPORTS_DIR) -> None:
     console.print(f"[green]wrote[/] {out_dir}/{PHASEB_IMPLIED_C_CSV}, {PHASEB_SAVINGS_CSV}")
 
 
+REGIME_PLACEBO_DATES = ["2022-07-17", "2023-01-17", "2023-07-17", "2024-01-17", "2024-07-17"]
+REGIME_CSV = "regime_shift_estimates.csv"
+
+
+def _regime_row(category: str, result: dict) -> dict:
+    """Flatten a run_discount_regime result into one CSV row + print it."""
+    s, i = result["closing_share"], result["closing_intensity"]
+    placebo = [p.beta for p in result["placebo"] if not p.ill_posed]
+    max_placebo = max((abs(b) for b in placebo), default=float("nan"))
+    console.print(
+        f"[bold]{category}[/] verdict={result['verdict']} (n={result['n']})\n"
+        f"  closing_share post_cut β={s.beta:+.4f} 95%CI[{s.ci_low:+.4f},{s.ci_high:+.4f}]\n"
+        f"  closing/made  post_cut β={i.beta:+.4f} 95%CI[{i.ci_low:+.4f},{i.ci_high:+.4f}]\n"
+        f"  placebo max|β|={max_placebo:.4f}"
+    )
+    return {
+        "category": category, "cut_date": result["cut_date"], "n": result["n"],
+        "verdict": result["verdict"],
+        "share_beta": s.beta, "share_ci_low": s.ci_low, "share_ci_high": s.ci_high,
+        "intensity_beta": i.beta, "intensity_ci_low": i.ci_low, "intensity_ci_high": i.ci_high,
+        "placebo_max_abs_beta": max_placebo,
+    }
+
+
+@app.command("regime-alpha")
+def cmd_regime_alpha(out_dir: Path = REPORTS_DIR) -> None:
+    """다중시각 재검증 ①: 2025-01-17 마감할인 depth cut(30%→20%) 자연실험.
+
+    대조군이 없어(전 매장 동시전환) 총수요는 식별 불가. 내부통제되는 구성비
+    closing_share = closing/(normal+closing)가 depth cut에 반응하는지를 item-FE
+    회귀 + placebo break-date 분포로 검정한다. null(depth_invariant)이면 마감판매가
+    supply-driven이며 가격민감 떨이수요가 아님 → 높은 α 방향(단 α 점식별은 아님).
+    """
+    from .analysis.discount_regime import run_discount_regime
+
+    rows, item_to_category = _load_phaseb_inputs()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    csv_rows = []
+    for category in CLOSING_DEMAND_CATEGORIES:
+        result = run_discount_regime(rows, item_to_category, category,
+                                     placebo_cut_dates=REGIME_PLACEBO_DATES)
+        csv_rows.append(_regime_row(category, result))
+    pd.DataFrame(csv_rows).to_csv(out_dir / REGIME_CSV, index=False)
+    console.print(f"[green]wrote[/] {out_dir}/{REGIME_CSV}")
+
+
+BASKET_CSV = "basket_composition.csv"
+BASKET_CUT_DATE = "2025-01-17"
+
+
+def _load_basket_inputs() -> pd.DataFrame:
+    """Load 광교 receipt line-items with a proper basket key + closing label + category.
+
+    A basket is one receipt = (판매일자, POS번호, 영수증번호); the shared discount
+    loader collapses receipts to 영수증번호 alone (which recycles daily), so we build
+    the composite key here from the raw sheet.
+    """
+    from .analysis.discount import DEFAULT_XLSX, classify_code
+    from .data import bonavi_loader as bl
+
+    sales = pd.read_excel(DEFAULT_XLSX, sheet_name="판매정보")
+    sale_col = next(c for c in sales.columns if "판매구분" in c)
+    sales = sales[sales[sale_col].astype(str).str[0] == "0"].copy()   # drop 반품
+
+    code = sales["할인코드"].astype(str).str.strip()
+    label = code.map(classify_code).where(sales["할인금액"].fillna(0) > 0, "none")
+    items = bl.load_items(DEFAULT_XLSX)
+    item_to_category = pd.Series(items.set_index("item_id")["category_id"])
+    date = pd.to_datetime(sales["판매일자"].astype(str), format="%Y%m%d")
+    return pd.DataFrame({
+        "basket_id": (date.dt.strftime("%Y%m%d") + "-"
+                      + sales["POS번호"].astype(str) + "-"
+                      + sales["영수증번호"].astype(str)),
+        "date": date,
+        "label": label.to_numpy(),
+        "category_id": sales["품목코드"].astype(str).map(item_to_category).to_numpy(),
+        "qty": sales["판매수량"].astype(float).to_numpy(),
+        "paid": sales["결제금액"].astype(float).to_numpy(),
+    })
+
+
+def _basket_row(scope: str, category, summary: dict) -> dict:
+    console.print(
+        f"[bold]{scope}[/] closing_category={category}: "
+        f"n_closing={summary['n_closing_baskets']} "
+        f"mixed_rate={summary['mixed_rate']:.3f} "
+        f"fp_value_share={summary['fullprice_value_share']:.3f} "
+        f"size(closing/other)={summary['mean_size_closing']:.2f}/{summary['mean_size_noclosing']:.2f}"
+    )
+    return {"scope": scope, "closing_category": category or "any", **summary}
+
+
+@app.command("basket-alpha")
+def cmd_basket_alpha(out_dir: Path = REPORTS_DIR) -> None:
+    """다중시각 재검증 ③: 마감할인 basket 구성 (실쇼핑 vs 떨이단독) — 저녁 confound 확인용.
+
+    영수증(basket) 단위로, 마감할인 line을 담은 basket이 정가품도 함께 담는지
+    (mixed_rate / 정가 금액비중)를 본다. ⚠️ 마감할인이 저녁(20-21h) time-lock이고
+    그 시각 정가품 재고가 ~5%로 붕괴하므로 낮은 mixed_rate는 시각 confound다 —
+    독립 α 판별자가 아니라 Phase A 저녁 잠식의 재현으로 읽어야 한다.
+    전체 + depth regime(30% pre / 20% post 2025-01-17)별로 리포트.
+    """
+    from .analysis.basket_composition import basket_composition_summary
+
+    lines = _load_basket_inputs()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cut = pd.Timestamp(BASKET_CUT_DATE)
+    scopes = {
+        "all": lines,
+        "pre_cut_30pct": lines[lines["date"] < cut],
+        "post_cut_20pct": lines[lines["date"] >= cut],
+    }
+    rows = []
+    for scope, sub in scopes.items():
+        for category in (None, "bread", "pastry"):
+            rows.append(_basket_row(scope, category,
+                                    basket_composition_summary(sub, closing_category=category)))
+    pd.DataFrame(rows).to_csv(out_dir / BASKET_CSV, index=False)
+    console.print(f"[green]wrote[/] {out_dir}/{BASKET_CSV}")
+
+
 if __name__ == "__main__":
     app()
