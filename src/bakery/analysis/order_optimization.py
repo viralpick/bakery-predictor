@@ -125,6 +125,31 @@ def demand_cdf(samples, x):
     return float(np.mean(samples <= x))
 
 
+def implied_cost_rate(samples, made):
+    """Compute implied cost rate from current policy (made quantity).
+
+    Service level SL = P(demand <= made) is calculated via demand_cdf.
+    Implied cost rate c = 1 - SL, representing the stockout probability
+    under the assumption that made quantity equals the (1-c) quantile.
+
+    Parameters
+    ----------
+    samples : np.ndarray
+        Demand samples.
+    made : float
+        Made (produced) quantity.
+
+    Returns
+    -------
+    float
+        Implied cost rate (1 - SL), or NaN if insufficient data or invalid made.
+    """
+    if len(samples) < MIN_SAMPLES or not np.isfinite(made):
+        return float("nan")
+    sl = demand_cdf(samples, made)
+    return float(1.0 - sl)
+
+
 @dataclass(frozen=True)
 class OrderResult:
     """Newsvendor order result (Level 1 & 2)."""

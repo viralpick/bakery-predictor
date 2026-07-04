@@ -6,6 +6,7 @@ from bakery.analysis.order_optimization import (
     conditional_demand_samples,
     demand_quantile,
     demand_cdf,
+    implied_cost_rate,
     newsvendor_order,
     CLOSING_DELTA,
 )
@@ -78,3 +79,11 @@ def test_level2_le_level1_with_closing_band():
     res = newsvendor_order(s, c=0.35, closing_frac=0.3, delta=0.30)
     # closing band earns only discount margin → optimal produces no more than L1
     assert res.q_l2 <= res.q_l1 + 1e-6
+
+
+def test_implied_c_from_service_level():
+    s = np.arange(1, 101, dtype=float)
+    # made=90 → SL=P(demand<=90)=0.90 → implied c=0.10
+    assert implied_cost_rate(s, made=90.0) == pytest.approx(0.10, abs=0.01)
+    # made=65 → SL=0.65 → implied c=0.35
+    assert implied_cost_rate(s, made=65.0) == pytest.approx(0.35, abs=0.01)
