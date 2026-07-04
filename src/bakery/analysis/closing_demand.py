@@ -31,6 +31,13 @@ PRE_ONSET_START_HOUR = 17
 AFTERNOON_END_HOUR = 19
 EVENING_START_HOUR = 20
 EVENING_END_HOUR = 21
+FOOTFALL_STABLE_RATIO = 0.9  # evening/afternoon total-footfall ratio treated as "stable"
+
+# a1_bias: honest signal for whether A1's floor assumption is established.
+A1_BIAS_INDETERMINATE = "indeterminate"  # footfall stable -> cannibalization, direction unclear
+A1_BIAS_LIKELY_OVERSTATES = "likely_overstates"  # footfall itself declines -> A1 overstates alpha
+A1_BIAS_UNKNOWN = "unknown"  # degenerate: footfall ratio itself unavailable
+A1_EXCLUDING_BIASES = frozenset({A1_BIAS_INDETERMINATE, A1_BIAS_LIKELY_OVERSTATES})
 
 
 def build_closing_panel(rows, waste, item_to_category):
@@ -264,10 +271,11 @@ def depth_time_overlap(rows):
     }
 
 
-def _window_hourly_rate(df: pd.DataFrame, start_hour: int, end_hour: int) -> float:
-    """Mean per-hour sales rate in [start_hour, end_hour], summed across days then averaged.
+def _window_rate(df: pd.DataFrame, start_hour: int, end_hour: int, value_col: str, how: str) -> float:
+    """Mean per-hour rate of `value_col` in [start_hour, end_hour], across days then averaged.
 
-    Returns NaN if the window has no rows (degenerate).
+    `how="sum"` sums value_col per hour (e.g. qty); `how="nunique"` counts unique
+    values per hour (e.g. receipt_id, for footfall). NaN if the window has no rows.
     """
     win = df[(df["hour"] >= start_hour) & (df["hour"] <= end_hour)]
     if win.empty:
@@ -275,33 +283,71 @@ def _window_hourly_rate(df: pd.DataFrame, start_hour: int, end_hour: int) -> flo
     n_days = win["date"].nunique()
     if n_days == 0:
         return float("nan")
-    per_hour = win.groupby("hour")["qty"].sum() / n_days
+    grouped = win.groupby("hour")[value_col]
+    per_hour = (grouped.sum() if how == "sum" else grouped.nunique()) / n_days
     return float(per_hour.mean())
 
 
-def evening_traffic_check(rows, item_to_category, category: str) -> dict:
-    """Diagnostic: does non-closing evening (20-21h) traffic hold up vs afternoon (17-19h)?
+def _ratio(numerator: float, denominator: float) -> float:
+    """Safe ratio: NaN if denominator is NaN/<=0 (NaN numerator propagates naturally)."""
+    if denominator != denominator or denominator <= 0:
+        return float("nan")
+    return float(numerator / denominator)
 
-    fit_kink (A1) uses the afternoon non-closing rate as the counterfactual for
-    the closing window. That interpretation is a valid LOWER bound on α only if
-    evening traffic (absent the discount) is >= afternoon traffic; if evening
-    traffic naturally declines, A1 overstates α instead. Uses ONLY non-closing
-    (full-price, label != "closing") rows so the discount itself can't bias it.
+
+def _footfall_ratios(cat_df: pd.DataFrame) -> tuple[float, float]:
+    """Discount-agnostic total footfall ratios (evening / afternoon), over ALL rows.
+
+    Unlike the non-closing rate A1 uses as its counterfactual, these count every
+    visit regardless of discount -- so they can tell genuine traffic decline
+    apart from cannibalization to the discounted item.
+    """
+    afternoon_receipts = _window_rate(cat_df, PRE_ONSET_START_HOUR, AFTERNOON_END_HOUR, "receipt_id", "nunique")
+    evening_receipts = _window_rate(cat_df, EVENING_START_HOUR, EVENING_END_HOUR, "receipt_id", "nunique")
+    afternoon_qty = _window_rate(cat_df, PRE_ONSET_START_HOUR, AFTERNOON_END_HOUR, "qty", "sum")
+    evening_qty = _window_rate(cat_df, EVENING_START_HOUR, EVENING_END_HOUR, "qty", "sum")
+    return _ratio(evening_receipts, afternoon_receipts), _ratio(evening_qty, afternoon_qty)
+
+
+def _a1_bias(traffic_stable: bool | None) -> str:
+    """Classify A1's floor-assumption bias direction from the footfall discriminator."""
+    if traffic_stable is None:
+        return A1_BIAS_UNKNOWN
+    return A1_BIAS_INDETERMINATE if traffic_stable else A1_BIAS_LIKELY_OVERSTATES
+
+
+def evening_traffic_check(rows, item_to_category, category: str) -> dict:
+    """Diagnostic: does evening (20-21h) traffic hold up vs afternoon (17-19h)?
+
+    A low non-closing evening rate alone is ambiguous: it can mean evening
+    traffic genuinely declines (A1 overstates α), or it can mean total footfall
+    is stable and customers just switch to the discounted item within the same
+    visit (cannibalization -- A1 bias indeterminate). `footfall_*_ratio` /
+    `traffic_stable` (ALL rows, discount-agnostic) discriminate between the two;
+    `a1_bias` is the honest resulting signal consumed by `aggregate_alpha`.
     """
     df = rows.copy()
     df["category_id"] = df["item_id"].map(item_to_category)
-    df = df[(df["category_id"] == category) & (df["label"] != "closing")]
-    afternoon_rate = _window_hourly_rate(df, PRE_ONSET_START_HOUR, AFTERNOON_END_HOUR)
-    evening_rate = _window_hourly_rate(df, EVENING_START_HOUR, EVENING_END_HOUR)
-    have_rates = afternoon_rate == afternoon_rate and evening_rate == evening_rate
-    valid_inputs = have_rates and afternoon_rate > 0
-    ratio = float(evening_rate / afternoon_rate) if valid_inputs else float("nan")
-    a1_floor_valid = (ratio >= 1.0) if valid_inputs else None
+    cat_df = df[df["category_id"] == category]
+    non_closing = cat_df[cat_df["label"] != "closing"]
+
+    afternoon_rate = _window_rate(non_closing, PRE_ONSET_START_HOUR, AFTERNOON_END_HOUR, "qty", "sum")
+    evening_rate = _window_rate(non_closing, EVENING_START_HOUR, EVENING_END_HOUR, "qty", "sum")
+    ratio = _ratio(evening_rate, afternoon_rate)
+    a1_floor_valid = None if ratio != ratio else ratio >= 1.0
+
+    receipts_ratio, qty_ratio = _footfall_ratios(cat_df)
+    traffic_stable = None if receipts_ratio != receipts_ratio else receipts_ratio >= FOOTFALL_STABLE_RATIO
+
     return {
         "afternoon_rate": afternoon_rate,
         "evening_rate": evening_rate,
         "evening_to_afternoon_ratio": ratio,
         "a1_floor_valid": a1_floor_valid,
+        "footfall_receipts_ratio": receipts_ratio,
+        "footfall_qty_ratio": qty_ratio,
+        "traffic_stable": traffic_stable,
+        "a1_bias": _a1_bias(traffic_stable),
     }
 
 
@@ -368,45 +414,47 @@ def fit_kink(curve):
 
 
 def _reconcile_lower_bound(
-    kink_alpha: float, depth_alpha: float, a1_floor_valid: bool | None
+    kink_alpha: float, depth_alpha: float, a1_bias: str | None
 ) -> tuple[list[float], bool]:
-    """Drop A1 from the lower-bound candidates when its floor assumption fails.
+    """Drop A1 from the lower-bound candidates when its floor status isn't established.
 
-    `a1_floor_valid` comes from `evening_traffic_check`: None/True → A1's
-    counterfactual (afternoon rate extrapolated into the closing window) is
-    treated as a valid floor (current/default behavior). False → evening
-    traffic actually declines vs afternoon, so A1 overstates α and must not
-    anchor the lower bound.
+    `a1_bias` comes from `evening_traffic_check`: None (not checked -- backward-
+    compatible default) or "unknown" (degenerate) → A1 kept. "indeterminate"
+    (footfall stable → cannibalization, direction unclear) or "likely_overstates"
+    (footfall itself declines) → A1 dropped; it can't anchor the lower bound.
 
     Returns (valid_lowers, a1_excluded) with NaN candidates dropped.
     """
-    a1_excluded = a1_floor_valid is False
+    a1_excluded = a1_bias in A1_EXCLUDING_BIASES
     candidates = (depth_alpha,) if a1_excluded else (kink_alpha, depth_alpha)
     return [v for v in candidates if v == v], a1_excluded
 
 
-def _lower_bound_note(a1_excluded: bool, lowers: list[float]) -> str:
-    """Describe how alpha_low was derived, honestly reflecting A1 exclusion."""
+def _lower_bound_note(a1_excluded: bool, lowers: list[float], a1_bias: str | None) -> str:
+    """Describe how alpha_low was derived, honestly reflecting A1's exclusion reason."""
     if not a1_excluded:
         return "lower=max(A1,A2) bounds"
-    if lowers:
-        return "lower=A2 only (A1 floor assumption violated: evening traffic declines)"
-    return (
-        "no valid lower bound: A1 floor assumption violated (evening traffic "
-        "declines), A2 degenerate"
+    reason = (
+        "evening full-price low but footfall stable → cannibalization, bias indeterminate"
+        if a1_bias == A1_BIAS_INDETERMINATE
+        else "evening traffic genuinely declines (A1 overstates α)"
     )
+    if lowers:
+        return f"lower=A2 only (A1 floor unverified: {reason})"
+    return f"no validated lower bound: A1 floor unverified ({reason}), A2 degenerate"
 
 
-def aggregate_alpha(kink, depth, surplus, a1_floor_valid=None):
+def aggregate_alpha(kink, depth, surplus, a1_bias=None):
     """Aggregate A1/A2/A3 into a single α interval.
 
     alpha_low = max of valid lower-bound methods (A1 kink, A2 depth). A1 only
-    counts if `a1_floor_valid` (from evening_traffic_check) is not False, so a
-    real floor violation can't anchor alpha_low on an overstated value.
+    counts if `a1_bias` (from evening_traffic_check) is not "indeterminate" or
+    "likely_overstates" -- either means A1's floor assumption is not established,
+    so it can't anchor alpha_low on a value whose bias direction is unknown.
     A3 pulls alpha_high down when supply-driven, else allows up to 1.0.
     Bounds are clipped to [0,1] (NaN preserved) with alpha_low ≤ alpha_high.
     """
-    lowers, a1_excluded = _reconcile_lower_bound(kink.alpha, depth.alpha, a1_floor_valid)
+    lowers, a1_excluded = _reconcile_lower_bound(kink.alpha, depth.alpha, a1_bias)
     alpha_low = max(lowers) if lowers else float("nan")
 
     # A3 (surplus) informs upper bound
@@ -427,7 +475,7 @@ def aggregate_alpha(kink, depth, surplus, a1_floor_valid=None):
     if not np.isnan(alpha_low):
         alpha_high = max(alpha_high, alpha_low)
 
-    note = f"{_lower_bound_note(a1_excluded, lowers)}; A3 {surplus.note}"
+    note = f"{_lower_bound_note(a1_excluded, lowers, a1_bias)}; A3 {surplus.note}"
     return AlphaEstimate(alpha_low, alpha_high, kink.alpha, depth.alpha, surplus.slope, note)
 
 
@@ -449,5 +497,5 @@ def run_closing_demand(rows, waste, item_to_category, category: str = "bread") -
     depth = fit_depth_elasticity(cat_panel)
     surplus = fit_surplus_counterfactual(cat_panel)
     evening_check = evening_traffic_check(rows, item_to_category, category)
-    alpha = aggregate_alpha(kink, depth, surplus, a1_floor_valid=evening_check["a1_floor_valid"])
+    alpha = aggregate_alpha(kink, depth, surplus, a1_bias=evening_check["a1_bias"])
     return {"alpha": alpha, "depth": depth, "surplus": surplus, "kink": kink, "panel": cat_panel}

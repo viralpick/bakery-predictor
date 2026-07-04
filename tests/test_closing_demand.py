@@ -254,37 +254,84 @@ def test_kink_degenerate_base_exceeds_closing():
 def test_evening_traffic_check_declining_evening():
     """Afternoon rate 4/h, evening rate 2/h -> ratio 0.5, a1_floor_valid False.
 
-    This is the case where fit_kink's A1 lower-bound interpretation breaks:
-    evening traffic is naturally lower than afternoon, so A1 overstates alpha.
+    Every row also carries a unique receipt_id, and receipt counts decline in
+    lockstep with qty (4 receipts/h afternoon -> 2 receipts/h evening), so total
+    footfall genuinely collapses too: traffic_stable False, a1_bias
+    'likely_overstates' (not just cannibalization).
     """
     recs = []
+    receipt = 0
     for d in range(5):
         date = pd.Timestamp("2025-04-01") + pd.Timedelta(days=d)
         for h in (17, 18, 19):
-            recs.append({"date": date, "hour": h, "minute": 0, "item_id": "A",
-                         "qty": 4, "label": "none"})
+            for _ in range(4):
+                receipt += 1
+                recs.append({"date": date, "hour": h, "minute": 0, "item_id": "A",
+                             "qty": 1, "label": "none", "receipt_id": f"r{receipt}"})
         for h in (20, 21):
-            recs.append({"date": date, "hour": h, "minute": 0, "item_id": "A",
-                         "qty": 2, "label": "none"})
+            for _ in range(2):
+                receipt += 1
+                recs.append({"date": date, "hour": h, "minute": 0, "item_id": "A",
+                             "qty": 1, "label": "none", "receipt_id": f"r{receipt}"})
     rows = pd.DataFrame(recs)
     result = evening_traffic_check(rows, pd.Series({"A": "bread"}), "bread")
     assert result["afternoon_rate"] == pytest.approx(4.0)
     assert result["evening_rate"] == pytest.approx(2.0)
     assert result["evening_to_afternoon_ratio"] == pytest.approx(0.5)
     assert result["a1_floor_valid"] is False
+    assert result["footfall_receipts_ratio"] == pytest.approx(0.5)
+    assert result["traffic_stable"] is False
+    assert result["a1_bias"] == "likely_overstates"
 
 
 def test_evening_traffic_check_degenerate_no_evening_rows():
-    """No non-closing rows in the evening window -> NaN ratio, a1_floor_valid=None."""
+    """No rows at all in the evening window -> NaN ratio, a1_floor_valid/a1_bias unknown."""
     rows = pd.DataFrame({
         "date": pd.to_datetime(["2025-04-01"] * 3),
         "hour": [17, 18, 19], "minute": [0, 0, 0], "item_id": ["A"] * 3,
         "qty": [4, 4, 4], "label": ["none"] * 3,
+        "receipt_id": ["r1", "r2", "r3"],
     })
     result = evening_traffic_check(rows, pd.Series({"A": "bread"}), "bread")
     assert math.isnan(result["evening_rate"])
     assert math.isnan(result["evening_to_afternoon_ratio"])
     assert result["a1_floor_valid"] is None
+    assert math.isnan(result["footfall_receipts_ratio"])
+    assert result["traffic_stable"] is None
+    assert result["a1_bias"] == "unknown"
+
+
+def test_evening_traffic_check_cannibalization_footfall_stable():
+    """Non-closing evening rate collapses (1/h vs 6/h afternoon) but total footfall
+    (all rows, discount-agnostic) holds steady: 2 receipts/h in both windows. This
+    is the finding that motivated the fix -- low full-price evening sales driven by
+    customers switching to the closing-discounted item, not fewer customers.
+    Expect traffic_stable True and a1_bias 'indeterminate' (NOT 'likely_overstates').
+    """
+    recs = []
+    receipt = 0
+    for d in range(5):
+        date = pd.Timestamp("2025-06-01") + pd.Timedelta(days=d)
+        for h in (17, 18, 19):
+            for _ in range(2):
+                receipt += 1
+                recs.append({"date": date, "hour": h, "minute": 0, "item_id": "A",
+                             "qty": 3, "label": "none", "receipt_id": f"r{receipt}"})
+        for h in (20, 21):
+            receipt += 1
+            recs.append({"date": date, "hour": h, "minute": 0, "item_id": "A",
+                         "qty": 1, "label": "none", "receipt_id": f"r{receipt}"})
+            receipt += 1
+            recs.append({"date": date, "hour": h, "minute": 0, "item_id": "A",
+                         "qty": 5, "label": "closing", "receipt_id": f"r{receipt}"})
+    rows = pd.DataFrame(recs)
+    result = evening_traffic_check(rows, pd.Series({"A": "bread"}), "bread")
+    assert result["afternoon_rate"] == pytest.approx(6.0)
+    assert result["evening_rate"] == pytest.approx(1.0)
+    assert result["a1_floor_valid"] is False
+    assert result["footfall_receipts_ratio"] == pytest.approx(1.0)
+    assert result["traffic_stable"] is True
+    assert result["a1_bias"] == "indeterminate"
 
 
 def test_aggregate_alpha_interval():
@@ -323,26 +370,45 @@ def test_aggregate_alpha_both_nan_lower_bounds():
     assert est_demand.alpha_high == 1.0, "Demand-limited should allow alpha_high = 1.0 even when alpha_low is NaN"
 
 
-def test_aggregate_alpha_a1_excluded_when_floor_invalid_and_a2_nan():
-    """When evening_traffic_check says A1's floor assumption is violated and A2 is
-    degenerate (NaN), there is no valid lower-bound method left — alpha_low must be
-    NaN (not silently anchored on the overstated A1 value), and the note must say so.
+def test_aggregate_alpha_a1_excluded_when_indeterminate_and_a2_nan():
+    """When evening_traffic_check says A1's floor bias is 'indeterminate' (footfall
+    stable -> cannibalization, not traffic decline) and A2 is degenerate (NaN),
+    there is no valid lower-bound method left — alpha_low must be NaN (not
+    silently anchored on the ambiguous A1 value), and the note must say the true
+    reason (footfall stable / cannibalization), not the old false "traffic
+    declines" claim.
     """
     kink = KinkResult(30, 2.0, 5.0, 0.85, "lower-bound (evening commute uplift)")
     depth = DepthResult(200, 50.0, 2.0, 10.0, float("nan"), "insufficient depth variation")
     surplus = SurplusResult(200, 0.0, 0.05, 0.5, "demand-limited (higher α)")
-    est = aggregate_alpha(kink, depth, surplus, a1_floor_valid=False)
+    est = aggregate_alpha(kink, depth, surplus, a1_bias="indeterminate")
     assert math.isnan(est.alpha_low)
-    assert "no valid lower bound" in est.note
+    assert "no validated lower bound" in est.note
+    assert "footfall stable" in est.note
     assert est.a1 == pytest.approx(0.85, abs=1e-6), "raw A1 value preserved for transparency"
 
 
-def test_aggregate_alpha_a1_participates_when_floor_valid():
-    """When a1_floor_valid=True, A1 participates in the lower bound exactly as before."""
+def test_aggregate_alpha_a1_excluded_when_likely_overstates():
+    """When a1_bias='likely_overstates' (footfall itself genuinely declines), A1 is
+    excluded and the note names that reason specifically, not the cannibalization one.
+    """
+    kink = KinkResult(30, 2.0, 5.0, 0.85, "lower-bound (evening commute uplift)")
+    depth = DepthResult(200, 50.0, 2.0, 10.0, 0.45, "")
+    surplus = SurplusResult(200, 0.0, 0.05, 0.5, "demand-limited (higher α)")
+    est = aggregate_alpha(kink, depth, surplus, a1_bias="likely_overstates")
+    assert est.alpha_low == pytest.approx(0.45, abs=1e-6)
+    assert "lower=A2 only" in est.note
+    assert "genuinely declines" in est.note
+    assert "footfall stable" not in est.note
+
+
+def test_aggregate_alpha_a1_participates_when_bias_none():
+    """When a1_bias=None (not checked -- backward-compatible default), A1
+    participates in the lower bound exactly as before."""
     kink = KinkResult(30, 2.0, 5.0, 0.40, "")
     depth = DepthResult(200, 50.0, 2.0, 10.0, 0.45, "")
     surplus = SurplusResult(200, 0.9, 0.05, 0.9, "supply-driven (low α)")
-    est = aggregate_alpha(kink, depth, surplus, a1_floor_valid=True)
+    est = aggregate_alpha(kink, depth, surplus, a1_bias=None)
     assert est.alpha_low == pytest.approx(0.45, abs=1e-6)
     assert est.note.startswith("lower=max(A1,A2) bounds")
 
@@ -356,19 +422,35 @@ def _orchestrator_rows(days=30):
         date = pd.Timestamp("2025-03-01") + pd.Timedelta(days=d)
         for h in (17, 18, 19):
             recs.append({"date": date, "hour": h, "minute": 0, "item_id": "A",
-                         "qty": 2, "label": "none", "discount_code": ""})
+                         "qty": 2, "label": "none", "discount_code": "",
+                         "receipt_id": f"r{d}-{h}"})
         recs.append({"date": date, "hour": 20, "minute": 0, "item_id": "A",
-                     "qty": 3 + (d % 5), "label": "closing", "discount_code": "0077"})
+                     "qty": 3 + (d % 5), "label": "closing", "discount_code": "0077",
+                     "receipt_id": f"r{d}-20"})
         recs.append({"date": date, "hour": 21, "minute": 0, "item_id": "A",
-                     "qty": 2 + (d % 3), "label": "closing", "discount_code": "0069"})
+                     "qty": 2 + (d % 3), "label": "closing", "discount_code": "0069",
+                     "receipt_id": f"r{d}-21"})
     return pd.DataFrame(recs)
 
 
 def test_run_closing_demand_smoke():
+    """End-to-end orchestration check. In this fixture, evening is 100% closing
+    (no non-closing rows at 20-21h) so the non-closing evening rate is undefined,
+    but total footfall (receipts, all rows) is flat vs afternoon -> a1_bias
+    'indeterminate' -> A1 excluded from the lower bound. A2 is independently
+    degenerate here (negative depth-elasticity extrapolation). With both lower-
+    bound methods unavailable, alpha_low is honestly NaN -- this is the exact
+    real-world case (footfall stable, non-closing rate collapsed) the fix targets.
+    """
     rows = _orchestrator_rows()
     dates = rows["date"].drop_duplicates()
     waste = pd.DataFrame({"date": dates, "item_id": "A", "waste_qty": 1})
     itc = pd.Series({"A": "bread"})
     result = run_closing_demand(rows, waste, itc, category="bread")
     assert set(result.keys()) == {"alpha", "depth", "surplus", "kink", "panel"}
-    assert 0.0 <= result["alpha"].alpha_low <= 1.0
+    alpha = result["alpha"]
+    assert alpha.a1 == pytest.approx(0.5, abs=1e-6)
+    assert math.isnan(alpha.a2)
+    assert math.isnan(alpha.alpha_low)
+    assert "no validated lower bound" in alpha.note
+    assert "footfall stable" in alpha.note

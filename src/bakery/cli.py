@@ -1414,6 +1414,11 @@ def _print_closing_demand_result(category: str, result: dict, diagnostics: dict)
         f"(A1={a.a1:.3f} A2={a.a2:.3f} A3_slope={a.a3_slope:.3f}) {a.note}"
     )
     console.print(f"  A2 note: {result['depth'].note}")
+    console.print(
+        f"  footfall: receipts_ratio={diagnostics.get('footfall_receipts_ratio', float('nan')):.3f} "
+        f"qty_ratio={diagnostics.get('footfall_qty_ratio', float('nan')):.3f} "
+        f"traffic_stable={diagnostics.get('traffic_stable')} a1_bias={diagnostics.get('a1_bias')}"
+    )
     console.print(f"  diagnostics: {diagnostics}")
 
 
@@ -1437,6 +1442,10 @@ def _closing_demand_for_category(
         "alpha_low": a.alpha_low, "alpha_high": a.alpha_high,
         "a3_slope": a.a3_slope, "note": a.note,
         "a1_floor_valid": evening_check["a1_floor_valid"],
+        "footfall_receipts_ratio": evening_check["footfall_receipts_ratio"],
+        "footfall_qty_ratio": evening_check["footfall_qty_ratio"],
+        "traffic_stable": evening_check["traffic_stable"],
+        "a1_bias": evening_check["a1_bias"],
         "depth_median_hour_20": overlap["median_hour_20"],
         "depth_median_hour_30": overlap["median_hour_30"],
         "depth_time_separated": overlap["time_separated"],
