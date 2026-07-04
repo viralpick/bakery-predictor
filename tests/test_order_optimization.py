@@ -9,6 +9,7 @@ from bakery.analysis.order_optimization import (
     implied_cost_rate,
     newsvendor_order,
     backtest_savings,
+    run_phaseb,
     _backtest_one_c,
     CLOSING_DELTA,
 )
@@ -147,3 +148,27 @@ def test_backtest_is_leakage_safe():
     late_clean = np.asarray(acc_clean["impl"][-10:], dtype=float)
     late_corrupt = np.asarray(acc_corrupt["impl"][-10:], dtype=float)
     assert not np.array_equal(late_clean, late_corrupt)
+
+
+def _rows_for_smoke(n=200):
+    # item-day rows (pre-aggregation) for 2 bread items, enough history for
+    # MIN_HISTORY_DAYS(90) + MIN_SAMPLES(6) same-dow samples.
+    dates = pd.date_range("2024-01-01", periods=n, freq="D")
+    dow = dates.dayofweek
+    demand = np.where(dow >= 5, 60.0, 30.0)
+    base = pd.DataFrame({
+        "date": dates, "made": demand, "out": 0.0,
+        "normal_qty": demand * 0.7, "closing_qty": demand * 0.3,
+        "sold_total": demand, "unit_price": 1000, "identity_diff": 0.0,
+    })
+    a = base.copy(); a["item_id"] = "A"
+    b = base.copy(); b["item_id"] = "B"
+    return pd.concat([a, b], ignore_index=True)
+
+
+def test_run_phaseb_smoke():
+    cd_rows = _rows_for_smoke()   # 충분한 일수의 합성 parquet-형 rows (bread), 헬퍼 상단 정의
+    itc = pd.Series({"A": "bread", "B": "bread"})
+    out = run_phaseb(cd_rows, itc, "bread", c_grid=[0.35])
+    assert set(out) == {"implied_c_current", "savings_table"}
+    assert 0.0 <= out["implied_c_current"] <= 1.0 or np.isnan(out["implied_c_current"])

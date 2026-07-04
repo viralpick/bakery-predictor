@@ -311,3 +311,35 @@ def backtest_savings(cat_daily, c_grid, delta=CLOSING_DELTA):
             "n_days": a["n"]
         })
     return pd.DataFrame(out)
+
+
+def run_phaseb(rows, item_to_category, category, c_grid):
+    """End-to-end Phase B orchestrator for one category.
+
+    Aggregates item-day rows to category-day level, backtests the newsvendor
+    policy across c_grid, and reports the implied cost rate of the current
+    (as-made) ordering policy.
+
+    Parameters
+    ----------
+    rows : pd.DataFrame
+        Item-day rows (see load_category_daily for expected columns).
+    item_to_category : pd.Series
+        Mapping item_id -> category.
+    category : str
+        Category to run.
+    c_grid : list of float
+        Cost rates to evaluate.
+
+    Returns
+    -------
+    dict
+        implied_c_current : float
+            mean_implied_c at the first (reference) c_grid entry, or NaN.
+        savings_table : pd.DataFrame
+            Output of backtest_savings (one row per c in c_grid).
+    """
+    cat_daily = load_category_daily(rows, item_to_category, category)
+    savings = backtest_savings(cat_daily, c_grid)
+    implied_now = float(savings["mean_implied_c"].iloc[0]) if len(savings) else float("nan")
+    return {"implied_c_current": implied_now, "savings_table": savings}
