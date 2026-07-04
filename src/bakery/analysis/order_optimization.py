@@ -15,6 +15,7 @@ WINDOW_WEEKS = 13
 MIN_SAMPLES = 6
 Q_GRID_STEPS = 50
 CLOSING_DELTA = 0.28
+MIN_HISTORY_DAYS = 90
 
 
 def load_category_daily(rows, item_to_category, category):
@@ -217,3 +218,96 @@ def newsvendor_order(samples, c, closing_frac, delta=CLOSING_DELTA, q_grid_steps
     profits = [_expected_profit(q, samples, c, closing_frac, delta) for q in grid]
     q_l2 = float(grid[int(np.argmax(profits))])
     return OrderResult(float(q_l1), q_l2, c)
+
+
+def _cost(order, d, price, c):
+    """Compute newsvendor cost for single day.
+
+    Parameters
+    ----------
+    order : float
+        Ordered quantity.
+    d : float
+        Realized demand.
+    price : float
+        Unit price.
+    c : float
+        Cost rate.
+
+    Returns
+    -------
+    float
+        Cost = c·price·overage + (1−c)·price·underage.
+    """
+    return c * price * max(order - d, 0.0) + (1.0 - c) * price * max(d - order, 0.0)
+
+
+def _backtest_one_c(cat_daily, c, delta):
+    """Backtest a single cost rate c across all days.
+
+    Parameters
+    ----------
+    cat_daily : pd.DataFrame
+        Rows: date, demand, made, closing, dow, price.
+    c : float
+        Cost rate.
+    delta : float
+        Closing discount depth.
+
+    Returns
+    -------
+    dict
+        Keys: qstar, made, l1, impl (list of implied c), n (count).
+    """
+    rows = cat_daily.reset_index(drop=True)
+    acc = {"qstar": 0.0, "made": 0.0, "l1": 0.0, "impl": [], "n": 0}
+    for i in range(len(rows)):
+        r = rows.iloc[i]
+        hist = rows.iloc[:i]
+        if len(hist) < MIN_HISTORY_DAYS:
+            continue
+        samples = conditional_demand_samples(hist, r["date"], int(r["dow"]))
+        if len(samples) < MIN_SAMPLES:
+            continue
+        cf = float(r["closing"] / r["demand"]) if r["demand"] > 0 else 0.0
+        res = newsvendor_order(samples, c, cf, delta)
+        d, price = float(r["demand"]), float(r["price"])
+        acc["qstar"] += _cost(res.q_l2, d, price, c)
+        acc["made"] += _cost(float(r["made"]), d, price, c)
+        acc["l1"] += _cost(res.q_l1, d, price, c)
+        acc["impl"].append(implied_cost_rate(samples, float(r["made"])))
+        acc["n"] += 1
+    return acc
+
+
+def backtest_savings(cat_daily, c_grid, delta=CLOSING_DELTA):
+    """Rolling backtest across cost rates with placebo arm and savings.
+
+    Parameters
+    ----------
+    cat_daily : pd.DataFrame
+        Category-daily data.
+    c_grid : list of float
+        Cost rates to evaluate.
+    delta : float, optional
+        Closing discount depth (default CLOSING_DELTA).
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: c, mean_implied_c, cost_qstar, cost_made, cost_l1,
+                 savings_vs_made, n_days.
+    """
+    out = []
+    for c in c_grid:
+        a = _backtest_one_c(cat_daily, c, delta)
+        out.append({
+            "c": c,
+            "mean_implied_c": float(np.nanmean(a["impl"])) if a["impl"] else float("nan"),
+            "cost_qstar": a["qstar"],
+            "cost_made": a["made"],
+            "cost_l1": a["l1"],
+            "savings_vs_made": a["made"] - a["qstar"],
+            "n_days": a["n"]
+        })
+    return pd.DataFrame(out)
