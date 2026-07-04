@@ -27,7 +27,7 @@
 
 - [x] 명절 lead-up 피처 추가 — `days_to_seollal`/`days_to_chuseok`를 base `calendar_features.py`에 추가(v0~v3+stockout), lookup은 `data/calendar.py` 단일 출처로 v4와 공유. Calendric 논문 감사 결과 발견한 유일 구멍.
 - [ ] **classification 패러다임 병렬 체계** — 수요를 연속값 회귀가 아니라 구간(bin) 분류로 예측(Huber & Stuckenschmidt 2020: bakery daily에서 classification > regression). 별도 모델 트랙 — bin 정의 / 평가지표(WAPE↔분류지표 정합) / decision layer 연결 설계 필요. 브레인스토밍부터. **non-blocking, 별도 세션.**
-- [ ] 수능일 feature — 카페·베이커리 traffic 큰 날이나 공휴일 아님(`holidays.KR` 미포함). 검증된 연도별 수능 날짜 확보 후 `days_to_csat` 추가. (하드코딩 추측 금지)
+- [x] 수능일 feature — **검토 결과 미추가**. 광교 일별 수요(2021~25, 수능 5회) dow-통제 잔차비 ±7일 내 0.93~1.03, 당일 5년 [0.92,1.10,1.05,0.84,0.94]로 방향 불일치 → 감지 가능한 일관 효과 없음. 오피스+주거 카페라 수능 선물수요와 무관. 노이즈 회피 위해 피처화 안 함.
 - [ ] WPE(편향 방향) 지표 리포트 병기 — potential_demand 가치=하향편향 제거. FreshRetailNet 근거(복원 WAPE 소폭↓지만 과소추정 −6.7%→~0%). 우선순위 높음, 비용 낮음.
 - [ ] Decoupling Score(ρ_DS) 진단 — 복원 수요가 품절률과 상관 남았는지(=검열편향 잔량). 단 품목 아닌 **카테고리 합**에만 적용(품목 latent demand는 흡수·검열 이중편향으로 식별불가). leakage 테스트의 통계짝.
 - [ ] (중기) FreshRetailNet 공개 데이터로 우리 방법 재현/벤치 + Chronos-2 LoRA 레퍼런스(WAPE 23.99%) — FM 트리거(다매장·cold-start) 시.
