@@ -12,6 +12,10 @@ Design (after PoC review):
 - Event-day booleans (`is_xmas`, `is_valentine`, ...) collapsed into the
   `days_to_*` features (event day = 0). `is_white_day` kept as boolean
   since we don't model its lead-up.
+- `days_to_seollal` / `days_to_chuseok` added (2026-07): the two biggest
+  Korean bakery demand events (validated +11.0% / +11.4%). Lunar → dates
+  come from the shared `LUNAR_EVENT_DATES` lookup so v0~v3 and v4 stay
+  in sync. Pure date functions → leakage-safe like the fixed events.
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from ..data.calendar import CALENDAR_DAILY_COLUMNS
+from ..data.calendar import CALENDAR_DAILY_COLUMNS, LUNAR_EVENT_DATES
 
 # Booleans we still merge straight from calendar_df.
 _PASSTHROUGH_COLUMNS: list[str] = [
@@ -39,7 +43,11 @@ _EVENT_TO_MONTH_DAY: dict[str, tuple[int, int]] = {
 }
 _EVENT_CLIP = 14
 
-CALENDAR_FEATURE_COLUMNS: list[str] = _PASSTHROUGH_COLUMNS + list(_EVENT_TO_MONTH_DAY.keys())
+CALENDAR_FEATURE_COLUMNS: list[str] = (
+    _PASSTHROUGH_COLUMNS
+    + list(_EVENT_TO_MONTH_DAY.keys())
+    + list(LUNAR_EVENT_DATES.keys())
+)
 
 
 def add_calendar_features(
@@ -57,6 +65,8 @@ def add_calendar_features(
     dates = pd.to_datetime(out[date_col])
     for feat_name, (month, day) in _EVENT_TO_MONTH_DAY.items():
         out[feat_name] = _days_to_event(dates, month=month, day=day).astype("int8")
+    for feat_name, year_to_date in LUNAR_EVENT_DATES.items():
+        out[feat_name] = _days_to_lunar_event(dates, year_to_date).astype("int8")
     return out
 
 
@@ -78,3 +88,18 @@ def _days_to_event(dates: pd.Series, *, month: int, day: int) -> pd.Series:
         better = np.abs(delta) < np.abs(out)
         out = np.where(better, delta, out)
     return pd.Series(np.clip(out, -_EVENT_CLIP, _EVENT_CLIP), index=dates.index)
+
+
+def _days_to_lunar_event(
+    dates: pd.Series, year_to_date: dict[int, str], *, clip: int = _EVENT_CLIP
+) -> pd.Series:
+    """Signed days to the nearest lunar-holiday date, clipped to ±clip.
+
+    Lunar events (설날/추석) move on the solar calendar, so we look each date
+    up against the precomputed solar dates rather than a fixed (month, day)."""
+    out = np.full(len(dates), clip + 1, dtype="int64")
+    for event_str in year_to_date.values():
+        delta = (pd.Timestamp(event_str) - dates).dt.days.to_numpy()
+        better = np.abs(delta) < np.abs(out)
+        out = np.where(better, delta, out)
+    return pd.Series(np.clip(out, -clip, clip), index=dates.index)
