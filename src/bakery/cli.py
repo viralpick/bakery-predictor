@@ -1492,16 +1492,38 @@ def _load_phaseb_inputs() -> tuple[pd.DataFrame, pd.Series]:
 
 
 def _phaseb_exclusion_stats(rows: pd.DataFrame, item_to_category: pd.Series, category: str) -> dict:
-    """Raw vs identity-kept category-day counts, for honest exclusion-rate reporting."""
-    from .analysis.order_optimization import IDENTITY_TOL
+    """Raw vs identity-kept category-day counts, for honest exclusion-rate reporting.
+
+    Reports both the whole-day metric (a day only counts as excluded if it
+    lost ALL its item-rows -- rare, since most days mix clean and dirty
+    items) and the row-level metrics that actually reveal the coverage gap:
+    what fraction of item-rows are dropped, and what fraction of days lose
+    at least one item-row (and therefore have understated demand/made
+    aggregates even though the day itself still appears in kept_days).
+    """
+    from .analysis.order_optimization import _identity_excluded_mask
 
     df = rows.copy()
     df["category_id"] = df["item_id"].astype(str).map(item_to_category)
     df = df[df["category_id"] == category]
     raw_days = int(df["date"].nunique())
-    kept_days = int(df[df["identity_diff"].abs() <= IDENTITY_TOL]["date"].nunique())
+    raw_rows = len(df)
+
+    excluded = _identity_excluded_mask(df)
+    kept_days = int(df.loc[~excluded, "date"].nunique())
     excl_rate = 1.0 - (kept_days / raw_days) if raw_days else float("nan")
-    return {"raw_days": raw_days, "kept_days": kept_days, "exclusion_rate": excl_rate}
+
+    row_exclusion_rate = (excluded.sum() / raw_rows) if raw_rows else float("nan")
+    days_with_excluded_row = int(df.loc[excluded, "date"].nunique())
+    days_with_partial_exclusion_rate = (days_with_excluded_row / raw_days) if raw_days else float("nan")
+
+    return {
+        "raw_days": raw_days,
+        "kept_days": kept_days,
+        "exclusion_rate": excl_rate,
+        "row_exclusion_rate": float(row_exclusion_rate),
+        "days_with_partial_exclusion_rate": float(days_with_partial_exclusion_rate),
+    }
 
 
 def _phaseb_for_category(
@@ -1529,7 +1551,9 @@ def _print_phaseb_result(category: str, implied_row: dict, savings: pd.DataFrame
         f"[bold]{category}[/] implied_c_current={implied_row['mean_implied_c_current']:.3f} "
         f"service_level={implied_row['service_level']:.3f} "
         f"(raw_days={implied_row['raw_days']} kept_days={implied_row['kept_days']} "
-        f"exclusion_rate={implied_row['exclusion_rate']:.1%})"
+        f"exclusion_rate={implied_row['exclusion_rate']:.1%} "
+        f"row_exclusion_rate={implied_row['row_exclusion_rate']:.1%} "
+        f"days_with_partial_exclusion_rate={implied_row['days_with_partial_exclusion_rate']:.1%})"
     )
     for _, r in savings.iterrows():
         console.print(

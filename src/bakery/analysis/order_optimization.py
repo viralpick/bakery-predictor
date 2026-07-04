@@ -18,6 +18,29 @@ CLOSING_DELTA = 0.28
 MIN_HISTORY_DAYS = 90
 
 
+def _identity_excluded_mask(df):
+    """Boolean mask of rows failing the identity_diff tolerance check.
+
+    Shared by ``load_category_daily`` (row filtering) and the CLI's exclusion
+    reporting, so IDENTITY_TOL handling can't drift between the two.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must contain an ``identity_diff`` column to be meaningfully checked.
+
+    Returns
+    -------
+    pd.Series of bool
+        True where the row is excluded (|identity_diff| > IDENTITY_TOL).
+        If ``identity_diff`` is absent, no row is excluded (matches
+        load_category_daily's behavior of skipping the filter entirely).
+    """
+    if "identity_diff" not in df.columns:
+        return pd.Series(False, index=df.index)
+    return df["identity_diff"].abs() > IDENTITY_TOL
+
+
 def load_category_daily(rows, item_to_category, category):
     """Aggregate items to category-day level with identity & out constraints.
 
@@ -42,8 +65,7 @@ def load_category_daily(rows, item_to_category, category):
     df = df[df["category_id"] == category].copy()
     df["out"] = df["out"].clip(lower=0.0)
 
-    if "identity_diff" in df.columns:
-        df = df[df["identity_diff"].abs() <= IDENTITY_TOL]
+    df = df[~_identity_excluded_mask(df)]
 
     g = df.groupby("date", observed=True).agg(
         demand=("sold_total", "sum"),

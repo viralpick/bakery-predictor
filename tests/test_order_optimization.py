@@ -171,4 +171,6 @@ def test_run_phaseb_smoke():
     itc = pd.Series({"A": "bread", "B": "bread"})
     out = run_phaseb(cd_rows, itc, "bread", c_grid=[0.35])
     assert set(out) == {"implied_c_current", "savings_table"}
-    assert 0.0 <= out["implied_c_current"] <= 1.0 or np.isnan(out["implied_c_current"])
+    # made==demand every day in the fixture -> P(demand<=made)=1.0 deterministically
+    # -> implied_c_current must be exactly 0.0 (regression guard on the primary deliverable).
+    assert out["implied_c_current"] == pytest.approx(0.0, abs=1e-9)
