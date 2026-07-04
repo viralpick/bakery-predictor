@@ -11,7 +11,9 @@ from bakery.analysis.order_optimization import (
     backtest_savings,
     run_phaseb,
     _backtest_one_c,
+    _trailing_closing_frac,
     CLOSING_DELTA,
+    MIN_HISTORY_DAYS,
 )
 
 
@@ -114,26 +116,30 @@ def test_backtest_placebo_and_savings_sign():
 def test_backtest_is_leakage_safe():
     """Corrupted future rows must not change decisions on days before the corruption.
 
-    The corrupted rows (index >= 150, demand=9999) are NOT truncated away before
-    calling _backtest_one_c -- they genuinely pass through the function. Day i's
-    decision depends only on hist = rows.iloc[:i] (strictly-past data). For
-    i < 150, that slice never touches a corrupted row, so the resulting "impl"
-    entries for the early evaluated window (days 90..149, MIN_HISTORY_DAYS=90)
-    must be bit-identical between the clean and corrupted runs -- if the
-    implementation ever used an inclusive slice (rows.iloc[:i+1]) or leaked the
-    full array into sample construction, corruption would reach these early
-    days and the equality below would fail.
+    The corrupted rows (index >= 150, demand=9999, closing blown up too) are
+    NOT truncated away before calling _backtest_one_c -- they genuinely pass
+    through the function. Day i's decision depends only on hist =
+    rows.iloc[:i] (strictly-past data). For i < 150, that slice never touches
+    a corrupted row, so the resulting "impl" AND "q_l2" entries for the early
+    evaluated window (days 90..149, MIN_HISTORY_DAYS=90) must be bit-identical
+    between the clean and corrupted runs -- if the implementation ever used an
+    inclusive slice (rows.iloc[:i+1]) or leaked the full array into sample or
+    closing_frac construction, corruption would reach these early days and the
+    equality below would fail. This covers both the impl (mean_implied_c) path
+    and the qstar/cost path (q_l2, which cost_qstar is a deterministic
+    function of via _cost).
     """
     cd = _cat_daily()
     cd2 = cd.copy()
     cd2.loc[cd2.index[150:], "demand"] = 9999  # corrupt all "future" rows from day 150 on
+    cd2.loc[cd2.index[150:], "closing"] = 9999
     cd_corrupt = pd.concat([cd.iloc[:150], cd2.iloc[150:]])
 
     acc_clean = _backtest_one_c(cd, c=0.35, delta=CLOSING_DELTA)
     acc_corrupt = _backtest_one_c(cd_corrupt, c=0.35, delta=CLOSING_DELTA)
 
-    # Days 90..149 -> 60 evaluated entries at the head of "impl". These only
-    # ever see rows.iloc[:i] with i<150, i.e. exclusively clean data.
+    # Days 90..149 -> 60 evaluated entries at the head of "impl"/"q_l2". These
+    # only ever see rows.iloc[:i] with i<150, i.e. exclusively clean data.
     n_early = 60
     early_clean = np.asarray(acc_clean["impl"][:n_early], dtype=float)
     early_corrupt = np.asarray(acc_corrupt["impl"][:n_early], dtype=float)
@@ -142,12 +148,66 @@ def test_backtest_is_leakage_safe():
     assert finite_mask.sum() == n_early  # sanity: window isn't degenerate/NaN
     assert np.array_equal(early_clean[finite_mask], early_corrupt[finite_mask])
 
+    q_l2_clean = np.asarray(acc_clean["q_l2"][:n_early], dtype=float)
+    q_l2_corrupt = np.asarray(acc_corrupt["q_l2"][:n_early], dtype=float)
+    assert np.array_equal(q_l2_clean, q_l2_corrupt)
+
     # Sanity check: corruption must have actually reached the function and
     # changed later days. Otherwise the early-window equality above would be
     # vacuous (e.g. if corrupted rows were silently dropped instead of used).
     late_clean = np.asarray(acc_clean["impl"][-10:], dtype=float)
     late_corrupt = np.asarray(acc_corrupt["impl"][-10:], dtype=float)
     assert not np.array_equal(late_clean, late_corrupt)
+    late_q_l2_clean = np.asarray(acc_clean["q_l2"][-10:], dtype=float)
+    late_q_l2_corrupt = np.asarray(acc_corrupt["q_l2"][-10:], dtype=float)
+    assert not np.array_equal(late_q_l2_clean, late_q_l2_corrupt)
+
+
+def test_qstar_closing_frac_is_trailing_not_same_day():
+    """Fix-1 regression: closing_frac for day i's order must come from strictly
+    -before history, never day i's own realized closing (order-time info only).
+
+    Fixture: closing==0 every day (a single-class world, so the trailing
+    closing_frac is always exactly 0 for any window). We corrupt ONLY day
+    index 150's own "closing" value to a large nonzero fraction of that day's
+    demand -- no other row, past or future, is touched.
+
+    - Fixed behavior (_trailing_closing_frac): day 150's decision is built
+      from hist=rows.iloc[:150], which never includes day 150 itself, so
+      q_l2 at day 150 must be bit-identical between clean and corrupted runs.
+    - Old same-day cf = r["closing"]/r["demand"] reads the corrupted value
+      directly for day 150's own decision, so this assertion FAILS under
+      that implementation -- confirmed manually: with the old formula,
+      q_l2(clean)=61.40 vs q_l2(corrupted)=63.28 at this boundary (the
+      corrupted closing pushes cf from 0 to 0.5, switching the newsvendor
+      from the single-class to the two-class salvage-band regime for that
+      one day's order).
+    """
+    rng = np.random.default_rng(0)
+    n = 200
+    dates = pd.date_range("2024-01-01", periods=n, freq="D")
+    dow = dates.dayofweek
+    base = np.where(dow >= 5, 120.0, 60.0)
+    demand = np.maximum(base + rng.normal(0, 8.0, size=n), 1.0)
+    cd = pd.DataFrame({
+        "date": dates, "demand": demand, "made": demand.copy(),
+        "out": np.zeros(n), "normal": demand.copy(), "closing": np.zeros(n),
+        "price": np.full(n, 1000.0), "dow": dow, "month": dates.month,
+    })
+    corrupt_day = 150
+    cd_corrupt = cd.copy()
+    cd_corrupt.loc[corrupt_day, "closing"] = cd_corrupt.loc[corrupt_day, "demand"] * 0.5
+
+    acc_clean = _backtest_one_c(cd, c=0.35, delta=CLOSING_DELTA)
+    acc_corrupt = _backtest_one_c(cd_corrupt, c=0.35, delta=CLOSING_DELTA)
+
+    boundary = corrupt_day - MIN_HISTORY_DAYS
+    assert acc_clean["q_l2"][boundary] == pytest.approx(acc_corrupt["q_l2"][boundary])
+
+
+def test_trailing_closing_frac_empty_history_returns_zero():
+    hist = pd.DataFrame({"date": [], "demand": [], "closing": [], "dow": []})
+    assert _trailing_closing_frac(hist, "2024-01-01", 0) == 0.0
 
 
 def _rows_for_smoke(n=200):

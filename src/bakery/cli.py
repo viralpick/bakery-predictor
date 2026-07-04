@@ -1558,7 +1558,8 @@ def _print_phaseb_result(category: str, implied_row: dict, savings: pd.DataFrame
     for _, r in savings.iterrows():
         console.print(
             f"  c={r['c']:.2f} mean_implied_c={r['mean_implied_c']:.3f} "
-            f"savings_vs_made={r['savings_vs_made']:+.1f} n_days={int(r['n_days'])}"
+            f"savings_vs_made={r['savings_vs_made']:+.1f} savings_l1={r['savings_l1']:+.1f} "
+            f"n_days={int(r['n_days'])}"
         )
 
 

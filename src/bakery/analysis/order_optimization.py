@@ -242,6 +242,39 @@ def newsvendor_order(samples, c, closing_frac, delta=CLOSING_DELTA, q_grid_steps
     return OrderResult(float(q_l1), q_l2, c)
 
 
+def _trailing_closing_frac(hist, target_date, dow, window_weeks=WINDOW_WEEKS):
+    """Mean closing/demand ratio over same-DOW history strictly before target_date.
+
+    Mirrors ``conditional_demand_samples``' windowing so the closing_frac fed
+    into ``newsvendor_order`` never uses the target day's own (same-day)
+    closing/demand — only past realized ratios. This keeps the qstar/
+    cost_qstar arm leakage-safe (order-time information only).
+
+    Parameters
+    ----------
+    hist : pd.DataFrame
+        Historical data with columns: date, demand, closing, dow. Sorted ascending.
+    target_date : pd.Timestamp or str
+        Prediction date (exclusive).
+    dow : int
+        Day-of-week (0=Monday, 6=Sunday).
+    window_weeks : int
+        Number of past weeks to include.
+
+    Returns
+    -------
+    float
+        Mean closing/demand ratio over the trailing window, or 0.0 if no
+        valid (demand > 0) history is available.
+    """
+    past = hist[(pd.to_datetime(hist["date"]) < pd.Timestamp(target_date))
+                & (hist["dow"] == dow)]
+    past = past[past["demand"] > 0].iloc[-window_weeks:]
+    if len(past) == 0:
+        return 0.0
+    return float((past["closing"] / past["demand"]).mean())
+
+
 def _cost(order, d, price, c):
     """Compute newsvendor cost for single day.
 
@@ -279,25 +312,28 @@ def _backtest_one_c(cat_daily, c, delta):
     Returns
     -------
     dict
-        Keys: qstar, made, l1, impl (list of implied c), n (count).
+        Keys: qstar, made, l1, impl (list of implied c), q_l2 (list of
+        Level-2 order quantities, order-time-safe), n (count).
     """
     rows = cat_daily.reset_index(drop=True)
-    acc = {"qstar": 0.0, "made": 0.0, "l1": 0.0, "impl": [], "n": 0}
+    acc = {"qstar": 0.0, "made": 0.0, "l1": 0.0, "impl": [], "q_l2": [], "n": 0}
     for i in range(len(rows)):
         r = rows.iloc[i]
         hist = rows.iloc[:i]
         if len(hist) < MIN_HISTORY_DAYS:
             continue
-        samples = conditional_demand_samples(hist, r["date"], int(r["dow"]))
+        dow = int(r["dow"])
+        samples = conditional_demand_samples(hist, r["date"], dow)
         if len(samples) < MIN_SAMPLES:
             continue
-        cf = float(r["closing"] / r["demand"]) if r["demand"] > 0 else 0.0
+        cf = _trailing_closing_frac(hist, r["date"], dow)
         res = newsvendor_order(samples, c, cf, delta)
         d, price = float(r["demand"]), float(r["price"])
         acc["qstar"] += _cost(res.q_l2, d, price, c)
         acc["made"] += _cost(float(r["made"]), d, price, c)
         acc["l1"] += _cost(res.q_l1, d, price, c)
         acc["impl"].append(implied_cost_rate(samples, float(r["made"])))
+        acc["q_l2"].append(res.q_l2)
         acc["n"] += 1
     return acc
 
@@ -318,7 +354,7 @@ def backtest_savings(cat_daily, c_grid, delta=CLOSING_DELTA):
     -------
     pd.DataFrame
         Columns: c, mean_implied_c, cost_qstar, cost_made, cost_l1,
-                 savings_vs_made, n_days.
+                 savings_vs_made, savings_l1, n_days.
     """
     out = []
     for c in c_grid:
@@ -330,6 +366,7 @@ def backtest_savings(cat_daily, c_grid, delta=CLOSING_DELTA):
             "cost_made": a["made"],
             "cost_l1": a["l1"],
             "savings_vs_made": a["made"] - a["qstar"],
+            "savings_l1": a["made"] - a["l1"],
             "n_days": a["n"]
         })
     return pd.DataFrame(out)

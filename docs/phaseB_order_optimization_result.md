@@ -22,25 +22,28 @@
 
 ## 보조 — 재최적화 절감액 (5년 누적, c별)
 
-`savings = cost(현행 made) − cost(newsvendor Q*(c))`, 동일 실현수요·newsvendor-정합 비용:
+`savings_vs_made = cost(현행 made) − cost(newsvendor Q*_L2(c))`(two-class 최적, 메인 지표),
+`savings_l1 = cost(현행 made) − cost(newsvendor Q*_L1(c))`(single-class newsvendor — 절감 스코어의 비용식과 클래스가 정확히 같은, self-consistent 비교치. "Level2로 최적화해놓고 single-class로 스코어링한 것 아니냐"는 반론에 대한 직접 답):
 
-| c | bread 절감(원) | pastry 절감(원) |
-|---|---|---|
-| 0.25 | **−10.0M** | **−26.8M** |
-| 0.35 | −5.7M | −21.1M |
-| 0.45 | **+1.4M** | −11.6M |
-| 0.55 | +11.5M | +3.1M |
+| c | bread savings_vs_made | bread savings_l1 | pastry savings_vs_made | pastry savings_l1 |
+|---|---|---|---|---|
+| 0.25 | **−10.3M** | −8.8M | **−27.4M** | −26.0M |
+| 0.35 | −5.8M | −4.1M | −21.8M | −20.8M |
+| 0.45 | **+1.4M** | +3.3M | −12.3M | −10.6M |
+| 0.55 | +11.4M | +13.1M | +2.1M | +3.4M |
 
-**절감이 음수 = 매장이 우리 모델을 이긴다.** 절감이 양수로 도는 c(bread≈0.45, pastry≈0.55)는 각 카테고리의 implied c보다 훨씬 높다 — 즉 실제 원가율이 그만큼 높아야만(폐기가 그만큼 비싸야만) 생산을 줄이는 게 이득. 플러그인 placebo arm(Q=made)로 유령 절감(품목배분 완벽 가정분)은 분리했다.
+**절감이 음수 = 매장이 우리 모델을 이긴다.** 절감이 양수로 도는 c(bread: 0.40→0.45 사이, pastry: 0.50→0.55 사이)는 각 카테고리의 implied c보다 훨씬 높다 — 즉 실제 원가율이 그만큼 높아야만(폐기가 그만큼 비싸야만) 생산을 줄이는 게 이득. 플러그인 placebo arm(Q=made)로 유령 절감(품목배분 완벽 가정분)은 분리했다. savings_l1도 부호와 crossover 구간이 savings_vs_made와 동일 — Level2/Level1 지표 불일치가 결론을 바꾸지 않는다.
+
+> 최종리뷰 반영: closing_frac을 과거엔 목표일 당일 실현 closing/demand로 계산해 order-time leakage가 있었다(절대규칙 #1 위반). 요일-조건부 과거(strictly-before) closing/demand 비율의 trailing mean으로 교체(`_trailing_closing_frac`) — 위 표는 수정 후 수치다. implied c(0.204/0.283)는 이 경로와 무관해 불변. savings 값은 대부분 c·카테고리에서 수십만 원(~1~4%) 이동했고 최대 이동폭은 pastry c=0.55(+3.07M→+2.08M, 약 −32%)이지만 부호와 crossover 구간(bread 0.40–0.45 / pastry 0.50–0.55)은 모두 그대로다.
 
 **왜 매장이 이기나**: 매장은 요일·트렌드·행사·현장 정보를 이미 반영해 발주한다. 우리의 순진한 요일 조건부 rolling 분위수는 그 조건화 능력에 못 미친다(Fable 검토 예측대로). 이건 모델 실패가 아니라 **"매장 발주가 이미 좋다"는 정직한 발견**이다.
 
 ## 정직한 한계
 
-- **부분일 제외**: identity_diff 위반 품목-행 제외로 bread **15.7%**·pastry **35.9%** 일자가 품목 하나 이상 빠져 그날 카테고리 총량이 과소집계될 수 있음(행 제외율 1.6%/2.7%). implied c에 소폭 영향 가능 — identity_diff 근본원인(어느 품목/기간) 미규명, 후속 필요.
+- **부분일 제외**: identity_diff 위반 품목-행 제외로 bread **15.7%**·pastry **35.9%** 일자가 품목 하나 이상 빠져 그날 카테고리 총량이 과소집계될 수 있음(행 제외율 1.6%/2.7%). implied c에 소폭 영향 가능 — identity_diff 근본원인(어느 품목/기간) 미규명, 후속 필요. 과소집계의 상한은 (일자 비율이 아니라) **행 제외율 1.6%/2.7%**다 — demand와 made가 같은 행에서 함께 빠지므로 두 집계가 동일 폭으로 줄어 비율(implied c)엔 1차 상쇄되고, 35.9%는 "영향받은 날의 비율"일 뿐 과소집계 규모 자체가 아니므로 과대해석하면 안 된다.
 - **censored 수요**: 카테고리 out==0(수요≥made) 일자(~1.5~1.9%, 카테고리 단위라 드묾) 보수 처리.
 - **d 내생성**: 반사실은 made 근방 한계 재최적화로 한정(대폭 감산 시 수요분포 자체가 이동).
-- **Level2 vs 스코어링**: Q\* Level2는 two-class 이익 최대화, 절감 스코어는 single-class newsvendor 비용 → 지표 불일치 소폭. cost_l1(single-class 최적)도 함께 보고, 결론(매장이 저-중 c서 이김) 불변.
+- **Level2 vs 스코어링**: Q\* Level2는 two-class 이익 최대화, 절감 스코어는 single-class newsvendor 비용 → 지표 불일치 소폭. `savings_l1`(single-class 최적 대비, self-consistent 비교치)도 함께 보고, 결론(매장이 저-중 c서 이김) 불변.
 - **c 미지**: implied c·절감 모두 c 곡선. 고객사 c 제공 시 점으로 확정.
 - **α_A=NaN**: Phase A structural α 부재라 α_A ∩ α\*(c) 교차검증 없음.
 - 광교 한정(카테고리 총량=참수요는 W0 흡수 가정, 현행 정책·공급 하).
