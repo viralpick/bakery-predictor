@@ -1586,5 +1586,51 @@ def cmd_phaseb_order(out_dir: Path = REPORTS_DIR) -> None:
     console.print(f"[green]wrote[/] {out_dir}/{PHASEB_IMPLIED_C_CSV}, {PHASEB_SAVINGS_CSV}")
 
 
+REGIME_PLACEBO_DATES = ["2022-07-17", "2023-01-17", "2023-07-17", "2024-01-17", "2024-07-17"]
+REGIME_CSV = "regime_shift_estimates.csv"
+
+
+def _regime_row(category: str, result: dict) -> dict:
+    """Flatten a run_discount_regime result into one CSV row + print it."""
+    s, i = result["closing_share"], result["closing_intensity"]
+    placebo = [p.beta for p in result["placebo"] if not p.ill_posed]
+    max_placebo = max((abs(b) for b in placebo), default=float("nan"))
+    console.print(
+        f"[bold]{category}[/] verdict={result['verdict']} (n={result['n']})\n"
+        f"  closing_share post_cut β={s.beta:+.4f} 95%CI[{s.ci_low:+.4f},{s.ci_high:+.4f}]\n"
+        f"  closing/made  post_cut β={i.beta:+.4f} 95%CI[{i.ci_low:+.4f},{i.ci_high:+.4f}]\n"
+        f"  placebo max|β|={max_placebo:.4f}"
+    )
+    return {
+        "category": category, "cut_date": result["cut_date"], "n": result["n"],
+        "verdict": result["verdict"],
+        "share_beta": s.beta, "share_ci_low": s.ci_low, "share_ci_high": s.ci_high,
+        "intensity_beta": i.beta, "intensity_ci_low": i.ci_low, "intensity_ci_high": i.ci_high,
+        "placebo_max_abs_beta": max_placebo,
+    }
+
+
+@app.command("regime-alpha")
+def cmd_regime_alpha(out_dir: Path = REPORTS_DIR) -> None:
+    """다중시각 재검증 ①: 2025-01-17 마감할인 depth cut(30%→20%) 자연실험.
+
+    대조군이 없어(전 매장 동시전환) 총수요는 식별 불가. 내부통제되는 구성비
+    closing_share = closing/(normal+closing)가 depth cut에 반응하는지를 item-FE
+    회귀 + placebo break-date 분포로 검정한다. null(depth_invariant)이면 마감판매가
+    supply-driven이며 가격민감 떨이수요가 아님 → 높은 α 방향(단 α 점식별은 아님).
+    """
+    from .analysis.discount_regime import run_discount_regime
+
+    rows, item_to_category = _load_phaseb_inputs()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    csv_rows = []
+    for category in CLOSING_DEMAND_CATEGORIES:
+        result = run_discount_regime(rows, item_to_category, category,
+                                     placebo_cut_dates=REGIME_PLACEBO_DATES)
+        csv_rows.append(_regime_row(category, result))
+    pd.DataFrame(csv_rows).to_csv(out_dir / REGIME_CSV, index=False)
+    console.print(f"[green]wrote[/] {out_dir}/{REGIME_CSV}")
+
+
 if __name__ == "__main__":
     app()
