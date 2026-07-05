@@ -1,7 +1,8 @@
 import numpy as np
+import pandas as pd
 import pytest
 from bakery.features.potential_demand import bakery_hour_profile
-from bakery.evaluation.prospective import simulate_soldout
+from bakery.evaluation.prospective import simulate_soldout, build_arrival_profile
 
 OPEN, CLOSE = 8, 22
 
@@ -38,3 +39,31 @@ def test_monotone_higher_order_later_soldout():
     t_low, _ = simulate_soldout(30.0, 100.0, prof, open_hour=OPEN, close_hour=CLOSE)
     t_high, _ = simulate_soldout(70.0, 100.0, prof, open_hour=OPEN, close_hour=CLOSE)
     assert t_high > t_low
+
+
+def test_build_arrival_profile_sums_by_hour():
+    receipts = pd.DataFrame({
+        "item_id": ["a", "a", "a", "b"],
+        "hour":    [9,   9,   14,  10],
+        "qty":     [2,   3,   5,   1],
+    })
+    prof = build_arrival_profile(receipts, group_cols=["item_id"])
+    assert prof[("a",)][9] == 5.0
+    assert prof[("a",)][14] == 5.0
+    assert prof[("a",)].sum() == 10.0
+    assert prof[("b",)][10] == 1.0
+    assert prof[("a",)].shape == (24,)
+
+
+def test_build_arrival_profile_excludes_keys():
+    receipts = pd.DataFrame({
+        "item_id": ["a", "a"],
+        "date":    ["2025-01-01", "2025-01-02"],
+        "hour":    [9, 9],
+        "qty":     [2, 7],
+    })
+    prof = build_arrival_profile(
+        receipts, group_cols=["item_id"], exclude_keys={("a", "2025-01-02")},
+        exclude_cols=["item_id", "date"],
+    )
+    assert prof[("a",)][9] == 2.0   # 01-02 제외

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 
 
 def simulate_soldout(
@@ -32,3 +33,27 @@ def simulate_soldout(
             return (h + frac, True)
         pre += w_h
     return (float(close_hour), True)           # 수치오차 fallback
+
+
+def build_arrival_profile(
+    receipts: pd.DataFrame,
+    *,
+    group_cols: list[str],
+    exclude_keys: set | None = None,
+    exclude_cols: list[str] | None = None,
+) -> dict[tuple, np.ndarray]:
+    """그룹별 24-length 시간당 수량 벡터. bakery_hour_profile(measured=)용 raw."""
+    df = receipts
+    if exclude_keys:
+        key_cols = exclude_cols or group_cols
+        keys = list(zip(*[df[c].astype(str) for c in key_cols]))
+        df = df[[k not in exclude_keys for k in keys]]
+    out: dict[tuple, np.ndarray] = {}
+    for gkey, g in df.groupby(group_cols):
+        gkey = gkey if isinstance(gkey, tuple) else (gkey,)
+        vec = np.zeros(24, dtype=float)
+        by_hour = g.groupby("hour")["qty"].sum()
+        for h, q in by_hour.items():
+            vec[int(h)] = float(q)
+        out[gkey] = vec
+    return out
