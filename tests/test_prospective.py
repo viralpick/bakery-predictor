@@ -67,3 +67,25 @@ def test_build_arrival_profile_excludes_keys():
         exclude_cols=["item_id", "date"],
     )
     assert prof[("a",)][9] == 2.0   # 01-02 제외
+
+
+def test_reconstruct_baseline_order_identity():
+    from bakery.evaluation.prospective import reconstruct_baseline_order
+    df = pd.DataFrame({
+        "normal_units":  [10.0, 5.0],
+        "closing_units": [3.0,  0.0],
+        "waste_units":   [2.0,  1.0],
+    })
+    got = reconstruct_baseline_order(df)
+    assert list(got) == [15.0, 6.0]
+
+
+def test_reconstruct_baseline_order_nan_as_zero():
+    from bakery.evaluation.prospective import reconstruct_baseline_order
+    df = pd.DataFrame({
+        "normal_units":  [10.0, np.nan],
+        "closing_units": [np.nan, 4.0],
+        "waste_units":   [2.0, 1.0],
+    })
+    got = reconstruct_baseline_order(df)
+    assert list(got) == [12.0, 5.0]

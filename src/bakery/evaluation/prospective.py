@@ -57,3 +57,15 @@ def build_arrival_profile(
             vec[int(h)] = float(q)
         out[gkey] = vec
     return out
+
+
+def reconstruct_baseline_order(
+    df: pd.DataFrame,
+    *,
+    normal_col: str = "normal_units",
+    closing_col: str = "closing_units",
+    waste_col: str = "waste_units",
+) -> pd.Series:
+    """생산 = 정상판매 + 마감판매 + 폐기. 회고 검증의 현행 발주 proxy."""
+    parts = [df[c].fillna(0.0).astype(float) for c in (normal_col, closing_col, waste_col)]
+    return parts[0] + parts[1] + parts[2]
