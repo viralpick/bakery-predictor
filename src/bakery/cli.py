@@ -1914,7 +1914,6 @@ def _decoupling_by_category(rows: pd.DataFrame) -> dict[str, float]:
     return scores
 
 
-
 @app.command("prospective-eval")
 def cmd_prospective_eval(
     source: str = typer.Option("synthetic", help="synthetic | real"),
