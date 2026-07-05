@@ -1777,6 +1777,9 @@ def _assemble_real_rows(daily: pd.DataFrame, inventory: pd.DataFrame) -> pd.Data
 def _load_real_daily(store_id: str) -> pd.DataFrame:
     """bonavi_daily.parquet을 store_id + TARGET_CATEGORIES로 필터."""
     daily = pd.read_parquet(REAL_DAILY_PARQUET_PATH)
+    n_stores = daily["store_id"].nunique()
+    if n_stores != 1:
+        raise ValueError(f"real path assumes single-store data; found {n_stores} stores. Multi-store needs store-qualified receipts/merge wiring.")
     daily["item_id"] = daily["item_id"].astype(str)
     daily = daily[daily["store_id"] == store_id]
     daily = daily[daily["category_id"].isin(TARGET_CATEGORIES)]
