@@ -1,0 +1,34 @@
+"""전향적 KPI harness — 우리 발주 추천 vs 현행 발주를 동일 시뮬로 비교.
+
+반사실: 두 발주량을 같은 복원수요 + 시간대 도착곡선에 넣어 폐기/매진시각/
+매진률을 계산한다. 1차 지표는 Δ(우리−아티제)로, 시뮬 편향이 양쪽에 상쇄된다.
+매진시각은 potential_demand의 도착곡선을 재사용해 '누적수요가 발주량에
+도달하는 시각'을 역산한다. 폐기/lost 비용은 business_metrics 재사용.
+"""
+from __future__ import annotations
+
+import numpy as np
+
+
+def simulate_soldout(
+    order_qty: float,
+    daily_demand: float,
+    profile: np.ndarray,
+    *,
+    open_hour: int,
+    close_hour: int,
+) -> tuple[float | None, bool]:
+    """발주량 하에서 매진시각(hour_float)과 매진여부. 미매진이면 (None, False)."""
+    if daily_demand <= 0 or order_qty >= daily_demand:
+        return (None, False)
+    if order_qty <= 0:
+        return (float(open_hour), True)
+    target = order_qty / daily_demand          # 도달해야 할 누적 비중
+    pre = 0.0
+    for h in range(open_hour, close_hour):
+        w_h = float(profile[h])
+        if pre + w_h >= target:
+            frac = (target - pre) / w_h if w_h > 0 else 0.0
+            return (h + frac, True)
+        pre += w_h
+    return (float(close_hour), True)           # 수치오차 fallback
