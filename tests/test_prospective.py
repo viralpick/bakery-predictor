@@ -89,3 +89,31 @@ def test_reconstruct_baseline_order_nan_as_zero():
     })
     got = reconstruct_baseline_order(df)
     assert list(got) == [12.0, 5.0]
+
+
+from bakery.features.potential_demand import StoreHours, bakery_hour_profile
+from bakery.evaluation.business_metrics import CostParams
+from bakery.evaluation.prospective import simulate_item_day_kpis
+
+
+def test_item_day_kpis_waste_and_soldout():
+    rows = pd.DataFrame({
+        "item_id": ["a", "a"],
+        "date":    ["2025-01-01", "2025-01-02"],
+        "potential_demand": [100.0, 100.0],
+        "order_qty": [120.0, 50.0],   # 1일차 과발주(미매진, 폐기), 2일차 부족(매진)
+    })
+    prof = {("a",): bakery_hour_profile(8, 22, alpha=0.0)}
+    out = simulate_item_day_kpis(
+        rows, prof, order_col="order_qty",
+        store_hours=StoreHours("gwangyo", 8, 22),
+        group_cols=["item_id"],
+        params=CostParams(), unit_prices={"a": 1000.0},
+    )
+    r0, r1 = out.iloc[0], out.iloc[1]
+    assert r0["is_stockout"] == False
+    assert r0["waste_units"] == 20.0            # 120-100
+    assert pd.isna(r0["soldout_hour"])
+    assert r1["is_stockout"] == True
+    assert r1["soldout_hour"] == pytest.approx(15.0, abs=1e-6)  # 발주50/수요100 균등
+    assert r1["lost_sale_units"] == 50.0        # 100-50

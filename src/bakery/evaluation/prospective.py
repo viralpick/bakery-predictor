@@ -10,6 +10,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from ..features.potential_demand import StoreHours, bakery_hour_profile
+from .business_metrics import CostParams, simulate_profit
+
 
 def simulate_soldout(
     order_qty: float,
@@ -69,3 +72,47 @@ def reconstruct_baseline_order(
     """생산 = 정상판매 + 마감판매 + 폐기. 회고 검증의 현행 발주 proxy."""
     parts = [df[c].fillna(0.0).astype(float) for c in (normal_col, closing_col, waste_col)]
     return parts[0] + parts[1] + parts[2]
+
+
+def simulate_item_day_kpis(
+    rows: pd.DataFrame,
+    profiles: dict[tuple, np.ndarray],
+    *,
+    order_col: str,
+    store_hours: StoreHours,
+    group_cols: list[str],
+    params: CostParams | None = None,
+    unit_prices=None,
+) -> pd.DataFrame:
+    """item-day별 폐기/lost 비용(business_metrics) + 매진시각/매진여부."""
+    params = params or CostParams()
+    # 폐기/lost: simulate_profit 재사용 (yhat=발주량, true=potential_demand)
+    prof_in = rows.rename(columns={order_col: "yhat"}).copy()
+    prof_in["sold_units"] = prof_in["potential_demand"]
+    costed = simulate_profit(
+        prof_in, unit_prices=unit_prices, params=params,
+        yhat_col="yhat", sold_col="sold_units", potential_col="potential_demand",
+    )
+    # 매진시각: 그룹 프로필로 역산
+    soldout_hours, stockouts = [], []
+    for _, r in rows.iterrows():
+        gkey = tuple(str(r[c]) for c in group_cols)
+        raw = profiles.get(gkey)
+        prof = bakery_hour_profile(
+            store_hours.open_hour, store_hours.close_hour,
+            measured=raw if raw is not None else None,
+        )
+        t, is_so = simulate_soldout(
+            float(r[order_col]), float(r["potential_demand"]), prof,
+            open_hour=store_hours.open_hour, close_hour=store_hours.close_hour,
+        )
+        soldout_hours.append(t if t is not None else np.nan)
+        stockouts.append(is_so)
+    out = rows.copy()
+    out["waste_units"] = costed["waste_units"].to_numpy()
+    out["lost_sale_units"] = costed["lost_sale_units"].to_numpy()
+    out["waste_cost_krw"] = costed["waste_cost_krw"].to_numpy()
+    out["lost_margin_krw"] = costed["lost_margin_krw"].to_numpy()
+    out["soldout_hour"] = soldout_hours
+    out["is_stockout"] = stockouts
+    return out
