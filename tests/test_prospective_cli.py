@@ -1,10 +1,15 @@
+import numpy as np
 import pandas as pd
+from bakery.data.calendar import build_calendar_daily
+from bakery.data.weather import build_synthetic_weather
+from bakery.features.calendar_features import add_calendar_features
 from bakery.features.potential_demand import StoreHours
+from bakery.features.weather_features import add_weather_features
 from bakery.evaluation.prospective import (
     build_arrival_profile, simulate_item_day_kpis, compare_policies,
 )
 from bakery.evaluation.business_metrics import CostParams
-from bakery.cli import _assemble_real_rows
+from bakery.cli import _assemble_real_rows, _fill_our_order, _quantile_backtest_predictions
 
 
 def test_end_to_end_our_beats_worse_baseline():
@@ -74,6 +79,71 @@ def test_assemble_real_rows_base_order_matches_production_qty():
     assert row2["base_order"] == 6
     assert row2["waste_qty"] == 1
     assert row2["category_id"] == "pastry"
+
+
+def test_fill_our_order_restricts_rows_to_scored_window():
+    """Task B rows(전체 기간) 중 our_order 예측이 있는 item-day만 남기고,
+    나머지(2024-01-01 "a", 전체 "c")는 제외되며 our_order 값이 정확히 붙는다."""
+    rows = pd.DataFrame({
+        "item_id": ["a", "a", "b", "c"],
+        "date": pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-01", "2024-01-01"]),
+        "potential_demand": [10.0, 11.0, 5.0, 3.0],
+    })
+    predictions = pd.DataFrame({
+        "item_id": ["a", "b"],
+        "date": pd.to_datetime(["2024-01-02", "2024-01-01"]),
+        "our_order": [12.5, 6.0],
+    })
+
+    result = _fill_our_order(rows, predictions)
+
+    assert len(result) == 2
+    assert set(zip(result["item_id"], result["date"].dt.strftime("%Y-%m-%d"))) == {
+        ("a", "2024-01-02"), ("b", "2024-01-01"),
+    }
+    row_a = result[result["item_id"] == "a"].iloc[0]
+    assert row_a["our_order"] == 12.5
+    row_b = result[result["item_id"] == "b"].iloc[0]
+    assert row_b["our_order"] == 6.0
+
+
+def _enriched_v2_toy(n_days: int = 110, seed: int = 11) -> pd.DataFrame:
+    """v2 LightGBM 학습에 필요한 최소 enrich 프레임 — store 1개, item 2개, 카테고리
+    공유(cannibalization 계산 대상). potential_demand=sold_units(무품절 단순화)."""
+    rng = np.random.default_rng(seed)
+    dates = pd.date_range("2024-01-01", periods=n_days, freq="D")
+    rows = []
+    for item in ("i1", "i2"):
+        for i, d in enumerate(dates):
+            sold = int(20 + (i % 7) * 3 + rng.integers(0, 5))
+            rows.append({
+                "store_id": "s1", "item_id": item, "category_id": "bread",
+                "date": d, "sold_units": sold, "is_stockout": False,
+                "potential_demand": float(sold),
+            })
+    df = pd.DataFrame(rows)
+    cal = build_calendar_daily(dates.min(), dates.max())
+    weather = build_synthetic_weather(dates.min(), dates.max(), store_ids=["s1"], seed=seed)
+    df = add_calendar_features(df, cal)
+    df = add_weather_features(df, weather)
+    return df
+
+
+def test_quantile_backtest_predictions_structural_properties():
+    """작은 합성 v2 프레임 → our_order 예측이 (a) 비음수 (b) NaN 없음 (c) val 기간
+    item-day 수와 정확히 일치. 실제 모델 출력값 자체는 model-dependent이라 exact-value
+    단언 대신 구조 속성만 검증한다."""
+    daily = _enriched_v2_toy()
+
+    preds, window = _quantile_backtest_predictions(
+        daily, val_weeks=1, production_quantile=0.85
+    )
+
+    val_days = pd.date_range(window.val_start, window.val_end, freq="D")
+    n_items = daily["item_id"].nunique()
+    assert len(preds) == len(val_days) * n_items
+    assert preds["our_order"].notna().all()
+    assert (preds["our_order"] >= 0.0).all()
 
 
 def test_assemble_real_rows_drops_item_days_without_inventory_match():
