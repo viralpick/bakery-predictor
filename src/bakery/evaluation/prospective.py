@@ -58,7 +58,10 @@ def build_arrival_profile(
         by_hour = g.groupby("hour")["qty"].sum()
         for h, q in by_hour.items():
             vec[int(h)] = float(q)
-        out[gkey] = vec
+        # 계약: 키는 항상 str-cast tuple. simulate_item_day_kpis의
+        # tuple(str(r[c]) for c in group_cols) 조회와 dtype 상관없이 일치시켜
+        # non-string group_cols(int store_id 등)에서 silent fallback을 막는다.
+        out[tuple(str(x) for x in gkey)] = vec
     return out
 
 

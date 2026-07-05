@@ -1,7 +1,5 @@
-import numpy as np
 import pandas as pd
-import pytest
-from bakery.features.potential_demand import StoreHours, bakery_hour_profile
+from bakery.features.potential_demand import StoreHours
 from bakery.evaluation.prospective import (
     build_arrival_profile, simulate_item_day_kpis, compare_policies,
 )

@@ -69,6 +69,29 @@ def test_build_arrival_profile_excludes_keys():
     assert prof[("a",)][9] == 2.0   # 01-02 제외
 
 
+def test_build_arrival_profile_string_key_contract_with_int_group_col():
+    # group_cols에 정수 dtype 컬럼(store_id)이 와도 build_arrival_profile의
+    # dict key가 str-cast되어, simulate_item_day_kpis 쪽
+    # tuple(str(r[c]) for c in group_cols) 조회와 어긋나지 않아야 한다.
+    # 어긋나면 lookup이 조용히 miss → 기본 arrival curve로 fallback되어
+    # 에러 없이 잘못된 결과를 낸다 (silent failure).
+    receipts = pd.DataFrame({
+        "store_id": [1, 1, 2],
+        "hour":     [9, 14, 10],
+        "qty":      [3, 7, 4],
+    })
+    prof = build_arrival_profile(receipts, group_cols=["store_id"])
+    # int로 조회하면 실패해야 정상(키가 str로 저장됨을 증명)
+    assert (1,) not in prof
+    lookup_key = tuple(str(v) for v in (1,))
+    assert lookup_key in prof
+    assert prof[lookup_key][9] == 3.0
+    assert prof[lookup_key][14] == 7.0
+    assert prof[lookup_key].sum() == 10.0
+    lookup_key_2 = tuple(str(v) for v in (2,))
+    assert prof[lookup_key_2][10] == 4.0
+
+
 def test_reconstruct_baseline_order_identity():
     from bakery.evaluation.prospective import reconstruct_baseline_order
     df = pd.DataFrame({
