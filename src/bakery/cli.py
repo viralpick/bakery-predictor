@@ -17,7 +17,6 @@ from .data.synthetic import generate_synthetic_bundle
 from .data.weather import load_weather_forecast_from_local
 from .evaluation.backtest import aggregate_by_model, per_category_wape, run_backtest
 from .evaluation.classifier_metrics import base_rate, precision_at_k, recall_at_k, roc_auc
-from .evaluation.diagnostics import decoupling_score
 from .evaluation.metrics import wpe
 from .evaluation.prospective import (
     build_arrival_profile,
@@ -1768,17 +1767,6 @@ def _stockout_item_days(rows: pd.DataFrame) -> set:
     return set(zip(observed["item_id"].astype(str), observed["date"].astype(str)))
 
 
-def _decoupling_by_item(kpis: pd.DataFrame) -> pd.DataFrame:
-    """item별 ρ_DS(복원수요 vs 매진률) — 품절이 진짜 수요와 분리됐는지 진단."""
-    out = []
-    for item_id, g in kpis.groupby("item_id"):
-        score = decoupling_score(
-            g["potential_demand"].to_numpy(),
-            g["is_stockout"].astype(float).to_numpy(),
-        )
-        out.append({"item_id": item_id, "decoupling_score": score})
-    return pd.DataFrame(out)
-
 
 @app.command("prospective-eval")
 def cmd_prospective_eval(
@@ -1788,7 +1776,11 @@ def cmd_prospective_eval(
     close_hour: int = typer.Option(22),
     out_csv: str = typer.Option("reports/prospective_kpi.csv"),
 ) -> None:
-    """우리 발주 추천 vs 현행 발주를 KPI(폐기/매진시각/매진률)로 비교."""
+    """우리 발주 추천 vs 현행 발주를 KPI(폐기/매진시각/매진률)로 비교.
+    
+    Note: ρ_DS(Decoupling Score)는 카테고리 수준 진단만 정의됨. 합성 데이터(category_id 없음)는 미계산.
+    실 데이터 카테고리 매핑 완료 후 구현 예정.
+    """
     rows, receipts, unit_prices = _load_prospective_inputs(source, store_id)
     profiles = build_arrival_profile(
         receipts, group_cols=["item_id"],
@@ -1810,8 +1802,6 @@ def cmd_prospective_eval(
         f"[cyan]예측 편향 WPE="
         f"{wpe(rows['potential_demand'].to_numpy(), rows['our_order'].to_numpy()):.3f}[/]"
     )
-    for r in _decoupling_by_item(our).itertuples(index=False):
-        console.print(f"[magenta]ρ_DS[/] item_id={r.item_id}: {r.decoupling_score:.3f}")
     console.print(f"[green]wrote[/] {out_path}")
 
 
