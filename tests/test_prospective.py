@@ -117,3 +117,23 @@ def test_item_day_kpis_waste_and_soldout():
     assert r1["is_stockout"] == True
     assert r1["soldout_hour"] == pytest.approx(15.0, abs=1e-6)  # 발주50/수요100 균등
     assert r1["lost_sale_units"] == 50.0        # 100-50
+
+
+def _kpi_frame(waste, lost, stockouts, soldout):
+    return pd.DataFrame({
+        "waste_cost_krw": waste, "lost_margin_krw": lost,
+        "is_stockout": stockouts, "soldout_hour": soldout,
+    })
+
+
+def test_compare_policies_delta():
+    from bakery.evaluation.prospective import compare_policies
+    our = _kpi_frame([100.0, 0.0], [0.0, 50.0], [False, True], [np.nan, 16.0])
+    base = _kpi_frame([200.0, 0.0], [0.0, 80.0], [False, True], [np.nan, 14.0])
+    out = compare_policies(our, base).set_index("policy")
+    assert out.loc["our", "waste_cost_krw"] == 100.0
+    assert out.loc["baseline", "waste_cost_krw"] == 200.0
+    assert out.loc["delta", "waste_cost_krw"] == -100.0     # 우리가 폐기 100 적음
+    assert out.loc["our", "stockout_rate"] == 0.5
+    assert out.loc["our", "soldout_median_h"] == 16.0       # 매진일만 median
+    assert out.loc["delta", "soldout_median_h"] == 2.0      # 16 - 14

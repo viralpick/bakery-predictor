@@ -116,3 +116,27 @@ def simulate_item_day_kpis(
     out["soldout_hour"] = soldout_hours
     out["is_stockout"] = stockouts
     return out
+
+
+def _summarize_policy(kpis: pd.DataFrame) -> dict[str, float]:
+    """KPI 프레임을 정책별 요약(합계/평균)으로 변환."""
+    so = kpis["is_stockout"].astype(bool)
+    soldout_median = kpis.loc[so, "soldout_hour"].median() if so.any() else float("nan")
+    return {
+        "waste_cost_krw": float(kpis["waste_cost_krw"].sum()),
+        "lost_margin_krw": float(kpis["lost_margin_krw"].sum()),
+        "stockout_rate": float(so.mean()),
+        "soldout_median_h": float(soldout_median),
+    }
+
+
+def compare_policies(our_kpis: pd.DataFrame, base_kpis: pd.DataFrame) -> pd.DataFrame:
+    """우리·아티제 정책 KPI 요약 + Δ(우리−아티제) 1행."""
+    our = _summarize_policy(our_kpis)
+    base = _summarize_policy(base_kpis)
+    delta = {k: our[k] - base[k] for k in our}
+    return pd.DataFrame([
+        {"policy": "our", **our},
+        {"policy": "baseline", **base},
+        {"policy": "delta", **delta},
+    ])
