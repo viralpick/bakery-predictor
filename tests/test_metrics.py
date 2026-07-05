@@ -13,6 +13,7 @@ from bakery.evaluation.metrics import (
     rmse,
     summarize,
     wape,
+    wpe,
 )
 
 
@@ -67,7 +68,7 @@ def test_grouped_wape_returns_one_row_per_group():
 
 def test_summarize_keys():
     out = summarize(np.array([1.0, 2.0]), np.array([1.0, 2.0]))
-    assert set(out) == {"wape", "mae", "rmse"}
+    assert set(out) == {"wape", "wpe", "mae", "rmse"}
 
 
 def test_coverage_all_inside():
@@ -142,3 +143,21 @@ def test_mase_halves_when_model_error_is_half_naive():
     actual = np.array([10.0, 20.0])
     pred = np.array([10.5, 19.5])  # MAE 0.5
     assert mase(actual, pred, train, season=1) == 0.5
+
+
+def test_wpe_sign_and_value():
+    y = np.array([10.0, 10.0, 10.0, 10.0])
+    over = np.array([12.0, 12.0, 12.0, 12.0])   # 과대예측 → +
+    under = np.array([8.0, 8.0, 8.0, 8.0])      # 과소예측 → −
+    exact = np.array([10.0, 10.0, 10.0, 10.0])
+    assert wpe(y, over) == 0.2      # (48-40)/40
+    assert wpe(y, under) == -0.2    # (32-40)/40
+    assert wpe(y, exact) == 0.0
+
+
+def test_summarize_includes_wpe():
+    y = np.array([10.0, 20.0])
+    yhat = np.array([11.0, 19.0])
+    out = summarize(y, yhat)
+    assert "wpe" in out
+    assert out["wpe"] == 0.0        # (+1 -1)/30
