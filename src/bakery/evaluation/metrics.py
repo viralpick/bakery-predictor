@@ -34,6 +34,8 @@ def wpe(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     '어느 쪽으로 틀렸나'를 본다."""
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
+    if y_true.shape != y_pred.shape:
+        raise ValueError(f"shape mismatch: y_true {y_true.shape} vs y_pred {y_pred.shape}")
     denom = y_true.sum()
     if denom == 0:
         return float("nan")
@@ -129,6 +131,7 @@ def summarize_with_stockout(
       'honest' accuracy unaffected by capacity-truncated rows).
     Includes a `pct_underprediction` rate on non-stockout rows since over- vs
     under-prediction have asymmetric operational cost (spec.md §5).
+    Also includes `wpe` (signed bias) for diagnostics.
     """
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
@@ -136,6 +139,7 @@ def summarize_with_stockout(
     return {
         "wape_all": wape(y_true, y_pred),
         "wape_no_stockout": wape(y_true[mask], y_pred[mask]) if mask.any() else float("nan"),
+        "wpe": wpe(y_true, y_pred),
         "mae": mae(y_true, y_pred),
         "rmse": rmse(y_true, y_pred),
         "pct_underpredict": _pct_underpredict(y_true[mask], y_pred[mask]) if mask.any() else float("nan"),

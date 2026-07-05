@@ -12,6 +12,7 @@ from bakery.evaluation.metrics import (
     pinball_loss,
     rmse,
     summarize,
+    summarize_with_stockout,
     wape,
     wpe,
 )
@@ -161,3 +162,22 @@ def test_summarize_includes_wpe():
     out = summarize(y, yhat)
     assert "wpe" in out
     assert out["wpe"] == 0.0        # (+1 -1)/30
+
+
+def test_wpe_shape_mismatch_raises():
+    """wpe with mismatched lengths should raise ValueError."""
+    y = np.array([10.0, 20.0, 30.0])
+    yhat = np.array([10.0, 20.0])
+    with pytest.raises(ValueError, match="shape mismatch"):
+        wpe(y, yhat)
+
+
+def test_summarize_with_stockout_includes_wpe():
+    """summarize_with_stockout should include wpe in output."""
+    y = np.array([10.0, 20.0, 30.0])
+    yhat = np.array([11.0, 19.0, 30.0])
+    is_stockout = np.array([False, False, False])
+    out = summarize_with_stockout(y, yhat, is_stockout)
+    assert "wpe" in out
+    # (11+19+30 - (10+20+30)) / (10+20+30) = 0/60 = 0
+    assert out["wpe"] == 0.0

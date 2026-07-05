@@ -20,3 +20,12 @@ def test_weighted_matches_manual():
     w = np.array([1.0, 1.0, 2.0])
     # 양의 완전 선형 → +1
     assert decoupling_score(demand, sr, weights=w) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_decoupling_score_weights_shape_mismatch_raises():
+    """decoupling_score with weights shape mismatch should raise ValueError."""
+    demand = np.array([10.0, 20.0, 30.0])
+    sr = np.array([0.1, 0.2, 0.3])
+    weights = np.array([1.0, 1.0])  # length 2, but demand is length 3
+    with pytest.raises(ValueError, match="shape mismatch"):
+        decoupling_score(demand, sr, weights=weights)

@@ -22,6 +22,7 @@ class FoldResult:
     model: str
     wape_all: float
     wape_no_stockout: float
+    wpe: float
     mae: float
     rmse: float
     pct_underpredict: float
@@ -64,6 +65,7 @@ def run_backtest(
                     model=fresh.name,
                     wape_all=summary["wape_all"],
                     wape_no_stockout=summary["wape_no_stockout"],
+                    wpe=summary["wpe"],
                     mae=summary["mae"],
                     rmse=summary["rmse"],
                     pct_underpredict=summary["pct_underpredict"],
@@ -90,6 +92,7 @@ def aggregate_by_model(fold_df: pd.DataFrame) -> pd.DataFrame:
         .agg(
             wape_all=("wape_all", "mean"),
             wape_no_stockout=("wape_no_stockout", "mean"),
+            wpe=("wpe", "mean"),
             mae=("mae", "mean"),
             rmse=("rmse", "mean"),
             pct_underpredict=("pct_underpredict", "mean"),

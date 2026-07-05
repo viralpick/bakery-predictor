@@ -17,6 +17,7 @@ from .data.synthetic import generate_synthetic_bundle
 from .data.weather import load_weather_forecast_from_local
 from .evaluation.backtest import aggregate_by_model, per_category_wape, run_backtest
 from .evaluation.classifier_metrics import base_rate, precision_at_k, recall_at_k, roc_auc
+from .evaluation.diagnostics import decoupling_score
 from .evaluation.metrics import wpe
 from .evaluation.prospective import (
     build_arrival_profile,
@@ -24,8 +25,9 @@ from .evaluation.prospective import (
     reconstruct_baseline_order,
     simulate_item_day_kpis,
 )
-from .evaluation.split import apply_split, generate_time_splits
+from .evaluation.split import SplitWindow, apply_split, generate_time_splits
 from .features.calendar_features import add_calendar_features
+from .features.category_aggregate import TARGET_CATEGORIES
 from .features.competitor_features import (
     add_competitor_features,
     compute_competitor_features,
@@ -54,6 +56,7 @@ from .ingest import (
     population_api,
     weather_api,
 )
+from .ingest.inventory import load_inventory
 from .ingest.store_mapping import load_store_mapping
 from .models.lightgbm_regressor import VALID_FEATURE_SETS, GlobalLGBM, LGBMParams
 from .models.moving_average import MovingAverage
@@ -1739,22 +1742,154 @@ def _synthetic_prospective_inputs() -> tuple[pd.DataFrame, pd.DataFrame, dict[st
     return rows, receipts, unit_prices
 
 
-def _load_prospective_inputs(
-    source: str, store_id: str
+# 실데이터 진입점 — 재고정보 시트가 있는 파일만 생산량/폐기량/품목단가를 갖는다.
+REAL_INVENTORY_XLSX_PATH = "data/internal/보나비 데이터_20260526.xlsx"
+REAL_DAILY_PARQUET_PATH = "data/internal/bonavi_daily.parquet"
+REAL_RECEIPTS_PARQUET_PATH = "data/internal/bonavi_receipts.parquet"
+
+REAL_ROWS_COLUMNS = [
+    "item_id", "date", "category_id", "potential_demand",
+    "sold_units", "is_stockout", "base_order", "waste_qty",
+]
+
+
+def _assemble_real_rows(daily: pd.DataFrame, inventory: pd.DataFrame) -> pd.DataFrame:
+    """bonavi_daily(store/category 필터됨) + load_inventory(A) 결과를 (date,item_id) 조인.
+
+    daily["date"]는 datetime64(receipts와 동일 표현 유지 — build_arrival_profile의
+    str-cast 키 비교 계약 때문에 여기서 별도 문자열로 바꾸지 않는다). inventory["date"]는
+    load_inventory 계약상 YYYYMMDD 문자열이므로 조인 전에만 datetime으로 정규화한다.
+    재고정보에 매칭이 없는 item-day는 base_order가 없어 평가셋에서 제외한다(inner join).
+    """
+    inv = inventory.copy()
+    inv["date"] = pd.to_datetime(inv["date"], format="%Y%m%d")
+    inv["item_id"] = inv["item_id"].astype(str)
+    d = daily.copy()
+    d["item_id"] = d["item_id"].astype(str)
+    merged = d.merge(
+        inv[["date", "item_id", "production_qty", "waste_qty"]],
+        on=["date", "item_id"], how="inner",
+    )
+    merged = merged.rename(columns={"production_qty": "base_order"})
+    return merged[REAL_ROWS_COLUMNS].reset_index(drop=True)
+
+
+def _load_real_daily(store_id: str) -> pd.DataFrame:
+    """bonavi_daily.parquet을 store_id + TARGET_CATEGORIES로 필터."""
+    daily = pd.read_parquet(REAL_DAILY_PARQUET_PATH)
+    n_stores = daily["store_id"].nunique()
+    if n_stores != 1:
+        raise ValueError(f"real path assumes single-store data; found {n_stores} stores. Multi-store needs store-qualified receipts/merge wiring.")
+    daily["item_id"] = daily["item_id"].astype(str)
+    daily = daily[daily["store_id"] == store_id]
+    daily = daily[daily["category_id"].isin(TARGET_CATEGORIES)]
+    return daily.reset_index(drop=True)
+
+
+def _load_real_receipts(item_ids: set[str]) -> pd.DataFrame:
+    """bonavi_receipts.parquet → item_id/date/hour/qty. 영수증 라인 1건=1개 판매.
+
+    주의: receipts 원본에는 store 컬럼이 없다. bonavi 데이터셋 자체가 광교(store_gw01)
+    단일 매장 실측이라(bonavi_daily의 store_id도 store_gw01뿐) 현재는 store 필터가
+    불필요하지만, 다매장 실데이터로 확장되면 이 함수는 store 컬럼 부재로 깨진다.
+    """
+    receipts = pd.read_parquet(REAL_RECEIPTS_PARQUET_PATH)
+    receipts["item_id"] = receipts["item_id"].astype(str)
+    receipts = receipts[receipts["item_id"].isin(item_ids)].copy()
+    receipts["qty"] = 1.0
+    return receipts[["item_id", "date", "hour", "qty"]].reset_index(drop=True)
+
+
+def _load_unit_prices(xlsx_path: str) -> dict[str, float]:
+    """품목정보 시트 → item_id→판매단가 dict. NaN은 category_aggregate와 동일하게 4000 fallback."""
+    items = pd.read_excel(xlsx_path, sheet_name="품목정보")
+    items["item_id"] = items["품목코드"].astype(str)
+    items["판매단가"] = pd.to_numeric(items["판매단가"], errors="coerce")
+    return items.set_index("item_id")["판매단가"].fillna(4000.0).to_dict()
+
+
+def _quantile_backtest_predictions(
+    daily: pd.DataFrame, *, val_weeks: int, production_quantile: float,
+) -> tuple[pd.DataFrame, SplitWindow]:
+    """enriched v2 프레임(daily)에서 최근 val_weeks를 단일 expanding val로 잡아
+    q{production_quantile} LightGBM v2(potential_demand target) 예측을 생성한다.
+
+    Leakage 없음 — val 이전 전체 기간이 train(generate_time_splits의 expanding
+    모드 + apply_split의 leakage assertion에 의존, 직접 구현하지 않는다).
+    daily는 호출자가 store/기간 필터·calendar/weather enrich를 마친 상태여야 한다.
+    """
+    windows = generate_time_splits(
+        daily["date"], n_splits=1, val_horizon_days=val_weeks * 7, step_days=val_weeks * 7,
+    )
+    window = windows[0]
+    forecaster = GlobalLGBM(
+        feature_set="v2", params=LGBMParams(objective="quantile", alpha=production_quantile)
+    )
+    _, pred_df = run_backtest(daily, [forecaster], windows, y_col="potential_demand")
+    preds = pred_df[["item_id", "date", "yhat"]].rename(columns={"yhat": "our_order"})
+    return preds, window
+
+
+def _our_order_predictions(
+    store_id: str, *, production_quantile: float = 0.85, val_weeks: int = 8,
+) -> pd.DataFrame:
+    """bonavi_daily(real) → v2 enrich → 최근 val_weeks backtest val의 q{production_quantile}
+    예측. 5년 전체를 expanding-window backtest하기엔 비용이 크므로 최근 구간으로 제한
+    (기간은 console.print로 명시 — 무언 축소 금지)."""
+    ds = _load_dataset("real", None)
+    daily = _enrich_if_needed(ds, ["v2"])
+    preds, window = _quantile_backtest_predictions(
+        daily, val_weeks=val_weeks, production_quantile=production_quantile
+    )
+    console.print(
+        f"[cyan]our_order[/] backtest window: train≤{window.train_end.date()} "
+        f"val=[{window.val_start.date()}, {window.val_end.date()}] "
+        f"({val_weeks}주, store={store_id}, quantile α={production_quantile})"
+    )
+    return preds
+
+
+def _fill_our_order(rows: pd.DataFrame, predictions: pd.DataFrame) -> pd.DataFrame:
+    """rows(Task B, 전체 기간)를 our_order 예측이 존재하는 최근 backtest val 기간으로
+    제한한다. 예측 없는 item-day는 평가셋에서 제외 — 개수를 log로 명시(무언 축소 금지)."""
+    preds = predictions.copy()
+    preds["item_id"] = preds["item_id"].astype(str)
+    before = len(rows)
+    merged = rows.merge(preds, on=["item_id", "date"], how="inner")
+    dropped = before - len(merged)
+    console.print(
+        f"[cyan]our_order[/] scored item-days: {len(merged):,} / {before:,} "
+        f"(dropped {dropped:,} outside backtest val window)"
+    )
+    return merged
+
+
+def _real_prospective_inputs(
+    store_id: str, *, production_quantile: float = 0.85, val_weeks: int = 8,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
-    """(rows, receipts, unit_prices) 반환. synthetic만 구현, real은 미구현 명시."""
+    """실데이터 조립: bonavi_daily + 재고정보(생산량/폐기량) join +
+    our_order=production-quantile backtest 예측(최근 val_weeks만 채움, Task C)."""
+    daily = _load_real_daily(store_id)
+    inventory = load_inventory(REAL_INVENTORY_XLSX_PATH, store_id)
+    rows = _assemble_real_rows(daily, inventory)
+    predictions = _our_order_predictions(
+        store_id, production_quantile=production_quantile, val_weeks=val_weeks
+    )
+    rows = _fill_our_order(rows, predictions)
+    receipts = _load_real_receipts(set(rows["item_id"]))
+    unit_prices = _load_unit_prices(REAL_INVENTORY_XLSX_PATH)
+    return rows, receipts, unit_prices
+
+
+def _load_prospective_inputs(
+    source: str, store_id: str, *, production_quantile: float = 0.85, val_weeks: int = 8,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
+    """(rows, receipts, unit_prices) 반환. production_quantile/val_weeks는 real 소스만 사용."""
     if source == "synthetic":
         return _synthetic_prospective_inputs()
     if source == "real":
-        raise NotImplementedError(
-            "prospective-eval --source real 미구현. 확정이 필요한 컬럼 매핑 3가지:\n"
-            "  1) our_order — 우리 모델(예: lightgbm_v2) 예측을 이 커맨드에 아직 연결하지 않음.\n"
-            "  2) potential_demand — Phase A/B 마감할인 α 재구성 결과(복원수요)를 아직 연결하지 않음.\n"
-            "  3) waste_units — load_sales_with_discount에는 폐기 컬럼이 없다. "
-            "data/internal/v2/waste_alpha_4stores.parquet의 out/waste_cost가 폐기 실측 proxy로 "
-            "쓸 수 있는지(단위·부호) 미검증.\n"
-            "synthetic 경로가 build_arrival_profile→simulate_item_day_kpis→compare_policies "
-            "end-to-end 계약을 이미 검증했으므로, 위 3개 매핑만 확정되면 연결 가능하다."
+        return _real_prospective_inputs(
+            store_id, production_quantile=production_quantile, val_weeks=val_weeks
         )
     raise ValueError(f"unknown source: {source!r} (expected 'synthetic' or 'real')")
 
@@ -1767,21 +1902,44 @@ def _stockout_item_days(rows: pd.DataFrame) -> set:
     return set(zip(observed["item_id"].astype(str), observed["date"].astype(str)))
 
 
+def _decoupling_by_category(rows: pd.DataFrame) -> dict[str, float]:
+    """카테고리별 ρ_DS (Decoupling Score) 산출.
+
+    각 카테고리 내 item-day들에 대해 (potential_demand, is_stockout) 상관을 계산.
+    반환: {category_id: score}
+    """
+    scores = {}
+    for cat_id, group in rows.groupby("category_id"):
+        demand = group["potential_demand"].to_numpy()
+        stockout = group["is_stockout"].astype(float).to_numpy()
+        score = decoupling_score(demand, stockout)
+        scores[cat_id] = score
+    return scores
+
 
 @app.command("prospective-eval")
 def cmd_prospective_eval(
     source: str = typer.Option("synthetic", help="synthetic | real"),
-    store_id: str = typer.Option("gwangyo"),
+    store_id: str = typer.Option("store_gw01", help="real 소스는 store_mapping의 store_gw01 등 코드 사용"),
     open_hour: int = typer.Option(8),
     close_hour: int = typer.Option(22),
+    production_quantile: float = typer.Option(
+        0.85, help="our_order production quantile α (real 소스만 사용)"
+    ),
+    our_order_val_weeks: int = typer.Option(
+        8, help="our_order backtest 검증(최근) 기간(주) — real 소스만 사용, 5년 전체 대신 최근 구간으로 제한"
+    ),
     out_csv: str = typer.Option("reports/prospective_kpi.csv"),
 ) -> None:
     """우리 발주 추천 vs 현행 발주를 KPI(폐기/매진시각/매진률)로 비교.
-    
-    Note: ρ_DS(Decoupling Score)는 카테고리 수준 진단만 정의됨. 합성 데이터(category_id 없음)는 미계산.
-    실 데이터 카테고리 매핑 완료 후 구현 예정.
+
+    실 데이터(--source real)의 경우 카테고리별 ρ_DS(Decoupling Score) 진단도 출력.
+    합성 데이터는 category_id가 없어 ρ_DS 미계산.
     """
-    rows, receipts, unit_prices = _load_prospective_inputs(source, store_id)
+    rows, receipts, unit_prices = _load_prospective_inputs(
+        source, store_id,
+        production_quantile=production_quantile, val_weeks=our_order_val_weeks,
+    )
     profiles = build_arrival_profile(
         receipts, group_cols=["item_id"],
         exclude_keys=_stockout_item_days(rows), exclude_cols=["item_id", "date"],
@@ -1802,6 +1960,12 @@ def cmd_prospective_eval(
         f"[cyan]예측 편향 WPE="
         f"{wpe(rows['potential_demand'].to_numpy(), rows['our_order'].to_numpy()):.3f}[/]"
     )
+    if source == "real" and "category_id" in rows.columns:
+        rho_ds = _decoupling_by_category(rows)
+        console.print("[cyan]카테고리별 ρ_DS (Decoupling Score)[/]")
+        for cat_id in sorted(rho_ds.keys()):
+            score = rho_ds[cat_id]
+            console.print(f"  {cat_id}: {score:.4f}")
     console.print(f"[green]wrote[/] {out_path}")
 
 

@@ -21,7 +21,12 @@ def decoupling_score(
     s = np.asarray(stockout_rate, dtype=float)
     if d.shape != s.shape:
         raise ValueError(f"demand{d.shape} vs stockout_rate{s.shape} shape mismatch")
-    w = np.ones_like(d) if weights is None else np.asarray(weights, dtype=float)
+    if weights is not None:
+        w = np.asarray(weights, dtype=float)
+        if w.shape != d.shape:
+            raise ValueError(f"weights{w.shape} vs demand{d.shape} shape mismatch")
+    else:
+        w = np.ones_like(d)
     wsum = w.sum()
     if wsum <= 0:
         return float("nan")
