@@ -17,6 +17,7 @@ from .data.synthetic import generate_synthetic_bundle
 from .data.weather import load_weather_forecast_from_local
 from .evaluation.backtest import aggregate_by_model, per_category_wape, run_backtest
 from .evaluation.classifier_metrics import base_rate, precision_at_k, recall_at_k, roc_auc
+from .evaluation.diagnostics import decoupling_score
 from .evaluation.metrics import wpe
 from .evaluation.prospective import (
     build_arrival_profile,
@@ -1898,6 +1899,21 @@ def _stockout_item_days(rows: pd.DataFrame) -> set:
     return set(zip(observed["item_id"].astype(str), observed["date"].astype(str)))
 
 
+def _decoupling_by_category(rows: pd.DataFrame) -> dict[str, float]:
+    """카테고리별 ρ_DS (Decoupling Score) 산출.
+
+    각 카테고리 내 item-day들에 대해 (potential_demand, is_stockout) 상관을 계산.
+    반환: {category_id: score}
+    """
+    scores = {}
+    for cat_id, group in rows.groupby("category_id"):
+        demand = group["potential_demand"].to_numpy()
+        stockout = group["is_stockout"].astype(float).to_numpy()
+        score = decoupling_score(demand, stockout)
+        scores[cat_id] = score
+    return scores
+
+
 
 @app.command("prospective-eval")
 def cmd_prospective_eval(
@@ -1915,8 +1931,8 @@ def cmd_prospective_eval(
 ) -> None:
     """우리 발주 추천 vs 현행 발주를 KPI(폐기/매진시각/매진률)로 비교.
 
-    Note: ρ_DS(Decoupling Score)는 카테고리 수준 진단만 정의됨. 합성 데이터(category_id 없음)는 미계산.
-    실 데이터 카테고리 매핑 완료 후 구현 예정.
+    실 데이터(--source real)의 경우 카테고리별 ρ_DS(Decoupling Score) 진단도 출력.
+    합성 데이터는 category_id가 없어 ρ_DS 미계산.
     """
     rows, receipts, unit_prices = _load_prospective_inputs(
         source, store_id,
@@ -1942,6 +1958,12 @@ def cmd_prospective_eval(
         f"[cyan]예측 편향 WPE="
         f"{wpe(rows['potential_demand'].to_numpy(), rows['our_order'].to_numpy()):.3f}[/]"
     )
+    if source == "real" and "category_id" in rows.columns:
+        rho_ds = _decoupling_by_category(rows)
+        console.print("[cyan]카테고리별 ρ_DS (Decoupling Score)[/]")
+        for cat_id in sorted(rho_ds.keys()):
+            score = rho_ds[cat_id]
+            console.print(f"  {cat_id}: {score:.4f}")
     console.print(f"[green]wrote[/] {out_path}")
 
 

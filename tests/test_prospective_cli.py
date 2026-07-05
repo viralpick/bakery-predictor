@@ -9,7 +9,8 @@ from bakery.evaluation.prospective import (
     build_arrival_profile, simulate_item_day_kpis, compare_policies,
 )
 from bakery.evaluation.business_metrics import CostParams
-from bakery.cli import _assemble_real_rows, _fill_our_order, _quantile_backtest_predictions
+from bakery.evaluation.diagnostics import decoupling_score
+from bakery.cli import _assemble_real_rows, _fill_our_order, _quantile_backtest_predictions, _decoupling_by_category
 
 
 def test_end_to_end_our_beats_worse_baseline():
@@ -152,3 +153,32 @@ def test_assemble_real_rows_drops_item_days_without_inventory_match():
     # item "999" (재고정보 매칭 없음) 은 base_order 미정이라 평가셋에서 제외된다
     assert set(result["item_id"]) == {"101", "102"}
     assert len(result) == 3
+
+
+def test_decoupling_by_category_with_two_categories():
+    """ρ_DS 카테고리별 산출 — category='bread'는 강한 양의 상관,
+    category='pastry'는 constant stockout(분산 0) → 결과 0.0."""
+    rows = pd.DataFrame({
+        "category_id": ["bread", "bread", "bread", "bread", "pastry", "pastry", "pastry"],
+        "item_id": ["i1", "i1", "i2", "i2", "i3", "i3", "i4"],
+        "date": ["2025-01-01", "2025-01-02", "2025-01-01", "2025-01-02", "2025-01-01", "2025-01-02", "2025-01-01"],
+        "potential_demand": [10.0, 20.0, 15.0, 25.0, 5.0, 5.0, 5.0],
+        "is_stockout": [0, 1, 0, 1, 0, 0, 0],  # bread: demand↑⟹stockout↑ (strong positive)
+    })  # pastry: is_stockout constant → var=0 → score=0.0
+
+    scores = _decoupling_by_category(rows)
+
+    # bread: demand=[10, 20, 15, 25], stockout=[0, 1, 0, 1] → exact value per numpy calculation
+    bread_score = scores["bread"]
+    expected_bread = decoupling_score(
+        np.array([10.0, 20.0, 15.0, 25.0]),
+        np.array([0.0, 1.0, 0.0, 1.0])
+    )
+    assert abs(bread_score - expected_bread) < 1e-9, f"bread score {bread_score}, expected {expected_bread}"
+
+    # pastry: is_stockout constant → var=0 → score=0.0 (per decoupling_score contract)
+    pastry_score = scores["pastry"]
+    assert pastry_score == 0.0, f"pastry score {pastry_score}, expected 0.0"
+
+    # only 2 categories
+    assert len(scores) == 2
