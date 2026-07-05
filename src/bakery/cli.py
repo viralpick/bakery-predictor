@@ -17,6 +17,14 @@ from .data.synthetic import generate_synthetic_bundle
 from .data.weather import load_weather_forecast_from_local
 from .evaluation.backtest import aggregate_by_model, per_category_wape, run_backtest
 from .evaluation.classifier_metrics import base_rate, precision_at_k, recall_at_k, roc_auc
+from .evaluation.diagnostics import decoupling_score
+from .evaluation.metrics import wpe
+from .evaluation.prospective import (
+    build_arrival_profile,
+    compare_policies,
+    reconstruct_baseline_order,
+    simulate_item_day_kpis,
+)
 from .evaluation.split import apply_split, generate_time_splits
 from .features.calendar_features import add_calendar_features
 from .features.competitor_features import (
@@ -35,6 +43,7 @@ from .features.population_features import (
     add_population_features,
     compute_store_population_features,
 )
+from .features.potential_demand import StoreHours
 from .features.weather_features import add_weather_features
 from .ingest import (
     calendar_api,
@@ -1705,6 +1714,105 @@ def cmd_basket_alpha(out_dir: Path = REPORTS_DIR) -> None:
                                     basket_composition_summary(sub, closing_category=category)))
     pd.DataFrame(rows).to_csv(out_dir / BASKET_CSV, index=False)
     console.print(f"[green]wrote[/] {out_dir}/{BASKET_CSV}")
+
+
+# ---------------------------------------------------------------------------
+# prospective-eval: 전향적 KPI harness (우리 발주 추천 vs 현행 발주)
+# ---------------------------------------------------------------------------
+
+def _synthetic_prospective_inputs() -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
+    """소형 결정론 합성 데이터 — item a/b, 3일. 우리 발주=수요근접, 현행=과발주."""
+    dates = ["2025-01-01", "2025-01-02", "2025-01-03"]
+    rows = pd.DataFrame({
+        "item_id": ["a"] * 3 + ["b"] * 3,
+        "date": dates * 2,
+        "potential_demand": [100.0, 100.0, 100.0, 60.0, 60.0, 60.0],
+        "our_order": [105.0, 105.0, 105.0, 63.0, 63.0, 63.0],
+        "base_order": [140.0, 140.0, 140.0, 90.0, 90.0, 90.0],
+    })
+    receipts = pd.DataFrame({
+        "item_id": ["a"] * 6 + ["b"] * 6,
+        "date": [d for d in dates for _ in range(2)] * 2,
+        "hour": [9, 14] * 6,
+        "qty": [50.0, 50.0] * 3 + [30.0, 30.0] * 3,
+    })
+    unit_prices = {"a": 1000.0, "b": 1500.0}
+    return rows, receipts, unit_prices
+
+
+def _load_prospective_inputs(
+    source: str, store_id: str
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
+    """(rows, receipts, unit_prices) 반환. synthetic만 구현, real은 미구현 명시."""
+    if source == "synthetic":
+        return _synthetic_prospective_inputs()
+    if source == "real":
+        raise NotImplementedError(
+            "prospective-eval --source real 미구현. 확정이 필요한 컬럼 매핑 3가지:\n"
+            "  1) our_order — 우리 모델(예: lightgbm_v2) 예측을 이 커맨드에 아직 연결하지 않음.\n"
+            "  2) potential_demand — Phase A/B 마감할인 α 재구성 결과(복원수요)를 아직 연결하지 않음.\n"
+            "  3) waste_units — load_sales_with_discount에는 폐기 컬럼이 없다. "
+            "data/internal/v2/waste_alpha_4stores.parquet의 out/waste_cost가 폐기 실측 proxy로 "
+            "쓸 수 있는지(단위·부호) 미검증.\n"
+            "synthetic 경로가 build_arrival_profile→simulate_item_day_kpis→compare_policies "
+            "end-to-end 계약을 이미 검증했으므로, 위 3개 매핑만 확정되면 연결 가능하다."
+        )
+    raise ValueError(f"unknown source: {source!r} (expected 'synthetic' or 'real')")
+
+
+def _stockout_item_days(rows: pd.DataFrame) -> set:
+    """is_stockout==True로 관측된 (item_id, date) 키 집합 — arrival profile에서 제외."""
+    if "is_stockout" not in rows.columns:
+        return set()
+    observed = rows[rows["is_stockout"].astype(bool)]
+    return set(zip(observed["item_id"].astype(str), observed["date"].astype(str)))
+
+
+def _decoupling_by_item(kpis: pd.DataFrame) -> pd.DataFrame:
+    """item별 ρ_DS(복원수요 vs 매진률) — 품절이 진짜 수요와 분리됐는지 진단."""
+    out = []
+    for item_id, g in kpis.groupby("item_id"):
+        score = decoupling_score(
+            g["potential_demand"].to_numpy(),
+            g["is_stockout"].astype(float).to_numpy(),
+        )
+        out.append({"item_id": item_id, "decoupling_score": score})
+    return pd.DataFrame(out)
+
+
+@app.command("prospective-eval")
+def cmd_prospective_eval(
+    source: str = typer.Option("synthetic", help="synthetic | real"),
+    store_id: str = typer.Option("gwangyo"),
+    open_hour: int = typer.Option(8),
+    close_hour: int = typer.Option(22),
+    out_csv: str = typer.Option("reports/prospective_kpi.csv"),
+) -> None:
+    """우리 발주 추천 vs 현행 발주를 KPI(폐기/매진시각/매진률)로 비교."""
+    rows, receipts, unit_prices = _load_prospective_inputs(source, store_id)
+    profiles = build_arrival_profile(
+        receipts, group_cols=["item_id"],
+        exclude_keys=_stockout_item_days(rows), exclude_cols=["item_id", "date"],
+    )
+    sh = StoreHours(store_id, open_hour, close_hour)
+    our = simulate_item_day_kpis(rows, profiles, order_col="our_order",
+                                 store_hours=sh, group_cols=["item_id"],
+                                 unit_prices=unit_prices)
+    base = simulate_item_day_kpis(rows, profiles, order_col="base_order",
+                                  store_hours=sh, group_cols=["item_id"],
+                                  unit_prices=unit_prices)
+    table = compare_policies(our, base)
+    out_path = Path(out_csv)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    table.to_csv(out_path, index=False)
+    console.print(table.to_string(index=False))
+    console.print(
+        f"[cyan]예측 편향 WPE="
+        f"{wpe(rows['potential_demand'].to_numpy(), rows['our_order'].to_numpy()):.3f}[/]"
+    )
+    for r in _decoupling_by_item(our).itertuples(index=False):
+        console.print(f"[magenta]ρ_DS[/] item_id={r.item_id}: {r.decoupling_score:.3f}")
+    console.print(f"[green]wrote[/] {out_path}")
 
 
 if __name__ == "__main__":
