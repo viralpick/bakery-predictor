@@ -27,6 +27,19 @@ def wape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(np.abs(y_true - y_pred).sum() / denom)
 
 
+def wpe(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Weighted Percentage Error — signed bias. Σ(pred−true)/Σtrue.
+
+    양수=체계적 과대예측, 음수=과소예측(품절 위험 방향). WAPE가 못 잡는
+    '어느 쪽으로 틀렸나'를 본다."""
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    denom = y_true.sum()
+    if denom == 0:
+        return float("nan")
+    return float((y_pred - y_true).sum() / denom)
+
+
 def grouped_wape(df: pd.DataFrame, by: list[str], *, y_col: str, yhat_col: str) -> pd.DataFrame:
     """Per-group WAPE (e.g., by=['store_id','item_id'] or ['category_id'])."""
     def _wape_row(g: pd.DataFrame) -> float:
@@ -37,7 +50,7 @@ def grouped_wape(df: pd.DataFrame, by: list[str], *, y_col: str, yhat_col: str) 
 
 
 def summarize(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
-    return {"wape": wape(y_true, y_pred), "mae": mae(y_true, y_pred), "rmse": rmse(y_true, y_pred)}
+    return {"wape": wape(y_true, y_pred), "wpe": wpe(y_true, y_pred), "mae": mae(y_true, y_pred), "rmse": rmse(y_true, y_pred)}
 
 
 def coverage(actual: np.ndarray, lower: np.ndarray, upper: np.ndarray) -> float:
