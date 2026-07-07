@@ -37,12 +37,14 @@
 
 ## Full-window rolling 회고 (8주 × 8 fold, 13,554 item-day)
 
-작성 2026-07-07. 재현:
+작성 2026-07-07 (음수 폐기 clip 배선 후 재실행 — `03d3146`). 재현:
 ```bash
 uv run bakery prospective-eval --source real --store-id store_gw01 \
   --production-quantile 0.85 --our-order-val-weeks 8 --n-folds 8 \
   --out-csv reports/prospective_kpi.csv
 ```
+
+> **Headline (honest)**: 8주 슬라이스의 유망한 결과는 full-window에서 **유지되지 않는다**. stockout·waste Δ는 CI가 0을 가로지르고(방향 불확실), soldout_median Δ는 robustly 음수(~−2h, KPI 역행), lost_margin Δ는 robustly 양수(불리). 근본 원인은 q0.85의 **진짜 과소발주**(α-sweep로 확정). 방향성은 신뢰 가능하나 크기는 caveat(복원 타깃·생산량 proxy baseline·낮은 상관)로 제한적.
 
 실행 로그: `our_order 8 fold(s)` / `fold 컬럼 보존됨: [0,1,2,3,4,5,6,7]`(8 fold 전부 채점, 무언 축소 없음) / `scored item-days: 13,554 / 62,960 (dropped 49,406 outside backtest val window)`. n_folds=8이 데이터 길이(최근 ~64주 = 8주×8 non-overlapping val 창 + expanding train)로 온전히 채점됐다 — 빈 fold 없음.
 
@@ -71,9 +73,25 @@ uv run bakery prospective-eval --source real --store-id store_gw01 \
 | soldout_median_h | −2.028 | [−2.801, −1.255] | 8 |
 
 - CI는 정규근사(mean ± 1.96·sem), fold 8개로 넓다 — 방향성 판정용.
-- **calibration 초과율 P(demand>order)=0.636 (nominal 1−α=0.15)**: q0.85 발주가 복원수요 대비 **심각한 과소발주** — 목표(15%)의 4배 이상이 order<demand. 예측 편향 WPE=−0.261(발주가 복원수요보다 26% 아래)과 정합. conformal 보정 별도 spec에서 다룰 신호.
-- **waste sanity ratio(simulated/actual)=0.678** (actual_total=18,843 / simulated_total=12,784, n_rows=13,554): 시뮬 폐기가 실측의 68% 수준. baseline=생산량 proxy 하에서 시뮬 폐기(생산−복원수요)와 실측 폐기(생산−판매)는 복원분만큼 구조적으로 다르므로 1에서 벗어나는 것이 정상. 방향(시뮬<실측)은 복원수요>실판매(품절 복원)와 정합 — proxy 신뢰도는 "구조적 차이는 설명 가능, 정량 대조는 실발주 수령 후" 수준.
-- **baseline proxy 특성화**: stockout_share=0.924(store_gw01 TARGET_CATEGORIES daily의 is_stockout 비율 — 생산=판매+폐기 항등식이 복원분만큼 깨지는 item-day가 다수), negative_waste_share=0.027(재고정보 폐기량 음수 2,702 / 전체 99,357행).
+- **calibration 초과율 P(demand>order)=0.636 (nominal 1−α=0.15)**: q0.85 발주가 복원수요 대비 **심각한 과소발주** — 목표(15%)의 4배 이상이 order<demand. 예측 편향 WPE=−0.261(발주가 복원수요보다 26% 아래)과 정합. conformal 보정 별도 spec에서 다룰 신호. (진짜 under-calibration인지 harness 버그인지는 아래 "calibration 진단" α-sweep로 검증.)
+- **waste sanity ratio(simulated/actual)=0.652** (actual_total=19,614 / simulated_total=12,784, n_rows=13,554): 시뮬 폐기가 실측의 65% 수준. **음수 폐기 clip 적용 후** 값이다 — clip 전 raw(actual_total=18,843, ratio=0.678) 대비 음수 2,702행이 0으로 올라가 actual_total이 상승(18,843→19,614)하고 ratio가 하락(0.678→0.652). baseline=생산량 proxy 하에서 시뮬 폐기(생산−복원수요)와 실측 폐기(생산−판매)는 복원분만큼 구조적으로 다르므로 1에서 벗어나는 것이 정상. 방향(시뮬<실측)은 복원수요>실판매(품절 복원)와 정합 — proxy 신뢰도는 "구조적 차이는 설명 가능, 정량 대조는 실발주 수령 후" 수준.
+- **baseline proxy 특성화**: stockout_share=0.924(store_gw01 TARGET_CATEGORIES daily의 is_stockout 비율 — 생산=판매+폐기 항등식이 복원분만큼 깨지는 item-day가 다수), negative_waste_share=0.027(재고정보 폐기량 음수 2,702 / 전체 99,357행 — 이번 실행에서 clip-at-0 적용됨).
+
+### calibration 진단 — 진짜 under-calibration (α-sweep로 확정)
+
+초과율 0.636이 harness 배선 버그가 아니라 **모델의 실제 under-calibration**임을 최근 fold 단일-fold α-sweep로 검증했다:
+
+| α (production_quantile) | exceedance P(demand>order) | pred mean |
+|---|---|---|
+| 0.50 | 0.861 | 6.47 |
+| 0.85 | 0.687 | 10.13 |
+| 0.95 | 0.538 | 12.60 |
+| 0.99 | 0.354 | 15.92 |
+
+- **exceedance가 α에 대해 매끄럽고 단조**로 감소하고 예측값이 교차하지 않는다 → quantile objective가 올바르게 배선됨(harness/파이프라인 버그 아님). α를 올리면 발주가 커지고 초과율이 규칙적으로 내려간다.
+- **그럼에도 α=0.99조차 초과율 0.354에 머문다** → 모델이 타깃의 tail을 덮지 못한다. 극단 quantile까지 밀어도 nominal 0.01 근처에 못 간다 = 신호 부족.
+- **근본 원인**: 타깃 `potential_demand`가 최대 3× 배율 기반 복원(reconstruction)이고, 대상 매장의 일 품절률이 ~91–99%라 복원분 분산이 크다. day-ahead feature와 타깃의 상관은 ~0.25–0.43에 불과해 복원된 수요 분산을 예측할 신호가 없다.
+- **국소성**: 과거 conformal 파이프라인이 (덜 noisy한) 다른 타깃에서 near-nominal coverage에 도달한 바 있다 → 미스캘리브레이션은 quantile 방법 자체가 아니라 **이 타깃의 noise 구조에 국한**된 문제.
 
 ### 해석 — 8주 데모 슬라이스가 full-window에서 유지되지 않는다
 
@@ -85,9 +103,9 @@ uv run bakery prospective-eval --source real --store-id store_gw01 \
 
 ### Phase 1 de-risk 반영 caveat
 
-- **음수 폐기 clip은 이번 실행에 미적용**: `handle_negative_waste`(clip-at-0) primitive는 존재하나 prospective 경로(`_assemble_real_rows`)에 아직 배선되지 않았다. 따라서 waste sanity의 actual_total=18,843은 **raw waste_qty**(음수 미clip) 합이다. 음수 특성만 별도 측정: n_negative=2,702, min=−31.0(store_gw01 재고정보 99,357행 기준). actual-waste 정량 대조 전에 clip 배선 필요.
+- **음수 폐기 clip 이제 적용됨**(`03d3146`, `_real_prospective_inputs`에서 `handle_negative_waste(policy="clip")` 배선): 이번 실행 로그 `negative waste clipped: {'policy':'clip', 'n_negative':2702, 'min_value':-31.0}`. clip-at-0 후 음수 2,702행이 0으로 올라가 waste sanity의 actual_total=19,614(clip 전 18,843), ratio=0.652(clip 전 0.678). actual-waste 정량 대조는 이제 clip된 waste_qty 기준.
 - **baseline=생산량 proxy**, 실발주 대조는 전향 단계 — swap 지점 준비됨(`select_base_order(source=...)`, 현재 'production'만 지원).
-- **calibration은 진단만** — P(demand>order) 초과율 리포트일 뿐 conformal 보정 구현은 별도 spec.
+- **calibration은 진단만** — P(demand>order) 초과율 리포트 + 위 α-sweep 원인규명까지가 이 문서 범위. conformal 보정 **구현은 별도 spec으로 이연**.
 - **단일 매장(광교)** — 학습필터/merge가 store_id 미적용(단일매장 무해), 다매장 전 정리 필요.
 
 ## 다음
