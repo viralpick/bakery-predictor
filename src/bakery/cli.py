@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date as Date
 from pathlib import Path
 
+import click
 import pandas as pd
 import typer
 from rich.console import Console
@@ -1853,6 +1854,8 @@ def _category_order_predictions(
 ) -> pd.DataFrame:
     """v4 카테고리 스택: build_category_daily → fold별 q총합(Task1) → distribute_total 배분
     → item별 our_order. item 경로(_our_order_predictions)와 동일 [item_id,date,fold,our_order]."""
+    # build_category_daily()는 store-agnostic(parquet 전체 읽음) — 단일매장 데이터셋 +
+    # _load_real_daily의 단일매장 가드 덕에 안전. 다매장 확장 시 store_id 필터링 재검토 필요.
     features = build_features(build_category_daily(), target_col="adjusted_demand_unit")
     totals = _category_total_fold_predictions(
         features, production_quantile=production_quantile,
@@ -2010,7 +2013,10 @@ def cmd_prospective_eval(
         8, help="our_order backtest 검증(최근) 기간(주) — real 소스만 사용, 5년 전체 대신 최근 구간으로 제한"
     ),
     n_folds: int = typer.Option(1, help="full-window 회고 fold 수(real 소스). 1=단일창(기존)"),
-    order_level: str = typer.Option("item", help="item(기존 v2 LGBM) | category(v4 총합→배분)"),
+    order_level: str = typer.Option(
+        "item", help="item(기존 v2 LGBM) | category(v4 총합→배분)",
+        click_type=click.Choice(["item", "category"]),
+    ),
     out_csv: str = typer.Option("reports/prospective_kpi.csv"),
 ) -> None:
     """우리 발주 추천 vs 현행 발주를 KPI(폐기/매진시각/매진률)로 비교.
