@@ -18,7 +18,7 @@ from .data.weather import load_weather_forecast_from_local
 from .evaluation.backtest import aggregate_by_model, per_category_wape, run_backtest
 from .evaluation.classifier_metrics import base_rate, precision_at_k, recall_at_k, roc_auc
 from .evaluation.diagnostics import decoupling_score
-from .evaluation.metrics import quantile_exceedance_rate, wpe
+from .evaluation.metrics import quantile_exceedance_rate, wape, wpe
 from .evaluation.prospective import (
     aggregate_fold_kpis,
     build_arrival_profile,
@@ -2070,9 +2070,12 @@ def cmd_prospective_eval(
             pd_sum=("potential_demand", "sum"), order_sum=("our_order", "sum"),
         )
         cat_exceed = float((by_date["pd_sum"] > by_date["order_sum"]).mean())
+        cat_wape = wape(by_date["pd_sum"].to_numpy(), by_date["order_sum"].to_numpy())
+        cat_wpe = wpe(by_date["pd_sum"].to_numpy(), by_date["order_sum"].to_numpy())
         console.print(
             f"[cyan]category calibration[/] 초과율 P(Σdemand>Σorder)={cat_exceed:.3f} "
-            f"(nominal 1−q={1 - production_quantile:.2f}), {len(by_date)} dates"
+            f"(nominal 1−q={1 - production_quantile:.2f}) | WAPE={cat_wape:.3f} WPE={cat_wpe:+.3f}, "
+            f"{len(by_date)} dates"
         )
     console.print(f"[green]wrote[/] {out_path}")
 
