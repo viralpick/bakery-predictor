@@ -108,6 +108,60 @@ uv run bakery prospective-eval --source real --store-id store_gw01 \
 - **calibration은 진단만** — P(demand>order) 초과율 리포트 + 위 α-sweep 원인규명까지가 이 문서 범위. conformal 보정 **구현은 별도 spec으로 이연**.
 - **단일 매장(광교)** — 학습필터/merge가 store_id 미적용(단일매장 무해), 다매장 전 정리 필요.
 
+## 카테고리-레벨 재측정 (v4 통합 총합 q0.85 → 품목 배분)
+
+작성 2026-07-07. 재현:
+```bash
+uv run bakery prospective-eval --source real --store-id store_gw01 \
+  --production-quantile 0.85 --our-order-val-weeks 8 --n-folds 8 \
+  --order-level category --out-csv reports/prospective_kpi_category.csv
+```
+
+n_folds=8 그대로 온전히 채점됨 (min_train 365일 + 8×8주 창이 실데이터 길이에 맞음, drop 없이 진행). 실행 로그: `category our_order 8 fold(s) × 8주, q=0.85, 448 dates × 56 items` / `fold 컬럼 보존됨: [0,1,2,3,4,5,6,7]` / `scored item-days: 13,529 / 62,960 (dropped 49,431 outside backtest val window)` — item-level 절(13,554/62,960)과 거의 동일한 창(±25 item-day, 카테고리→품목 배분 후 유효 행수 차이).
+
+### fold별 Δ (우리 카테고리 발주 → 품목 배분 − 아티제 생산량)
+
+| fold | waste_cost_krw | lost_margin_krw | stockout_rate | soldout_median_h |
+|---|---|---|---|---|
+| 0 | −1,000,865 | +14,605,010 | +0.0993 | −1.545 |
+| 1 | −691,390 | +8,826,346 | +0.0755 | −1.049 |
+| 2 | −875,838 | +3,828,709 | +0.0593 | −1.326 |
+| 3 | −1,067,160 | +5,306,932 | +0.0863 | −0.984 |
+| 4 | −932,719 | +5,036,037 | +0.0988 | −0.440 |
+| 5 | −974,199 | +6,033,804 | +0.0989 | −1.603 |
+| 6 | −1,209,204 | +5,832,561 | +0.1065 | −1.821 |
+| 7 | −435,638 | +4,529,871 | +0.0459 | −2.040 |
+
+### 집계 side-by-side (mean Δ ± 95% CI, n=8 fold)
+
+| Δ (우리−아티제) | item-level (기존) | category-level (신규) |
+|---|---|---|
+| stockout_rate | −0.0149 [−0.0704, +0.0406] | **+0.0838 [+0.0687, +0.0989]** |
+| waste_cost_krw | +477,302 [−224,509, +1,179,113] | **−898,377 [−1,064,029, −732,724]** |
+| soldout_median_h | −2.028 [−2.801, −1.255] | −1.351 [−1.707, −0.995] |
+| lost_margin_krw | +6,539,421 [+4,109,184, +8,969,658] | +6,749,909 [+4,323,118, +9,176,701] |
+| **calibration 초과율**(item-day, P(demand>order)) | **0.636** | **0.738** (nominal 1−q=0.15) |
+| 예측 편향 WPE(item-day) | −0.261 | −0.306 |
+
+추가로 category-level에서만 나오는 카테고리-일 단위 진단(품목 배분 이전, Σdemand vs Σorder): **초과율 P(Σdemand>Σorder)=0.900, WAPE=0.316, WPE=−0.306, 448 dates** (nominal 1−q=0.15). WPE가 item-day 절과 정확히 −0.306으로 일치 — WPE=Σ(order−demand)/Σdemand는 합계 비율이라 품목 배분 전/후 값이 불변(배선 정합성 확인, 버그 아님).
+
+waste sanity(category run): `{'actual_total': 19520.0, 'simulated_total': 12762.15, 'ratio': 0.654, 'n_rows': 13529}` — item-level 절의 0.652(actual 19,614/simulated 12,784)와 거의 동일. ρ_DS(이번 실행, full-window): bread 0.1751 / pastry 0.1252 / sandwich 0.1185 (8주 단일-fold 절의 0.117/0.046/0.000보다 전 카테고리에서 상승 — full-window에서 품절-복원수요 잔여 상관이 더 뚜렷해짐, 별도 조사 후보).
+
+### 해석 — 카테고리-레벨이 item-level을 이기지 못한다 (target confound가 지배적)
+
+- **폐기는 줄지만(−0.90M, CI 전 구간 <0, robust) 매진은 늘어난다(+0.084, CI 전 구간 >0, robust)** — item-level에서는 둘 다 CI가 0을 가로질러 방향 불확실이었는데, category-level은 정반대 방향(적게 만들고 더 자주 매진)으로 **명확하게** 갈린다. newsvendor trade-off가 "덜 발주" 쪽으로 뚜렷하게 밀린 것.
+- **calibration이 개선되지 않고 악화된다**: item-day 기준 초과율 0.636→0.738, 카테고리-총합 기준으로는 0.900까지 올라간다(nominal 0.15 대비 6배). WPE도 −0.261→−0.306으로 편향이 더 깊어진다.
+- **근본 원인 = target confound (버그 아님, 문서화된 예상 결과)**: 카테고리 발주는 `adjusted_demand ≈ normal + closing×0.5`(마감할인 실수요 조정 타깃)로 학습된 v4 category_total 모델의 출력이고, 여기서 평가 yardstick은 `potential_demand`(품절 복원, 마감할인 조정 없음)다. adjusted_demand는 구조적으로 potential_demand보다 낮은 스케일이므로 — 카테고리 총합 자체가 이미 "덜" 발주하게 설계된 타깃이고, 여기에 q0.85 quantile까지 겹쳐 item-level보다 더 심하게 과소발주한다. 이는 브리핑에서 예고한 그대로다.
+- **lost_margin_krw과 soldout_median_h는 두 경로 모두 나쁘다**: lost_margin은 두 경로 모두 CI 전 구간 양수로 비슷한 규모(+6.5M vs +6.7M) — 카테고리 배분이 이 KPI를 고치지 못한다. soldout_median_h는 두 경로 모두 robust 음수(더 이르게 매진)지만 category가 약간 덜 나쁘다(−1.35h vs −2.03h) — 유일하게 category가 부분적으로 나은 지표지만 여전히 KPI 목표(매진시각↑)에 역행.
+- **결론(honest)**: 카테고리-레벨 재측정은 item-level 대비 **더 나은 결과를 보여주지 않는다**. waste_cost 한 축만 방향이 뚜렷하게 좋아지고(감소), 그 대가로 stockout_rate가 뚜렷하게 나빠지며, calibration/WPE는 악화되고, lost_margin·soldout_median_h는 그대로 나쁘다. 아티제를 이기는 근거로 쓸 수 없다.
+
+### caveat
+
+- **target confound가 지배적 원인**(위 해석 참조) — 발주 target(adjusted_demand)과 평가 yardstick(potential_demand)의 스케일 불일치. 이 불일치를 통제한 apples-to-apples 비교(예: adjusted_demand를 yardstick으로 재평가)는 이 실행 범위 밖.
+- **v4 카테고리 정의 = bread·pastry·sandwich 통합 총합** — "한 묶음" 수요로 모델링, 카테고리 총합을 품목 비율(`item_proportion`, pre-cutoff 계산)로 배분. 배분오차(총합은 맞아도 품목 단위에서 틀릴 가능성)는 별도 미검증.
+- **baseline = 생산량 proxy** — item-level 절과 동일한 한계(실제 아티제 발주 아님, 전향적 실데이터 수령 시 교체 지점 준비됨).
+- **n=8 fold, 정규근사 CI** — item-level과 동일한 표본 크기·근사 한계.
+
 ## 다음
 
-실데이터(전향적 운영 피드) 수령 시: (a) baseline을 실제 발주로 교체, (b) 음수 폐기 clip을 `_assemble_real_rows`에 배선 후 actual-waste sanity 확정, (c) 과소발주 교정 — production quantile 상향 또는 conformal calibration으로 P(demand>order)를 nominal 0.15로 수렴, (d) 실제 원가율로 순이익 우열 판정.
+실데이터(전향적 운영 피드) 수령 시: (a) baseline을 실제 발주로 교체, (b) 음수 폐기 clip을 `_assemble_real_rows`에 배선 후 actual-waste sanity 확정, (c) 과소발주 교정 — production quantile 상향 또는 conformal calibration으로 P(demand>order)를 nominal 0.15로 수렴, (d) 실제 원가율로 순이익 우열 판정, (e) 카테고리-레벨 target confound 해소(adjusted_demand 기준 재평가 또는 category_total 타깃을 potential_demand로 재학습) 후 item vs category 재대조.
