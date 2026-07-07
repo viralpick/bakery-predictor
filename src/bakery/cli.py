@@ -1934,17 +1934,24 @@ def _fill_our_order(rows: pd.DataFrame, predictions: pd.DataFrame) -> pd.DataFra
 
 def _real_prospective_inputs(
     store_id: str, *, production_quantile: float = 0.85, val_weeks: int = 8, n_folds: int = 1,
+    order_level: str = "item",
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
     """실데이터 조립: bonavi_daily + 재고정보(생산량/폐기량) join +
-    our_order=production-quantile backtest 예측(최근 n_folds×val_weeks만 채움, Task C)."""
+    our_order=production-quantile backtest 예측(최근 n_folds×val_weeks만 채움, Task C).
+    order_level="category"면 v4 카테고리 총합→배분 경로(_category_order_predictions) 사용."""
     daily = _load_real_daily(store_id)
     inventory = load_inventory(REAL_INVENTORY_XLSX_PATH, store_id)
     inventory, waste_report = handle_negative_waste(inventory, policy="clip")
     console.print(f"[cyan]negative waste[/] clipped: {waste_report}")
     rows = _assemble_real_rows(daily, inventory)
-    predictions = _our_order_predictions(
-        store_id, production_quantile=production_quantile, val_weeks=val_weeks, n_folds=n_folds
-    )
+    if order_level == "category":
+        predictions = _category_order_predictions(
+            store_id, production_quantile=production_quantile, val_weeks=val_weeks, n_folds=n_folds
+        )
+    else:
+        predictions = _our_order_predictions(
+            store_id, production_quantile=production_quantile, val_weeks=val_weeks, n_folds=n_folds
+        )
     rows = _fill_our_order(rows, predictions)
     receipts = _load_real_receipts(set(rows["item_id"]))
     unit_prices = _load_unit_prices(REAL_INVENTORY_XLSX_PATH)
@@ -1954,13 +1961,15 @@ def _real_prospective_inputs(
 def _load_prospective_inputs(
     source: str, store_id: str, *,
     production_quantile: float = 0.85, val_weeks: int = 8, n_folds: int = 1,
+    order_level: str = "item",
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
-    """(rows, receipts, unit_prices) 반환. production_quantile/val_weeks/n_folds는 real 소스만 사용."""
+    """(rows, receipts, unit_prices) 반환. production_quantile/val_weeks/n_folds/order_level은 real 소스만 사용."""
     if source == "synthetic":
         return _synthetic_prospective_inputs()
     if source == "real":
         return _real_prospective_inputs(
-            store_id, production_quantile=production_quantile, val_weeks=val_weeks, n_folds=n_folds
+            store_id, production_quantile=production_quantile, val_weeks=val_weeks,
+            n_folds=n_folds, order_level=order_level,
         )
     raise ValueError(f"unknown source: {source!r} (expected 'synthetic' or 'real')")
 
@@ -2001,6 +2010,7 @@ def cmd_prospective_eval(
         8, help="our_order backtest 검증(최근) 기간(주) — real 소스만 사용, 5년 전체 대신 최근 구간으로 제한"
     ),
     n_folds: int = typer.Option(1, help="full-window 회고 fold 수(real 소스). 1=단일창(기존)"),
+    order_level: str = typer.Option("item", help="item(기존 v2 LGBM) | category(v4 총합→배분)"),
     out_csv: str = typer.Option("reports/prospective_kpi.csv"),
 ) -> None:
     """우리 발주 추천 vs 현행 발주를 KPI(폐기/매진시각/매진률)로 비교.
@@ -2012,6 +2022,7 @@ def cmd_prospective_eval(
     rows, receipts, unit_prices = _load_prospective_inputs(
         source, store_id,
         production_quantile=production_quantile, val_weeks=our_order_val_weeks, n_folds=n_folds,
+        order_level=order_level,
     )
     profiles = build_arrival_profile(
         receipts, group_cols=["item_id"],
@@ -2054,6 +2065,15 @@ def cmd_prospective_eval(
         console.print(f"[cyan]calibration[/] 초과율 P(demand>order)={exceed:.3f} "
                       f"(nominal 1−α={1 - production_quantile:.2f})")
         console.print(f"[cyan]waste sanity[/] {compare_actual_vs_simulated_waste(rows, base)}")
+    if source == "real" and order_level == "category":
+        by_date = rows.groupby("date").agg(
+            pd_sum=("potential_demand", "sum"), order_sum=("our_order", "sum"),
+        )
+        cat_exceed = float((by_date["pd_sum"] > by_date["order_sum"]).mean())
+        console.print(
+            f"[cyan]category calibration[/] 초과율 P(Σdemand>Σorder)={cat_exceed:.3f} "
+            f"(nominal 1−q={1 - production_quantile:.2f}), {len(by_date)} dates"
+        )
     console.print(f"[green]wrote[/] {out_path}")
 
 
