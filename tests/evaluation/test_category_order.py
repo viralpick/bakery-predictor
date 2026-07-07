@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from bakery.cli import _category_total_fold_predictions
+from bakery.models.item_proportion import distribute_total
 
 
 def _synth_category_features(n_days: int) -> pd.DataFrame:
@@ -34,3 +35,20 @@ def test_fold_predictions_raises_when_insufficient_days():
         assert False, "expected ValueError"
     except ValueError:
         pass
+
+
+def test_distribute_total_preserves_category_sum():
+    # history: 두 품목, cutoff 이전 판매로 비율 형성
+    hist = pd.DataFrame({
+        "date": pd.to_datetime(["2024-01-10", "2024-01-10", "2024-01-20", "2024-01-20"]),
+        "item_id": ["a", "b", "a", "b"],
+        "category_id": ["bread", "bread", "bread", "bread"],
+        "sold_units": [10, 30, 10, 30],
+        "is_stockout": [False, False, False, False],
+        "stockout_time": [pd.NaT] * 4,
+    })
+    totals = pd.Series({pd.Timestamp("2024-02-01"): 100.0})
+    res = distribute_total(hist, totals)
+    # 배분 보존: 그 날 품목 발주 합 == 카테고리 총합.
+    day_sum = res.quantities.groupby("date")["qty"].sum().iloc[0]
+    assert round(day_sum, 6) == 100.0

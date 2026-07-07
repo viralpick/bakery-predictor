@@ -1848,6 +1848,32 @@ def _category_total_fold_predictions(
     return pd.concat(chunks, ignore_index=True)
 
 
+def _category_order_predictions(
+    store_id: str, *, production_quantile: float = 0.85, val_weeks: int = 8, n_folds: int = 1,
+) -> pd.DataFrame:
+    """v4 카테고리 스택: build_category_daily → fold별 q총합(Task1) → distribute_total 배분
+    → item별 our_order. item 경로(_our_order_predictions)와 동일 [item_id,date,fold,our_order]."""
+    features = build_features(build_category_daily(), target_col="adjusted_demand_unit")
+    totals = _category_total_fold_predictions(
+        features, production_quantile=production_quantile,
+        horizon_days=val_weeks * 7, n_folds=n_folds,
+    )
+    daily = _load_real_daily(store_id)          # 배분 비율 history (compute_proportions가 <date만 사용)
+    chunks = []
+    for fold, g in totals.groupby("fold"):
+        res = distribute_total(daily, g.set_index("date")["total_order"])
+        q = res.quantities.rename(columns={"qty": "our_order"})
+        q["fold"] = int(fold)
+        chunks.append(q[["item_id", "date", "fold", "our_order"]])
+    preds = pd.concat(chunks, ignore_index=True)
+    preds["item_id"] = preds["item_id"].astype(str)
+    console.print(
+        f"[cyan]category our_order[/] {n_folds} fold(s) × {val_weeks}주, q={production_quantile}, "
+        f"{preds['date'].nunique()} dates × {preds['item_id'].nunique()} items"
+    )
+    return preds
+
+
 def _quantile_backtest_predictions(
     daily: pd.DataFrame, *, val_weeks: int, production_quantile: float, n_folds: int = 1,
 ) -> tuple[pd.DataFrame, list[SplitWindow]]:
