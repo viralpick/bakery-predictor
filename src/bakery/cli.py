@@ -30,7 +30,7 @@ from .evaluation.prospective import (
 )
 from .evaluation.split import SplitWindow, apply_split, generate_time_splits
 from .features.calendar_features import add_calendar_features
-from .features.category_aggregate import TARGET_CATEGORIES
+from .features.category_aggregate import TARGET_CATEGORIES, build_category_daily, build_features
 from .features.competitor_features import (
     add_competitor_features,
     compute_competitor_features,
@@ -61,6 +61,8 @@ from .ingest import (
 )
 from .ingest.inventory import load_inventory, handle_negative_waste
 from .ingest.store_mapping import load_store_mapping
+from .models.category_total import fit_category_total
+from .models.item_proportion import distribute_total
 from .models.lightgbm_regressor import VALID_FEATURE_SETS, GlobalLGBM, LGBMParams
 from .models.moving_average import MovingAverage
 from .models.seasonal_naive import SeasonalNaive
@@ -1816,6 +1818,34 @@ def _load_unit_prices(xlsx_path: str) -> dict[str, float]:
     items["item_id"] = items["품목코드"].astype(str)
     items["판매단가"] = pd.to_numeric(items["판매단가"], errors="coerce")
     return items.set_index("item_id")["판매단가"].fillna(4000.0).to_dict()
+
+
+def _category_total_fold_predictions(
+    features: pd.DataFrame, *, production_quantile: float, horizon_days: int,
+    n_folds: int, target_col: str = "adjusted_demand_unit", min_train_days: int = 365,
+) -> pd.DataFrame:
+    """expanding-window fold별 q{production_quantile} 카테고리 총합 발주.
+
+    category_total.expanding_window_backtest의 leakage-safe 패턴(train=이전/test=이후
+    iloc 분할, sorted date 1행/1일)을 따르되 production 예측을 test date별로 반환한다.
+    """
+    import numpy as np
+
+    df = features.sort_values("date").dropna().reset_index(drop=True)
+    total = len(df)
+    if total < min_train_days + n_folds * horizon_days:
+        raise ValueError(f"not enough category-days: {total} < {min_train_days + n_folds * horizon_days}")
+    chunks = []
+    for k in range(n_folds):
+        test_end = total - k * horizon_days
+        test_start = test_end - horizon_days
+        model = fit_category_total(
+            df.iloc[:test_start], target_col=target_col, production_q=production_quantile,
+        )
+        test_df = df.iloc[test_start:test_end]
+        order = np.clip(model.predict_production(test_df), 0.0, None)
+        chunks.append(pd.DataFrame({"date": test_df["date"].to_numpy(), "fold": k, "total_order": order}))
+    return pd.concat(chunks, ignore_index=True)
 
 
 def _quantile_backtest_predictions(
