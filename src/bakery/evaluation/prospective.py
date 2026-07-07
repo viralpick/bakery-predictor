@@ -143,3 +143,18 @@ def compare_policies(our_kpis: pd.DataFrame, base_kpis: pd.DataFrame) -> pd.Data
         {"policy": "baseline", **base},
         {"policy": "delta", **delta},
     ])
+
+
+def compare_actual_vs_simulated_waste(
+    rows: pd.DataFrame, base_kpis: pd.DataFrame
+) -> dict:
+    """실측 폐기량(rows.waste_qty) 총합 vs 시뮬 폐기(base_kpis.waste_units) 총합 대조.
+
+    baseline 발주=생산량이므로 시뮬 폐기(생산−복원수요)와 실측 폐기(생산−판매)는
+    복원분만큼 구조적으로 다르다. ratio가 1에서 크게 벗어나면 시뮬/복원 가정 재점검 신호.
+    """
+    actual = float(pd.to_numeric(rows["waste_qty"], errors="coerce").fillna(0.0).sum())
+    simulated = float(base_kpis["waste_units"].sum())
+    ratio = simulated / actual if actual != 0 else float("nan")
+    return {"actual_total": actual, "simulated_total": simulated,
+            "ratio": ratio, "n_rows": int(len(rows))}
