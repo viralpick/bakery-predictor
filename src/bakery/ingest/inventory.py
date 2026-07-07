@@ -43,6 +43,28 @@ def _normalize_inventory(raw: pd.DataFrame, store_code: str) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+def handle_negative_waste(
+    inv: pd.DataFrame, *, policy: str = "clip"
+) -> tuple[pd.DataFrame, dict]:
+    """재고정보 폐기량 음수(반품/보정 추정) 처리 + 리포트.
+
+    광교 실데이터에 음수 ~3.3%(min −31) 관측. actual-waste sanity(Task 2) 전에
+    반드시 통과시킨다. 현재 policy는 clip-at-0만 지원(음수를 반품으로 보고 폐기 0 처리).
+    """
+    if policy != "clip":
+        raise ValueError(f"unsupported policy: {policy!r} (only 'clip')")
+    w = pd.to_numeric(inv["waste_qty"], errors="coerce")
+    report = {
+        "policy": policy,
+        "n_negative": int((w < 0).sum()),
+        "n_total": int(len(w)),
+        "min_value": float(w.min()) if len(w) else 0.0,
+    }
+    out = inv.copy()
+    out["waste_qty"] = w.clip(lower=0)
+    return out, report
+
+
 def load_inventory(xlsx_path: str, store_id: str) -> pd.DataFrame:
     """Load inventory data from 재고정보 sheet, filtered to one store.
 

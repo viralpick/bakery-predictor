@@ -136,15 +136,18 @@ def test_quantile_backtest_predictions_structural_properties():
     단언 대신 구조 속성만 검증한다."""
     daily = _enriched_v2_toy()
 
-    preds, window = _quantile_backtest_predictions(
+    preds, windows = _quantile_backtest_predictions(
         daily, val_weeks=1, production_quantile=0.85
     )
 
+    assert len(windows) == 1
+    window = windows[0]
     val_days = pd.date_range(window.val_start, window.val_end, freq="D")
     n_items = daily["item_id"].nunique()
     assert len(preds) == len(val_days) * n_items
     assert preds["our_order"].notna().all()
     assert (preds["our_order"] >= 0.0).all()
+    assert set(preds["fold"].unique()) == {0}
 
 
 def test_assemble_real_rows_drops_item_days_without_inventory_match():
