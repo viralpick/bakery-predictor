@@ -158,3 +158,23 @@ def compare_actual_vs_simulated_waste(
     ratio = simulated / actual if actual != 0 else float("nan")
     return {"actual_total": actual, "simulated_total": simulated,
             "ratio": ratio, "n_rows": int(len(rows))}
+
+
+def characterize_baseline_proxy(rows: pd.DataFrame, waste_report: dict) -> dict:
+    """'생산량 ≈ 발주' proxy를 깨는 요인 정량화(실발주 대조는 전향 단계).
+
+    - stockout_share: 생산=판매+폐기 항등식이 복원분만큼 깨지는 item-day 비율
+    - negative_waste_share: 반품/보정으로 clip된 비율(Task 1 report)
+    """
+    n = int(len(rows))
+    stockout_share = float(rows["is_stockout"].astype(bool).mean()) if n else float("nan")
+    neg_share = waste_report["n_negative"] / n if n else float("nan")
+    return {
+        "n_item_days": n,
+        "stockout_share": stockout_share,
+        "negative_waste_share": float(neg_share),
+        "carryover_note": (
+            "base_order=생산량 proxy. 당일폐기 N 품목 이월·당일 재생산은 미분리 — "
+            "전향 실발주 피드 수령 시 select_base_order(source='order_feed')로 교체."
+        ),
+    }

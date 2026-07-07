@@ -1753,6 +1753,13 @@ REAL_ROWS_COLUMNS = [
 ]
 
 
+def select_base_order(merged: pd.DataFrame, *, source: str = "production") -> pd.Series:
+    """현행 발주 proxy 선택. 지금은 생산량만. 전향 실발주 수령 시 여기만 확장(swap 지점)."""
+    if source == "production":
+        return merged["production_qty"].astype(float)
+    raise ValueError(f"unsupported base_order source: {source!r} (only 'production' until 실발주 수령)")
+
+
 def _assemble_real_rows(daily: pd.DataFrame, inventory: pd.DataFrame) -> pd.DataFrame:
     """bonavi_daily(store/category 필터됨) + load_inventory(A) 결과를 (date,item_id) 조인.
 
@@ -1770,7 +1777,7 @@ def _assemble_real_rows(daily: pd.DataFrame, inventory: pd.DataFrame) -> pd.Data
         inv[["date", "item_id", "production_qty", "waste_qty"]],
         on=["date", "item_id"], how="inner",
     )
-    merged = merged.rename(columns={"production_qty": "base_order"})
+    merged["base_order"] = select_base_order(merged, source="production")
     return merged[REAL_ROWS_COLUMNS].reset_index(drop=True)
 
 
