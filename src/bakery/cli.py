@@ -59,7 +59,7 @@ from .ingest import (
     population_api,
     weather_api,
 )
-from .ingest.inventory import load_inventory
+from .ingest.inventory import load_inventory, handle_negative_waste
 from .ingest.store_mapping import load_store_mapping
 from .models.lightgbm_regressor import VALID_FEATURE_SETS, GlobalLGBM, LGBMParams
 from .models.moving_average import MovingAverage
@@ -1883,6 +1883,8 @@ def _real_prospective_inputs(
     our_order=production-quantile backtest 예측(최근 n_folds×val_weeks만 채움, Task C)."""
     daily = _load_real_daily(store_id)
     inventory = load_inventory(REAL_INVENTORY_XLSX_PATH, store_id)
+    inventory, waste_report = handle_negative_waste(inventory, policy="clip")
+    console.print(f"[cyan]negative waste[/] clipped: {waste_report}")
     rows = _assemble_real_rows(daily, inventory)
     predictions = _our_order_predictions(
         store_id, production_quantile=production_quantile, val_weeks=val_weeks, n_folds=n_folds
