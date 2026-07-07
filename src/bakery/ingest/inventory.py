@@ -57,6 +57,7 @@ def handle_negative_waste(
     report = {
         "policy": policy,
         "n_negative": int((w < 0).sum()),
+        "n_total": int(len(w)),
         "min_value": float(w.min()) if len(w) else 0.0,
     }
     out = inv.copy()

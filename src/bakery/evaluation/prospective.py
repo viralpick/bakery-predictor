@@ -192,11 +192,14 @@ def characterize_baseline_proxy(rows: pd.DataFrame, waste_report: dict) -> dict:
     """'생산량 ≈ 발주' proxy를 깨는 요인 정량화(실발주 대조는 전향 단계).
 
     - stockout_share: 생산=판매+폐기 항등식이 복원분만큼 깨지는 item-day 비율
+      (모집단: 평가 대상 `rows`)
     - negative_waste_share: 반품/보정으로 clip된 비율(Task 1 report)
+      (모집단: `waste_report`가 집계된 소스 인벤토리 전체 — `rows`와 scope가 다름)
     """
     n = int(len(rows))
     stockout_share = float(rows["is_stockout"].astype(bool).mean()) if n else float("nan")
-    neg_share = waste_report["n_negative"] / n if n else float("nan")
+    n_total = waste_report["n_total"]
+    neg_share = waste_report["n_negative"] / n_total if n_total else float("nan")
     return {
         "n_item_days": n,
         "stockout_share": stockout_share,
