@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date as Date
 from pathlib import Path
 
+import click
 import pandas as pd
 import typer
 from rich.console import Console
@@ -18,7 +19,7 @@ from .data.weather import load_weather_forecast_from_local
 from .evaluation.backtest import aggregate_by_model, per_category_wape, run_backtest
 from .evaluation.classifier_metrics import base_rate, precision_at_k, recall_at_k, roc_auc
 from .evaluation.diagnostics import decoupling_score
-from .evaluation.metrics import quantile_exceedance_rate, wpe
+from .evaluation.metrics import quantile_exceedance_rate, wape, wpe
 from .evaluation.prospective import (
     aggregate_fold_kpis,
     build_arrival_profile,
@@ -30,7 +31,7 @@ from .evaluation.prospective import (
 )
 from .evaluation.split import SplitWindow, apply_split, generate_time_splits
 from .features.calendar_features import add_calendar_features
-from .features.category_aggregate import TARGET_CATEGORIES
+from .features.category_aggregate import TARGET_CATEGORIES, build_category_daily, build_features
 from .features.competitor_features import (
     add_competitor_features,
     compute_competitor_features,
@@ -61,6 +62,8 @@ from .ingest import (
 )
 from .ingest.inventory import load_inventory, handle_negative_waste
 from .ingest.store_mapping import load_store_mapping
+from .models.category_total import fit_category_total
+from .models.item_proportion import distribute_total
 from .models.lightgbm_regressor import VALID_FEATURE_SETS, GlobalLGBM, LGBMParams
 from .models.moving_average import MovingAverage
 from .models.seasonal_naive import SeasonalNaive
@@ -1818,6 +1821,62 @@ def _load_unit_prices(xlsx_path: str) -> dict[str, float]:
     return items.set_index("item_id")["판매단가"].fillna(4000.0).to_dict()
 
 
+def _category_total_fold_predictions(
+    features: pd.DataFrame, *, production_quantile: float, horizon_days: int,
+    n_folds: int, target_col: str = "adjusted_demand_unit", min_train_days: int = 365,
+) -> pd.DataFrame:
+    """expanding-window fold별 q{production_quantile} 카테고리 총합 발주.
+
+    category_total.expanding_window_backtest의 leakage-safe 패턴(train=이전/test=이후
+    iloc 분할, sorted date 1행/1일)을 따르되 production 예측을 test date별로 반환한다.
+    """
+    import numpy as np
+
+    df = features.sort_values("date").dropna().reset_index(drop=True)
+    total = len(df)
+    if total < min_train_days + n_folds * horizon_days:
+        raise ValueError(f"not enough category-days: {total} < {min_train_days + n_folds * horizon_days}")
+    chunks = []
+    for k in range(n_folds):
+        test_end = total - k * horizon_days
+        test_start = test_end - horizon_days
+        model = fit_category_total(
+            df.iloc[:test_start], target_col=target_col, production_q=production_quantile,
+        )
+        test_df = df.iloc[test_start:test_end]
+        order = np.clip(model.predict_production(test_df), 0.0, None)
+        chunks.append(pd.DataFrame({"date": test_df["date"].to_numpy(), "fold": k, "total_order": order}))
+    return pd.concat(chunks, ignore_index=True)
+
+
+def _category_order_predictions(
+    store_id: str, *, production_quantile: float = 0.85, val_weeks: int = 8, n_folds: int = 1,
+) -> pd.DataFrame:
+    """v4 카테고리 스택: build_category_daily → fold별 q총합(Task1) → distribute_total 배분
+    → item별 our_order. item 경로(_our_order_predictions)와 동일 [item_id,date,fold,our_order]."""
+    # build_category_daily()는 store-agnostic(parquet 전체 읽음) — 단일매장 데이터셋 +
+    # _load_real_daily의 단일매장 가드 덕에 안전. 다매장 확장 시 store_id 필터링 재검토 필요.
+    features = build_features(build_category_daily(), target_col="adjusted_demand_unit")
+    totals = _category_total_fold_predictions(
+        features, production_quantile=production_quantile,
+        horizon_days=val_weeks * 7, n_folds=n_folds,
+    )
+    daily = _load_real_daily(store_id)          # 배분 비율 history (compute_proportions가 <date만 사용)
+    chunks = []
+    for fold, g in totals.groupby("fold"):
+        res = distribute_total(daily, g.set_index("date")["total_order"])
+        q = res.quantities.rename(columns={"qty": "our_order"})
+        q["fold"] = int(fold)
+        chunks.append(q[["item_id", "date", "fold", "our_order"]])
+    preds = pd.concat(chunks, ignore_index=True)
+    preds["item_id"] = preds["item_id"].astype(str)
+    console.print(
+        f"[cyan]category our_order[/] {n_folds} fold(s) × {val_weeks}주, q={production_quantile}, "
+        f"{preds['date'].nunique()} dates × {preds['item_id'].nunique()} items"
+    )
+    return preds
+
+
 def _quantile_backtest_predictions(
     daily: pd.DataFrame, *, val_weeks: int, production_quantile: float, n_folds: int = 1,
 ) -> tuple[pd.DataFrame, list[SplitWindow]]:
@@ -1878,17 +1937,24 @@ def _fill_our_order(rows: pd.DataFrame, predictions: pd.DataFrame) -> pd.DataFra
 
 def _real_prospective_inputs(
     store_id: str, *, production_quantile: float = 0.85, val_weeks: int = 8, n_folds: int = 1,
+    order_level: str = "item",
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
     """실데이터 조립: bonavi_daily + 재고정보(생산량/폐기량) join +
-    our_order=production-quantile backtest 예측(최근 n_folds×val_weeks만 채움, Task C)."""
+    our_order=production-quantile backtest 예측(최근 n_folds×val_weeks만 채움, Task C).
+    order_level="category"면 v4 카테고리 총합→배분 경로(_category_order_predictions) 사용."""
     daily = _load_real_daily(store_id)
     inventory = load_inventory(REAL_INVENTORY_XLSX_PATH, store_id)
     inventory, waste_report = handle_negative_waste(inventory, policy="clip")
     console.print(f"[cyan]negative waste[/] clipped: {waste_report}")
     rows = _assemble_real_rows(daily, inventory)
-    predictions = _our_order_predictions(
-        store_id, production_quantile=production_quantile, val_weeks=val_weeks, n_folds=n_folds
-    )
+    if order_level == "category":
+        predictions = _category_order_predictions(
+            store_id, production_quantile=production_quantile, val_weeks=val_weeks, n_folds=n_folds
+        )
+    else:
+        predictions = _our_order_predictions(
+            store_id, production_quantile=production_quantile, val_weeks=val_weeks, n_folds=n_folds
+        )
     rows = _fill_our_order(rows, predictions)
     receipts = _load_real_receipts(set(rows["item_id"]))
     unit_prices = _load_unit_prices(REAL_INVENTORY_XLSX_PATH)
@@ -1898,13 +1964,15 @@ def _real_prospective_inputs(
 def _load_prospective_inputs(
     source: str, store_id: str, *,
     production_quantile: float = 0.85, val_weeks: int = 8, n_folds: int = 1,
+    order_level: str = "item",
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
-    """(rows, receipts, unit_prices) 반환. production_quantile/val_weeks/n_folds는 real 소스만 사용."""
+    """(rows, receipts, unit_prices) 반환. production_quantile/val_weeks/n_folds/order_level은 real 소스만 사용."""
     if source == "synthetic":
         return _synthetic_prospective_inputs()
     if source == "real":
         return _real_prospective_inputs(
-            store_id, production_quantile=production_quantile, val_weeks=val_weeks, n_folds=n_folds
+            store_id, production_quantile=production_quantile, val_weeks=val_weeks,
+            n_folds=n_folds, order_level=order_level,
         )
     raise ValueError(f"unknown source: {source!r} (expected 'synthetic' or 'real')")
 
@@ -1945,6 +2013,10 @@ def cmd_prospective_eval(
         8, help="our_order backtest 검증(최근) 기간(주) — real 소스만 사용, 5년 전체 대신 최근 구간으로 제한"
     ),
     n_folds: int = typer.Option(1, help="full-window 회고 fold 수(real 소스). 1=단일창(기존)"),
+    order_level: str = typer.Option(
+        "item", help="item(기존 v2 LGBM) | category(v4 총합→배분)",
+        click_type=click.Choice(["item", "category"]),
+    ),
     out_csv: str = typer.Option("reports/prospective_kpi.csv"),
 ) -> None:
     """우리 발주 추천 vs 현행 발주를 KPI(폐기/매진시각/매진률)로 비교.
@@ -1956,6 +2028,7 @@ def cmd_prospective_eval(
     rows, receipts, unit_prices = _load_prospective_inputs(
         source, store_id,
         production_quantile=production_quantile, val_weeks=our_order_val_weeks, n_folds=n_folds,
+        order_level=order_level,
     )
     profiles = build_arrival_profile(
         receipts, group_cols=["item_id"],
@@ -1998,6 +2071,18 @@ def cmd_prospective_eval(
         console.print(f"[cyan]calibration[/] 초과율 P(demand>order)={exceed:.3f} "
                       f"(nominal 1−α={1 - production_quantile:.2f})")
         console.print(f"[cyan]waste sanity[/] {compare_actual_vs_simulated_waste(rows, base)}")
+    if source == "real" and order_level == "category":
+        by_date = rows.groupby("date").agg(
+            pd_sum=("potential_demand", "sum"), order_sum=("our_order", "sum"),
+        )
+        cat_exceed = float((by_date["pd_sum"] > by_date["order_sum"]).mean())
+        cat_wape = wape(by_date["pd_sum"].to_numpy(), by_date["order_sum"].to_numpy())
+        cat_wpe = wpe(by_date["pd_sum"].to_numpy(), by_date["order_sum"].to_numpy())
+        console.print(
+            f"[cyan]category calibration[/] 초과율 P(Σdemand>Σorder)={cat_exceed:.3f} "
+            f"(nominal 1−q={1 - production_quantile:.2f}) | WAPE={cat_wape:.3f} WPE={cat_wpe:+.3f}, "
+            f"{len(by_date)} dates"
+        )
     console.print(f"[green]wrote[/] {out_path}")
 
 
