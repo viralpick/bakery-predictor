@@ -42,6 +42,20 @@ def wpe(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float((y_pred - y_true).sum() / denom)
 
 
+def quantile_exceedance_rate(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """실측이 예측(q_α 발주)을 초과한 비율 = P(y_true > y_pred).
+
+    보정된 q_α 발주면 ≈ 1−α (q0.85 → ≈0.15). 이보다 크게 높으면 과소발주(매진↑),
+    낮으면 과대발주(폐기↑). WPE(부호 편향)와 짝으로 분포 편중을 진단한다."""
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    if y_true.shape != y_pred.shape:
+        raise ValueError(f"shape mismatch: y_true {y_true.shape} vs y_pred {y_pred.shape}")
+    if y_true.size == 0:
+        return float("nan")
+    return float(np.mean(y_true > y_pred))
+
+
 def grouped_wape(df: pd.DataFrame, by: list[str], *, y_col: str, yhat_col: str) -> pd.DataFrame:
     """Per-group WAPE (e.g., by=['store_id','item_id'] or ['category_id'])."""
     def _wape_row(g: pd.DataFrame) -> float:
