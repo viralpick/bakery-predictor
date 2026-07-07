@@ -145,6 +145,34 @@ def compare_policies(our_kpis: pd.DataFrame, base_kpis: pd.DataFrame) -> pd.Data
     ])
 
 
+def compare_policies_by_fold(
+    our_kpis: pd.DataFrame, base_kpis: pd.DataFrame
+) -> pd.DataFrame:
+    """fold별 Δ(우리−baseline) KPI. 각 프레임은 fold 컬럼을 가져야 한다."""
+    rows = []
+    for fold in sorted(our_kpis["fold"].unique()):
+        our = _summarize_policy(our_kpis[our_kpis["fold"] == fold])
+        base = _summarize_policy(base_kpis[base_kpis["fold"] == fold])
+        rows.append({"fold": int(fold), **{k: our[k] - base[k] for k in our}})
+    return pd.DataFrame(rows)
+
+
+def aggregate_fold_kpis(per_fold: pd.DataFrame, metric_cols: list[str]) -> pd.DataFrame:
+    """fold별 Δ를 metric별 mean ± 95%CI(정규근사)로 집계. fold 수 적음 — caveat 문서화."""
+    out = []
+    for col in metric_cols:
+        vals = per_fold[col].to_numpy(dtype=float)
+        vals = vals[~np.isnan(vals)]
+        n = int(len(vals))
+        mean = float(np.mean(vals)) if n else float("nan")
+        std = float(np.std(vals, ddof=1)) if n > 1 else float("nan")
+        sem = std / np.sqrt(n) if n > 1 else float("nan")
+        half = 1.96 * sem if n > 1 else float("nan")
+        out.append({"metric": col, "mean": mean, "std": std, "sem": sem, "n": n,
+                    "ci95_low": mean - half, "ci95_high": mean + half})
+    return pd.DataFrame(out)
+
+
 def compare_actual_vs_simulated_waste(
     rows: pd.DataFrame, base_kpis: pd.DataFrame
 ) -> dict:
