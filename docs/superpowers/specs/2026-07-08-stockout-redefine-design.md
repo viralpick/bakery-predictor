@@ -17,9 +17,9 @@
 
 ## 정의 (실 로더 경로만; synthetic 불변)
 
-- **is_stockout = (made > 0) AND (waste ≤ 0)** — 생산했고 폐기 남은 게 없음 = 다 팔림/진짜 소진. 음수 폐기(반품·보정 ~3.3%)는 ≤0로 묶어 "leftover 없음"으로 처리. (기존 92% → 예상 ~3%)
-- **stockout_time = 그날 마지막 실판매 timestamp** (`load_receipts`의 max), is_stockout일 때만. 아니면 NaT.
-- **재고정보(made/waste) 없는 item-day → is_stockout = False, stockout_time = NaT** (판단 불가 시 품절 주장 안 함).
+- **is_stockout = (made > 0) AND (waste ≤ 0)** — 생산했고 폐기 남은 게 없음 = 배치 완판/진짜 소진(검열 가능). 음수 폐기(반품·보정 3.2%)는 ≤0로 묶어 "leftover 없음"으로 처리. **실측: 기존 92% → ~60.5%** (폐기==0 58.1% + 폐기<0 3.2%, made>0 조건). ※92%는 "리필 포함 순간품절 1회+"였고(검열 아님), 60%는 "배치 완판"(올바른 검열 flag). ※주의: 이 60%는 **품목 레벨** 매진율이며, **카테고리 전체 조기소진(진짜 lost, 0.2%)과 다른 개념**.
+- **stockout_time = 그날 마지막 실판매 timestamp** (`load_receipts`의 max), is_stockout일 때만. 아니면 NaT. (신규 is_stockout item-day의 마지막판매 중앙 19시, 28%가 ≤16시)
+- **재고정보(made/waste) 없는 item-day → is_stockout = False, stockout_time = NaT.** 분석 결과 결측은 **0.1%(65/65,452)**, 전부 실판매 있는 **저볼륨·희소 품목**(재고추적 밖, 생산0-blank 아님) → 검열 확정 불가라 보수적으로 False. 집계 무영향.
 
 ## 데이터 흐름 (`build_daily` 수정)
 
@@ -34,8 +34,8 @@ attach_potential_demand(신규 is_stockout/stockout_time) → potential_demand
 
 ## potential_demand 처리 (컬럼 유지, 재계산)
 
-- 컬럼은 **유지**(schema 호환 + 향후). 교정된 is_stockout/stockout_time으로 자동 재계산 → **~97% 날은 sold_units와 동일**(is_stockout False라 보정 없음), ~3% item-소진일만 마지막판매시각 기준 복원.
-- **명시 문서화**: 흡수(W0) 하에서 **item-level 복원은 수요 target으로 부적합**(품목 소진 시 수요가 같은 카테고리 다른 품목으로 이동 → 복원은 double-count). 진짜 lost는 **카테고리 전체 조기소진 ~0.2%뿐**. **수요 target은 adjusted_demand**([[project_stockout_time_bug_and_adjusted_demand]]). potential_demand는 여기서 그 이상 손대지 않음(폐기/전환은 별건).
+- 컬럼은 **유지**(schema 호환 + 향후). 교정된 is_stockout/stockout_time으로 자동 재계산 → is_stockout False인 ~40%는 sold_units와 동일, is_stockout True인 ~60% 중 **조기매진분(28%가 ≤16시)에서 실제 복원**(마감 근처 매진은 보정 미미).
+- **명시 문서화**: 흡수(W0) 하에서 **item-level 복원은 수요 target으로 부적합**(품목 소진 60% 대부분은 수요가 같은 카테고리 다른 품목으로 이동 → 복원은 double-count). 진짜 lost는 **카테고리 전체 조기소진 ~0.2%뿐**. **수요 target은 adjusted_demand**([[project_stockout_time_bug_and_adjusted_demand]]). potential_demand는 여기서 그 이상 손대지 않음(폐기/전환은 별건).
 
 ## 로더 데이터 의존 (신규)
 
@@ -46,10 +46,10 @@ attach_potential_demand(신규 is_stockout/stockout_time) → potential_demand
 
 - 재생성: `format-bonavi` CLI로 bonavi_daily.parquet 갱신.
 - **검증(무언 축소 금지)**:
-  - is_stockout 비율 92% → **~3%** 확인.
+  - is_stockout 비율 92% → **~60%** 확인.
   - 전-품목-동일시각(09:05) 아티팩트 소멸: is_stockout 품목-일에서 stockout_time이 실판매 마지막과 정합(2h+ gap 비율 ≈ 0).
-  - is_stockout==True인 item-day는 waste≤0 (정의상 자명, sanity).
-  - potential_demand: ~97% == sold_units, 나머지 ≥ sold.
+  - is_stockout==True인 item-day는 waste≤0 & made>0 (정의상 자명, sanity).
+  - potential_demand: is_stockout False(~40%)는 == sold_units, 나머지는 ≥ sold.
 
 ## 명시적 비범위 (YAGNI)
 
@@ -67,4 +67,4 @@ attach_potential_demand(신규 is_stockout/stockout_time) → potential_demand
 
 ## 성공 기준
 
-재생성된 bonavi_daily.parquet에서 is_stockout ≈ 3%, stockout_time이 실제 마지막판매와 정합(조기 아티팩트 소멸), potential_demand ≈ sold(97%), leakage 그린. 재검증(하위 2) 착수 가능 상태.
+재생성된 bonavi_daily.parquet에서 is_stockout ≈ 60%(92%에서 하락), stockout_time이 실제 마지막판매와 정합(조기 09:05 아티팩트 소멸), potential_demand는 is_stockout False에서 == sold, leakage 그린. 재검증(하위 2) 착수 가능 상태.
