@@ -162,13 +162,18 @@ git commit -m "feat: assign_stockout_fields — leftover 기반 진짜 최종소
 ```python
     from ..ingest.inventory import load_inventory
     inv_store = rename_store_id or "store_gw01"
-    inventory = load_inventory(str(xlsx_path), inv_store)
+    # ⚠️ 재고정보(재고정보 시트)는 xlsx_path(0520 기본)에 없고 0526 파일에만 있다.
+    # build는 items/sales/receipts를 xlsx_path(0520)에서 읽고, inventory는 별도 0526에서 읽는다
+    # (cli.py의 bonavi_daily(0520)⋈inventory(REAL_INVENTORY_XLSX_PATH=0526) 패턴과 동일).
+    inventory = load_inventory(str(inventory_xlsx_path), inv_store)
     # 마지막 실판매 시각 (item-day별 max) — receipts_df에서
     last_sale = (
         receipts_df.groupby(["date", "item_id"], as_index=False)["timestamp"].max()
         .rename(columns={"timestamp": "last_sale_ts"})
     )
 ```
+
+**`build` 시그니처에 신규 파라미터 추가** — 상수 `INVENTORY_XLSX_DEFAULT = Path("data/internal/보나비 데이터_20260526.xlsx")`를 모듈 상단(XLSX_DEFAULT 근처)에 정의하고, `build(...)`에 `inventory_xlsx_path: Path | str = INVENTORY_XLSX_DEFAULT` 파라미터 추가. `cmd_format_bonavi`(cli.py)는 기본값 사용(인자 추가 불필요).
 그리고 `aggregate_daily(sales, items, stockouts, measured_profiles=...)` 호출을
 `aggregate_daily(sales, items, inventory, last_sale, measured_profiles=...)`로 교체.
 `load_stockouts` 함수 정의는 남겨둠(호출만 제거).

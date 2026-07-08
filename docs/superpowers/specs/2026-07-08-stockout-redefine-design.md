@@ -40,6 +40,7 @@ attach_potential_demand(신규 is_stockout/stockout_time) → potential_demand
 ## 로더 데이터 의존 (신규)
 
 - build_daily가 **재고정보**(load_inventory: date/item_id/production_qty/waste_qty)에 의존하게 됨. store-aware 유지(현재 광교 store_gw01 단일).
+- ⚠️ **재고정보 시트는 기본 xlsx(0520)에 없고 0526 파일에만 존재**. 따라서 `build`는 items/sales/receipts를 `xlsx_path`(0520)에서, **inventory는 별도 `inventory_xlsx_path`(기본 0526)에서** 로드한다(cli.py의 bonavi_daily(0520)⋈inventory(REAL_INVENTORY_XLSX_PATH=0526) 패턴과 동일). item_id/date는 두 파일 간 정합(기존 `_real_prospective_inputs` 머지로 검증됨).
 - 음수 폐기 clip은 기존 `handle_negative_waste`(ingest/inventory.py) 재사용.
 
 ## 재생성 + 검증
