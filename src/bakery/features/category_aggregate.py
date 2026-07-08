@@ -129,6 +129,34 @@ def build_category_daily(
     return CategoryDaily(df=agg, alpha=alpha)
 
 
+def build_item_adjusted_demand(
+    daily: pd.DataFrame,
+    discount_rows: pd.DataFrame | None = None,
+    alpha: float = DEFAULT_ALPHA,
+) -> pd.DataFrame:
+    """item-day별 adjusted_demand = sold_units − closing_qty × (1 − α) 를 추가.
+
+    adjusted = normal + closing×α = (sold − closing) + closing×α = sold − closing×(1−α).
+    closing 매칭 없는 item-day는 closing=0 → adjusted == sold_units.
+    당일 관측 label(leakage-safe). 입력은 변형하지 않는다.
+    """
+    if discount_rows is None:
+        discount_rows = load_sales_with_discount().closing_discount()
+    out = daily.copy()
+    out["item_id"] = out["item_id"].astype(str)
+    out["date"] = pd.to_datetime(out["date"])
+    cd = discount_rows.copy()
+    cd["item_id"] = cd["item_id"].astype(str)
+    cd["date"] = pd.to_datetime(cd["date"])
+    closing_qty = (
+        cd.groupby(["item_id", "date"])["qty"].sum().rename("closing_qty").reset_index()
+    )
+    out = out.merge(closing_qty, on=["item_id", "date"], how="left")
+    out["closing_qty"] = out["closing_qty"].fillna(0.0)
+    out["adjusted_demand"] = out["sold_units"] - out["closing_qty"] * (1.0 - alpha)
+    return out.drop(columns=["closing_qty"])
+
+
 # ---------------------------------------------------------------------------
 # Features
 # ---------------------------------------------------------------------------
