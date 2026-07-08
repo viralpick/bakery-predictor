@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from bakery.data.bonavi_loader import assign_stockout_fields
+from bakery.data.bonavi_loader import aggregate_daily, assign_stockout_fields
 
 
 def test_assign_stockout_fields_truth_table():
@@ -31,3 +31,55 @@ def test_assign_stockout_fields_missing_inventory_is_false():
     out = assign_stockout_fields(df)
     assert out["is_stockout"].tolist() == [False]
     assert pd.isna(out.loc[0, "stockout_time"])
+
+
+def test_aggregate_daily_wires_inventory_and_last_sale_into_stockout():
+    """End-to-end wiring test: aggregate_daily merges inventory (production/waste)
+    and last_sale (last_sale_ts) into assign_stockout_fields correctly. Guards
+    against a future column rename silently making everything is_stockout=False
+    with green CI (only the pure helper was tested before)."""
+    store_id = "1000000047"
+    date = pd.Timestamp("2024-01-01")
+
+    sales = pd.DataFrame({
+        "store_id": [store_id, store_id, store_id],
+        "item_id": ["A", "B", "C"],
+        "date": [date, date, date],
+        "qty": [5, 3, 2],
+    })
+    items = pd.DataFrame({
+        "item_id": ["A", "B", "C"],
+        "category_id": ["bread", "bread", "bread"],
+    })
+    # C is intentionally absent from inventory — models an item with no
+    # inventory record for the day.
+    inventory = pd.DataFrame({
+        "date": [date, date],
+        "item_id": ["A", "B"],
+        "production_qty": [10.0, 5.0],
+        "waste_qty": [0.0, 2.0],
+    })
+    last_sale = pd.DataFrame({
+        "date": [date, date, date],
+        "item_id": ["A", "B", "C"],
+        "last_sale_ts": [
+            pd.Timestamp("2024-01-01 21:30"),
+            pd.Timestamp("2024-01-01 20:00"),
+            pd.Timestamp("2024-01-01 18:00"),
+        ],
+    })
+
+    daily = aggregate_daily(sales, items, inventory, last_sale, measured_profiles=None)
+    by_item = daily.set_index("item_id")
+
+    # A: production>0 & waste<=0 → true stockout, stockout_time = last_sale_ts
+    assert by_item.loc["A", "is_stockout"] == True  # noqa: E712
+    assert by_item.loc["A", "stockout_time"] == pd.Timestamp("2024-01-01 21:30")
+
+    # B: waste>0 → not a stockout, stockout_time NaT
+    assert by_item.loc["B", "is_stockout"] == False  # noqa: E712
+    assert pd.isna(by_item.loc["B", "stockout_time"])
+
+    # C: missing from inventory → NaN production/waste → not a stockout
+    assert by_item.loc["C", "is_stockout"] == False  # noqa: E712
+    assert pd.isna(by_item.loc["C", "stockout_time"])

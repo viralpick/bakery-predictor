@@ -214,7 +214,10 @@ def measure_hour_profile(sales: pd.DataFrame) -> dict[str, np.ndarray]:
 
 
 def load_stockouts(xlsx: Path, store_code: str = DEFAULT_STORE_CODE) -> pd.DataFrame:
-    """품절정보 → (store_id, date, item_id, stockout_time)."""
+    """품절정보 → (store_id, date, item_id, stockout_time).
+
+    # retained for reference; no longer called by build (품절정보 버그로 대체)
+    """
     raw = pd.read_excel(xlsx, "품절정보")
     raw = raw[raw["점포코드"].astype(str) == store_code].copy()
     raw["date"] = pd.to_datetime(raw["판매일자"].astype(str), format="%Y%m%d").dt.normalize()
@@ -258,8 +261,8 @@ def aggregate_daily(
 
     sold_units: sum of qty per (store, item, date) — 정상 단품만.
     is_stockout / stockout_time: 물리 leftover 기반 진짜 최종소진.
-    potential_demand: PoC 1차에서는 sold_units 그대로 (= no censoring correction)
-                      stockout 보정은 features/potential_demand.py가 일관 처리하도록 추후 호출.
+    potential_demand: features/potential_demand.py의 attach_potential_demand가 계산
+                      (stockout 보정 적용 — sold_units 그대로가 아님. 아래에서 호출).
     capacity: PoC상 모름 → 매장×품목 sold_units max (관측 capacity proxy).
     open_hours: 매장 영업시간 unknown → 13 (대략) 고정. store_mapping에서 추후.
     """
@@ -364,6 +367,11 @@ def build(
     measured_profiles = measure_hour_profile(sales)
 
     from ..ingest.inventory import load_inventory
+    if rename_store_id is None and store_code != DEFAULT_STORE_CODE:
+        raise ValueError(
+            f"build: store_code {store_code!r} != 광교 기본({DEFAULT_STORE_CODE}) but rename_store_id is None — "
+            "inventory store를 확정할 수 없음(silent cross-store blend 방지). rename_store_id를 명시하라."
+        )
     inv_store = rename_store_id or "store_gw01"
     inventory = load_inventory(str(inventory_xlsx_path), inv_store)
     # 마지막 실판매 시각 (item-day별 max) — receipts_df에서
