@@ -110,7 +110,9 @@ def test_fill_our_order_restricts_rows_to_scored_window():
 
 def _enriched_v2_toy(n_days: int = 110, seed: int = 11) -> pd.DataFrame:
     """v2 LightGBM 학습에 필요한 최소 enrich 프레임 — store 1개, item 2개, 카테고리
-    공유(cannibalization 계산 대상). potential_demand=sold_units(무품절 단순화)."""
+    공유(cannibalization 계산 대상). potential_demand=adjusted_demand=sold_units
+    (무품절·무마감할인 단순화 — _quantile_backtest_predictions 기본 target_col은
+    adjusted_demand)."""
     rng = np.random.default_rng(seed)
     dates = pd.date_range("2024-01-01", periods=n_days, freq="D")
     rows = []
@@ -120,7 +122,7 @@ def _enriched_v2_toy(n_days: int = 110, seed: int = 11) -> pd.DataFrame:
             rows.append({
                 "store_id": "s1", "item_id": item, "category_id": "bread",
                 "date": d, "sold_units": sold, "is_stockout": False,
-                "potential_demand": float(sold),
+                "potential_demand": float(sold), "adjusted_demand": float(sold),
             })
     df = pd.DataFrame(rows)
     cal = build_calendar_daily(dates.min(), dates.max())
