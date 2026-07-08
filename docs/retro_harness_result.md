@@ -1,5 +1,7 @@
 # 회고 harness 실행 결과 — 광교 (prospective-eval --source real)
 
+> ⚠️ 재측정으로 갱신됨 — [docs/target_unification_remeasure_result.md](target_unification_remeasure_result.md) 참조. 이 문서의 초과율/WPE/KPI Δ(item 0.636, category 0.738 등)는 오염된 `potential_demand` 잣대 기준이다. adjusted_demand 통일 잣대 재측정 결과가 헤드라인을 대체한다.
+
 작성 2026-07-05. 재현: `uv run bakery prospective-eval --source real --store-id store_gw01`.
 
 ## 무엇을 한 것인가
