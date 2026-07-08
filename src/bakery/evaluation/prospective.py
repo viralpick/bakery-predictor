@@ -86,15 +86,19 @@ def simulate_item_day_kpis(
     group_cols: list[str],
     params: CostParams | None = None,
     unit_prices=None,
+    demand_col: str = "potential_demand",
 ) -> pd.DataFrame:
-    """item-day별 폐기/lost 비용(business_metrics) + 매진시각/매진여부."""
+    """item-day별 폐기/lost 비용(business_metrics) + 매진시각/매진여부.
+
+    demand_col: 실현수요 잣대 컬럼명(기본 potential_demand; adjusted_demand로 교체 가능).
+    """
     params = params or CostParams()
-    # 폐기/lost: simulate_profit 재사용 (yhat=발주량, true=potential_demand)
+    # 폐기/lost: simulate_profit 재사용 (yhat=발주량, true=demand_col)
     prof_in = rows.rename(columns={order_col: "yhat"}).copy()
-    prof_in["sold_units"] = prof_in["potential_demand"]
+    prof_in["sold_units"] = prof_in[demand_col]
     costed = simulate_profit(
         prof_in, unit_prices=unit_prices, params=params,
-        yhat_col="yhat", sold_col="sold_units", potential_col="potential_demand",
+        yhat_col="yhat", sold_col="sold_units", potential_col=demand_col,
     )
     # 매진시각: 그룹 프로필로 역산
     soldout_hours, stockouts = [], []
@@ -106,7 +110,7 @@ def simulate_item_day_kpis(
             measured=raw if raw is not None else None,
         )
         t, is_so = simulate_soldout(
-            float(r[order_col]), float(r["potential_demand"]), prof,
+            float(r[order_col]), float(r[demand_col]), prof,
             open_hour=store_hours.open_hour, close_hour=store_hours.close_hour,
         )
         soldout_hours.append(t if t is not None else np.nan)

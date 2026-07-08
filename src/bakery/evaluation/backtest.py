@@ -115,6 +115,8 @@ def _clone(forecaster: Forecaster) -> Forecaster:
         kwargs = {"params": forecaster.params}
         if hasattr(forecaster, "feature_set"):
             kwargs["feature_set"] = forecaster.feature_set
+        if hasattr(forecaster, "y_col"):
+            kwargs["y_col"] = forecaster.y_col
         return cls(**kwargs)
     if hasattr(forecaster, "n_weeks"):  # SeasonalNaive
         return cls(n_weeks=forecaster.n_weeks)

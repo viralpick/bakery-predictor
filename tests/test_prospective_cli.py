@@ -38,7 +38,11 @@ def test_end_to_end_our_beats_worse_baseline():
 
 
 def _real_shaped_daily() -> pd.DataFrame:
-    """bonavi_daily.parquet 서브셋 형태 (store/category 필터 이후 상태)."""
+    """bonavi_daily.parquet 서브셋 형태 (store/category 필터 + build_item_adjusted_demand
+    적용 이후 상태 — 실제 호출 경로(_real_prospective_inputs)는 이 함수 이전에
+    adjusted_demand를 주입하므로, 여기서도 컬럼을 미리 채워 시뮬레이션한다.
+    무마감할인 단순화이므로 build_item_adjusted_demand 계약대로 adjusted_demand는
+    sold_units와 동일(α항 소멸), potential_demand와는 다르다."""
     return pd.DataFrame({
         "item_id": ["101", "101", "102", "999"],
         "date": pd.to_datetime(["2021-01-01", "2021-01-02", "2021-01-01", "2021-01-01"]),
@@ -46,6 +50,7 @@ def _real_shaped_daily() -> pd.DataFrame:
         "sold_units": [10, 12, 5, 3],
         "is_stockout": [False, True, False, False],
         "potential_demand": [12.0, 15.0, 5.0, 3.0],
+        "adjusted_demand": [10.0, 12.0, 5.0, 3.0],
     })
 
 
@@ -63,7 +68,7 @@ def test_assemble_real_rows_base_order_matches_production_qty():
     result = _assemble_real_rows(_real_shaped_daily(), _real_shaped_inventory())
 
     assert list(result.columns) == [
-        "item_id", "date", "category_id", "potential_demand",
+        "item_id", "date", "category_id", "potential_demand", "adjusted_demand",
         "sold_units", "is_stockout", "base_order", "waste_qty",
     ]
 
@@ -73,6 +78,7 @@ def test_assemble_real_rows_base_order_matches_production_qty():
     assert row["base_order"] == 18
     assert row["waste_qty"] == 2
     assert row["potential_demand"] == 15.0
+    assert row["adjusted_demand"] == 12.0
     assert row["category_id"] == "bread"
     assert bool(row["is_stockout"]) is True
 
@@ -110,7 +116,9 @@ def test_fill_our_order_restricts_rows_to_scored_window():
 
 def _enriched_v2_toy(n_days: int = 110, seed: int = 11) -> pd.DataFrame:
     """v2 LightGBM 학습에 필요한 최소 enrich 프레임 — store 1개, item 2개, 카테고리
-    공유(cannibalization 계산 대상). potential_demand=sold_units(무품절 단순화)."""
+    공유(cannibalization 계산 대상). potential_demand=adjusted_demand=sold_units
+    (무품절·무마감할인 단순화 — _quantile_backtest_predictions 기본 target_col은
+    adjusted_demand)."""
     rng = np.random.default_rng(seed)
     dates = pd.date_range("2024-01-01", periods=n_days, freq="D")
     rows = []
@@ -120,7 +128,7 @@ def _enriched_v2_toy(n_days: int = 110, seed: int = 11) -> pd.DataFrame:
             rows.append({
                 "store_id": "s1", "item_id": item, "category_id": "bread",
                 "date": d, "sold_units": sold, "is_stockout": False,
-                "potential_demand": float(sold),
+                "potential_demand": float(sold), "adjusted_demand": float(sold),
             })
     df = pd.DataFrame(rows)
     cal = build_calendar_daily(dates.min(), dates.max())
@@ -165,7 +173,10 @@ def test_decoupling_by_category_with_two_categories():
         "category_id": ["bread", "bread", "bread", "bread", "pastry", "pastry", "pastry"],
         "item_id": ["i1", "i1", "i2", "i2", "i3", "i3", "i4"],
         "date": ["2025-01-01", "2025-01-02", "2025-01-01", "2025-01-02", "2025-01-01", "2025-01-02", "2025-01-01"],
+        # adjusted_demand는 _decoupling_by_category의 실제 잣대(Task 5). potential_demand는
+        # 진단·비교용으로 값만 동일하게 유지(fixture 단순화 목적, 실제 α 보정과 무관).
         "potential_demand": [10.0, 20.0, 15.0, 25.0, 5.0, 5.0, 5.0],
+        "adjusted_demand": [10.0, 20.0, 15.0, 25.0, 5.0, 5.0, 5.0],
         "is_stockout": [0, 1, 0, 1, 0, 0, 0],  # bread: demand↑⟹stockout↑ (strong positive)
     })  # pastry: is_stockout constant → var=0 → score=0.0
 
