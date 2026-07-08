@@ -32,9 +32,9 @@
 |---|---|---|
 | **calibration 초과율** P(demand>order), nominal 0.15 | **0.636** | **0.679** ⬆ (악화) |
 | WPE (발주 편향) | −0.261 | −0.301 |
-| stockout_rate Δ | −0.017 | **+0.603** (우리 0.679 / base 0.077) |
-| waste_cost Δ (fold-mean) | +3.82M | **−3.01M** (부호 반전) |
-| lost_margin Δ (fold-mean) | +52.3M† | +18.12M |
+| stockout_rate Δ | −0.015 | **+0.603** (우리 0.679 / base 0.077) |
+| waste_cost Δ (fold-mean) | +0.48M | **−3.01M** (부호 반전) |
+| lost_margin Δ (fold-mean) | +6.5M | +18.12M |
 | soldout_median_h Δ | −2.03 | −4.24 |
 
 ### category-level
@@ -48,8 +48,6 @@
 | waste_cost Δ (fold-mean) | −0.90M | −1.62M |
 | lost_margin Δ (fold-mean) | +6.7M | +4.88M |
 | soldout_median_h Δ | −1.35 | −0.64 |
-
-† PR#26 원본의 lost_margin Δ는 aggregate 프린트 값(문서 [retro_harness_result](retro_harness_result.md)에는 fold-mean +6.5M로 별도 집계). 여기서는 aggregate-프린트 비교 축을 그대로 옮겼다. 재측정 값은 모두 fold-mean(8) + CI(§4)로 재확인.
 
 **⚠️ KPI 부호 반전의 원인 (반드시 읽을 것)**: 재측정에서 waste Δ가 양→음으로, stockout Δ가 0→+0.6으로 뒤집힌 것은 "모델이 좋아져서"가 아니다. 잣대를 potential(부풀린 값)에서 adjusted(더 낮은 실수요 조정값)로 바꾸자, **아티제 현행 발주(baseline = 실제 생산량, 판매량 기반)가 adjusted 수요 대비 과잉생산으로 재해석**됐다(baseline waste 35M, stockout 0.077 = 거의 매진 안 남). 우리 q0.85 발주는 더 낮은 adjusted target을 겨눠 폐기는 적지만 심하게 과소서빙(우리 stockout 0.679, lost_margin 큼). 즉 KPI Δ 자체는 "우리가 겨누는 target(adjusted) ≠ 아티제가 실제 만든 양(sold 기반)"이라는 **스케일 불일치에 오염**된다. 순수하게 내부 정합적인 신호는 **calibration 초과율**(같은 잣대에서 order vs demand)이며, 판정은 그것을 근거로 한다.
 
@@ -137,4 +135,4 @@ waste sanity: actual 19,614 / simulated 24,907 (ratio 1.27). scored 13,554 / 62,
 - **α 미확정**: 초과율은 category에서 거의 불변이나 item에서 약하게 α-민감하고, **KPI 원화 Δ는 방향·규모 모두 α에 민감**. α 실증 확정([closing_discount_true_demand_result](closing_discount_true_demand_result.md), Phase B) 전까지 KPI 절대값을 신뢰 금지.
 - **KPI Δ vs baseline은 스케일 불일치에 오염**(§2 경고): 우리 target(adjusted)과 아티제 실제 생산(sold 기반)의 스케일이 달라, waste/stockout Δ는 "누가 더 낫다"의 순 신호가 아니다. 내부 정합 신호는 calibration 초과율. 실데이터(전향 운영 피드) 수령 시 baseline을 실제 발주로 교체해야 KPI 우열이 의미를 갖는다.
 - **potential_demand 잔존 참조**: 이번 경로(`prospective-eval`) 밖 CLI(`backtest` 등)는 아직 potential 사용. 전역 감사·제거는 별도.
-- **smoke vs full-window 격차**: n_folds=1 예비 smoke(최근 8주)는 item 0.432 / cat 0.429였으나, full-window n_folds=8은 item 0.679 / cat 0.458. **최근 창이 전체 이력보다 후하다** — 헤드라인은 full-window 값이다.
+- **smoke vs full-window 격차**: n_folds=1 예비 smoke(최근 8주)는 item 0.432 / cat 0.429였으나, full-window n_folds=8은 item 0.679 / cat 0.458. **최근 창이 전체 이력보다 후하다** — 헤드라인은 full-window 값이다. (예비 smoke 로그 미보존, 검증 불가 — 참고용)
