@@ -160,3 +160,21 @@ def test_compare_policies_delta():
     assert out.loc["our", "stockout_rate"] == 0.5
     assert out.loc["our", "soldout_median_h"] == 16.0       # 매진일만 median
     assert out.loc["delta", "soldout_median_h"] == 2.0      # 16 - 14
+
+
+def test_simulate_uses_named_demand_col():
+    rows = pd.DataFrame({
+        "item_id": ["A"],
+        "date": pd.to_datetime(["2021-01-01"]),
+        "adjusted_demand": [10.0],
+        "potential_demand": [999.0],  # 잘못된 잣대 — 선택되면 결과가 달라짐
+        "our_order": [10.0],
+    })
+    sh = StoreHours("store_gw01", 8, 22)
+    out = simulate_item_day_kpis(
+        rows, profiles={}, order_col="our_order", store_hours=sh,
+        group_cols=["item_id"], demand_col="adjusted_demand",
+    )
+    # order == adjusted_demand == 10 → 폐기 0, lost 0
+    assert float(out["waste_units"].iloc[0]) == 0.0
+    assert float(out["lost_sale_units"].iloc[0]) == 0.0
