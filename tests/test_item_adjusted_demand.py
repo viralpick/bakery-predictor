@@ -49,6 +49,20 @@ def test_alpha_zero_equals_normal():
     assert got["B"] == pytest.approx(15.0)
 
 
+def test_multiple_closing_rows_same_item_day_are_summed():
+    # A: sold=20, two closing rows qty=3와 qty=2 → groupby.sum으로 합산(5),
+    # adjusted = 20 - 5*(1-0.5) = 17.5
+    daily = _daily([20, 20])
+    closing = pd.DataFrame({
+        "item_id": ["A", "A"],
+        "date": pd.to_datetime(["2021-01-01", "2021-01-01"]),
+        "qty": [3, 2],
+    })
+    out = build_item_adjusted_demand(daily, discount_rows=closing, alpha=0.5)
+    got = dict(zip(out["item_id"], out["adjusted_demand"]))
+    assert got["A"] == pytest.approx(17.5)
+
+
 def test_input_not_mutated():
     daily = _daily([10, 20])
     build_item_adjusted_demand(daily, discount_rows=_closing({"A": 4}), alpha=0.5)

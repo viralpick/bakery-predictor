@@ -41,7 +41,8 @@ def _real_shaped_daily() -> pd.DataFrame:
     """bonavi_daily.parquet 서브셋 형태 (store/category 필터 + build_item_adjusted_demand
     적용 이후 상태 — 실제 호출 경로(_real_prospective_inputs)는 이 함수 이전에
     adjusted_demand를 주입하므로, 여기서도 컬럼을 미리 채워 시뮬레이션한다.
-    무마감할인 단순화로 potential_demand와 값을 동일하게 둔다."""
+    무마감할인 단순화이므로 build_item_adjusted_demand 계약대로 adjusted_demand는
+    sold_units와 동일(α항 소멸), potential_demand와는 다르다."""
     return pd.DataFrame({
         "item_id": ["101", "101", "102", "999"],
         "date": pd.to_datetime(["2021-01-01", "2021-01-02", "2021-01-01", "2021-01-01"]),
@@ -49,7 +50,7 @@ def _real_shaped_daily() -> pd.DataFrame:
         "sold_units": [10, 12, 5, 3],
         "is_stockout": [False, True, False, False],
         "potential_demand": [12.0, 15.0, 5.0, 3.0],
-        "adjusted_demand": [12.0, 15.0, 5.0, 3.0],
+        "adjusted_demand": [10.0, 12.0, 5.0, 3.0],
     })
 
 
@@ -77,6 +78,7 @@ def test_assemble_real_rows_base_order_matches_production_qty():
     assert row["base_order"] == 18
     assert row["waste_qty"] == 2
     assert row["potential_demand"] == 15.0
+    assert row["adjusted_demand"] == 12.0
     assert row["category_id"] == "bread"
     assert bool(row["is_stockout"]) is True
 
