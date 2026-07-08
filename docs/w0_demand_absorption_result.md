@@ -107,3 +107,42 @@ leave-one-out 총량보존 계수 β 회귀:
 - 일반 카테고리 8건 중 absorb 4건(광교·메세나), 경계/inconclusive 4건(광화문·삼성) — **walk-away 0건**.
 - 카테고리 총량 모델링(v4 Stage 1→2) 정당성이 4매장에서 흡수 반대 신호 부재로 지지됨.
 - 삼성·광화문은 흡수 **크기**를 엄밀 확정 못하나(잔차 confound 큼), 흡수를 **부정하지도 않음**. 매장별 α/보수성 차등의 근거로 활용(삼성은 confound 큼 = 수요 변동 큼 → 더 보수적 quantile 검토).
+
+---
+
+## 재검증 — is_stockout 재정의 반영 (하위2, 2026-07-08)
+
+**배경**: `stockout_time` 로더가 하루 여러 품절이벤트 중 **첫(가장 이른) 이벤트**만 취하던 버그를 규명·교정. `is_stockout` 을 "폐기0=진짜 완판"(`QT_MADE>0 & QT_OUT<=0`)으로, `stockout_time` 을 **마지막 실판매 시각**으로 재정의(92%→~60%). 위 §결과·§다매장은 **옛 정의**(첫 순간품절 이벤트, is_stockout 92%)로 잰 것 → 고쳐진 정의로 재실행.
+
+- 광교 단독(bonavi): `bakery demand-absorption --source real` (bonavi_daily, is_stockout 60.4%).
+- 4매장: `scripts/absorption_4stores.py` 의 `apply_fixed_stockout()` — `build_store_daily`(17 스크립트 공유)를 건드리지 않고, 그 산출물의 `sold_units`(=회귀 타깃 Y)는 그대로 두고 처치변수(`is_stockout`/`stockout_time`)만 V2 inventory(`QT_MADE`/`QT_OUT`=폐기)+`SALES_TIME` 마지막판매로 override. **패널 n 이 옛 결과와 셀별로 완전 일치**(광교 bread 1798=1798 등) → Y 불변·처치변수만 바뀐 **통제된 비교**.
+
+### 게이트 대상(bread/pastry) — 옛 정의 vs 새 정의 (real, close_hour=22)
+
+| 매장 | 카테고리 | β (옛) | 판정(옛) | β (새) | 판정(새) |
+|---|---|---|---|---|---|
+| 광교 | bread | +0.024 | absorb | **+0.207** | inconclusive |
+| 광교 | pastry | +0.033 | absorb | **+0.230** | absorb |
+| 메세나 | bread | +0.053 | absorb | **+0.185** | inconclusive |
+| 메세나 | pastry | +0.043 | absorb | **+0.177** | inconclusive |
+| 광화문 | bread | +0.099 | inconclusive | **+0.179** | inconclusive |
+| 광화문 | pastry | +0.098 | inconclusive | **+0.151** | inconclusive |
+| 삼성 | bread | +0.121 | inconclusive | **+0.223** | inconclusive |
+| 삼성 | pastry | +0.074 | inconclusive | **+0.175** | inconclusive |
+
+광교 단독 bonavi 경로도 일관: 옛 bread +0.014/pastry +0.043(absorb) → 새 **bread +0.236/pastry +0.259(inconclusive)** (store_daily 경로 새 bread +0.207과 방향·크기 일관).
+
+### placebo (미래 d+7 품절강도, 새 정의)
+
+게이트 8건 **전부 absorb**(β ≈ +0.00~+0.10, mp01/pastry −0.038 포함 모두 walk-away 아님). 실제 β 양수가 **당일 잔차 confound**임을 재확인 — 미래 품절강도(인과 불가능)에서는 효과가 δ 안으로 소멸.
+
+### 핵심 판정: **walk-away 부재 견고 — 재정의로 뒤집히지 않음**
+
+1. **walk-away(β<0)가 새 정의에서도 20건(4매장×5카테고리) 실제·placebo 전 셀 0건.** 게이트의 유일한 판정 기준(품절이 카테고리 총량을 감소시키는가)은 **정의 교정 후에도 부재** → v4 Stage 1→2(카테고리 총량 예측→품목 비율 배분) 정당성 **유지**.
+2. **β 크기가 ~5–7× 상승한 것은 처치변수 재척도의 기계적 결과**다. 옛 `stockout_time`=이른 첫 순간품절(07–09시)이라 `Σ(22−tod)` 가 컸고(92% 품목), 새 정의=마지막 실판매(저녁)라 강도가 작다(60% 품목). Y 반응이 비슷한데 T가 ~1/6로 줄면 β=dY/dT 가 그만큼 커진다. **경제적 결론 변화가 아니라 단위 변화.**
+3. **absorb→inconclusive 이동도 (2)의 기계적 귀결**(커진 β vs δ 밴드). placebo가 β≈0·all-absorb로 나오는 것이 인과 효과는 여전히 0 근처(동등성 구간 내)임을 보인다.
+4. **약해진 것**: 새(정확한) 정의에서 TOST **"absorb"(등가 경계 내) 성립은 8건 중 1건**으로 줄어, "흡수 크기가 δ 안으로 유계"라는 **더 강한 주장은 대부분 상실**. 그러나 게이트가 요구한 건 always **walk-away 부재**였고 그것은 견고. 등가-유계 흡수는 유보(placebo로 크기 하한만).
+
+### 재검증 결론
+
+W0 게이트 **통과 유지**. is_stockout 92%→60% 재정의는 β 크기·TOST 라벨을 바꾸지만 **walk-away 신호를 만들지 않는다**. v4 카테고리 총량 모델링·adjusted_demand 설계 정당성 근거는 유효. (캐비엣: 광교 무품절일 여전히 희소 → "한계 효과" 측정. 타매장 confound 크기 차이는 매장별 보수성 차등 근거로 유지.)
