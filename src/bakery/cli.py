@@ -1757,7 +1757,7 @@ REAL_DAILY_PARQUET_PATH = "data/internal/bonavi_daily.parquet"
 REAL_RECEIPTS_PARQUET_PATH = "data/internal/bonavi_receipts.parquet"
 
 REAL_ROWS_COLUMNS = [
-    "item_id", "date", "category_id", "potential_demand",
+    "item_id", "date", "category_id", "potential_demand", "adjusted_demand",
     "sold_units", "is_stockout", "base_order", "waste_qty",
 ]
 
@@ -1953,6 +1953,7 @@ def _real_prospective_inputs(
     our_order=production-quantile backtest 예측(최근 n_folds×val_weeks만 채움, Task C).
     order_level="category"면 v4 카테고리 총합→배분 경로(_category_order_predictions) 사용."""
     daily = _load_real_daily(store_id)
+    daily = build_item_adjusted_demand(daily, alpha=alpha)
     inventory = load_inventory(REAL_INVENTORY_XLSX_PATH, store_id)
     inventory, waste_report = handle_negative_waste(inventory, policy="clip")
     console.print(f"[cyan]negative waste[/] clipped: {waste_report}")
@@ -2000,12 +2001,12 @@ def _stockout_item_days(rows: pd.DataFrame) -> set:
 def _decoupling_by_category(rows: pd.DataFrame) -> dict[str, float]:
     """카테고리별 ρ_DS (Decoupling Score) 산출.
 
-    각 카테고리 내 item-day들에 대해 (potential_demand, is_stockout) 상관을 계산.
+    각 카테고리 내 item-day들에 대해 (adjusted_demand, is_stockout) 상관을 계산.
     반환: {category_id: score}
     """
     scores = {}
     for cat_id, group in rows.groupby("category_id"):
-        demand = group["potential_demand"].to_numpy()
+        demand = group["adjusted_demand"].to_numpy()
         stockout = group["is_stockout"].astype(float).to_numpy()
         score = decoupling_score(demand, stockout)
         scores[cat_id] = score
@@ -2050,12 +2051,15 @@ def cmd_prospective_eval(
         exclude_keys=_stockout_item_days(rows), exclude_cols=["item_id", "date"],
     )
     sh = StoreHours(store_id, open_hour, close_hour)
+    # 평가 잣대: real은 마감할인 실수요 adjusted_demand, synthetic은 실 closing 데이터가
+    # 없어 potential_demand 유지(Task 5 — 발주는 이미 Task 4에서 adjusted 학습).
+    demand_col = "adjusted_demand" if source == "real" else "potential_demand"
     our = simulate_item_day_kpis(rows, profiles, order_col="our_order",
                                  store_hours=sh, group_cols=["item_id"],
-                                 unit_prices=unit_prices)
+                                 unit_prices=unit_prices, demand_col=demand_col)
     base = simulate_item_day_kpis(rows, profiles, order_col="base_order",
                                   store_hours=sh, group_cols=["item_id"],
-                                  unit_prices=unit_prices)
+                                  unit_prices=unit_prices, demand_col=demand_col)
     table = compare_policies(our, base)
     out_path = Path(out_csv)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2063,7 +2067,7 @@ def cmd_prospective_eval(
     console.print(table.to_string(index=False))
     console.print(
         f"[cyan]예측 편향 WPE="
-        f"{wpe(rows['potential_demand'].to_numpy(), rows['our_order'].to_numpy()):.3f}[/]"
+        f"{wpe(rows[demand_col].to_numpy(), rows['our_order'].to_numpy()):.3f}[/]"
     )
     if source == "real" and "category_id" in rows.columns:
         rho_ds = _decoupling_by_category(rows)
@@ -2081,14 +2085,14 @@ def cmd_prospective_eval(
         agg.to_csv(out_path.with_name("prospective_kpi_agg.csv"), index=False)
     if source == "real":
         exceed = quantile_exceedance_rate(
-            rows["potential_demand"].to_numpy(), rows["our_order"].to_numpy()
+            rows["adjusted_demand"].to_numpy(), rows["our_order"].to_numpy()
         )
         console.print(f"[cyan]calibration[/] 초과율 P(demand>order)={exceed:.3f} "
                       f"(nominal 1−α={1 - production_quantile:.2f})")
         console.print(f"[cyan]waste sanity[/] {compare_actual_vs_simulated_waste(rows, base)}")
     if source == "real" and order_level == "category":
         by_date = rows.groupby("date").agg(
-            pd_sum=("potential_demand", "sum"), order_sum=("our_order", "sum"),
+            pd_sum=("adjusted_demand", "sum"), order_sum=("our_order", "sum"),
         )
         cat_exceed = float((by_date["pd_sum"] > by_date["order_sum"]).mean())
         cat_wape = wape(by_date["pd_sum"].to_numpy(), by_date["order_sum"].to_numpy())
