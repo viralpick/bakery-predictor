@@ -29,6 +29,7 @@ from ..features.potential_demand import StoreHours, attach_potential_demand
 from .schema import DAILY_COLUMNS, validate_daily
 
 XLSX_DEFAULT = Path("data/internal/보나비 데이터_20260520.xlsx")
+INVENTORY_XLSX_DEFAULT = Path("data/internal/보나비 데이터_20260526.xlsx")  # 재고정보 시트는 이 파일에만 존재
 OUT_DEFAULT = Path("data/internal/bonavi_daily.parquet")
 DEFAULT_STORE_CODE = "1000000047"  # 아티제 아브뉴프랑광교점
 
@@ -328,6 +329,7 @@ def _coerce_daily_dtypes(daily: pd.DataFrame) -> pd.DataFrame:
 def build(
     *,
     xlsx_path: Path | str = XLSX_DEFAULT,
+    inventory_xlsx_path: Path | str = INVENTORY_XLSX_DEFAULT,
     store_code: str = DEFAULT_STORE_CODE,
     out_path: Path | str = OUT_DEFAULT,
     rename_store_id: str | None = None,
@@ -363,7 +365,7 @@ def build(
 
     from ..ingest.inventory import load_inventory
     inv_store = rename_store_id or "store_gw01"
-    inventory = load_inventory(str(xlsx_path), inv_store)
+    inventory = load_inventory(str(inventory_xlsx_path), inv_store)
     # 마지막 실판매 시각 (item-day별 max) — receipts_df에서
     last_sale = (
         receipts_df.groupby(["date", "item_id"], as_index=False)["timestamp"].max()
