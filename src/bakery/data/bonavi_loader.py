@@ -248,14 +248,15 @@ def assign_stockout_fields(df: pd.DataFrame) -> pd.DataFrame:
 def aggregate_daily(
     sales: pd.DataFrame,
     items: pd.DataFrame,
-    stockouts: pd.DataFrame,
+    inventory: pd.DataFrame,
+    last_sale: pd.DataFrame,
     *,
     measured_profiles: dict[str, np.ndarray] | None = None,
 ) -> pd.DataFrame:
-    """Combine sales + items + stockouts → DAILY_COLUMNS frame.
+    """Combine sales + items + inventory + last_sale → DAILY_COLUMNS frame.
 
     sold_units: sum of qty per (store, item, date) — 정상 단품만.
-    is_stockout / stockout_time: 품절정보의 가장 이른 시각을 채움.
+    is_stockout / stockout_time: 물리 leftover 기반 진짜 최종소진.
     potential_demand: PoC 1차에서는 sold_units 그대로 (= no censoring correction)
                       stockout 보정은 features/potential_demand.py가 일관 처리하도록 추후 호출.
     capacity: PoC상 모름 → 매장×품목 sold_units max (관측 capacity proxy).
@@ -271,17 +272,20 @@ def aggregate_daily(
     daily = daily.merge(items[["item_id", "category_id"]], on="item_id", how="left")
     daily["category_id"] = daily["category_id"].fillna("etc")
 
-    # First stockout per (store, item, date)
-    first_so = (
-        stockouts.sort_values(["store_id", "item_id", "date", "stockout_time"])
-        .groupby(["store_id", "item_id", "date"], as_index=False)
-        .first()
-    )
-    daily = daily.merge(
-        first_so[["store_id", "item_id", "date", "stockout_time"]],
-        on=["store_id", "item_id", "date"], how="left",
-    )
-    daily["is_stockout"] = daily["stockout_time"].notna()
+    # is_stockout/stockout_time: 물리 leftover(폐기) 기반 진짜 최종소진 (첫 순간품절 이벤트 버그 대체)
+    inv = inventory.copy()
+    inv["item_id"] = inv["item_id"].astype(str)
+    inv["date"] = pd.to_datetime(inv["date"]).dt.normalize()
+    ls = last_sale.copy()
+    ls["item_id"] = ls["item_id"].astype(str)
+    ls["date"] = pd.to_datetime(ls["date"]).dt.normalize()
+    daily["item_id"] = daily["item_id"].astype(str)
+    daily = daily.merge(inv[["date", "item_id", "production_qty", "waste_qty"]],
+                        on=["date", "item_id"], how="left")
+    daily = daily.merge(ls[["date", "item_id", "last_sale_ts"]],
+                        on=["date", "item_id"], how="left")
+    daily = assign_stockout_fields(daily)
+    daily = daily.drop(columns=["production_qty", "waste_qty", "last_sale_ts"])
 
     # Capacity proxy — running max of sold_units per (store, item)
     daily = daily.sort_values(["store_id", "item_id", "date"]).reset_index(drop=True)
@@ -345,7 +349,6 @@ def build(
     out_path = Path(out_path)
     items = load_items(xlsx_path)
     sales = load_sales(xlsx_path, store_code=store_code)
-    stockouts = load_stockouts(xlsx_path, store_code=store_code)
 
     # Receipts with hh:mm — written once and reused by DiD substitution.
     receipts_out = Path(receipts_path or "data/internal/bonavi_receipts.parquet")
@@ -358,7 +361,16 @@ def build(
     # Measure store's hour-of-day sales profile (vs hard-coded 4-peak default)
     measured_profiles = measure_hour_profile(sales)
 
-    daily = aggregate_daily(sales, items, stockouts, measured_profiles=measured_profiles)
+    from ..ingest.inventory import load_inventory
+    inv_store = rename_store_id or "store_gw01"
+    inventory = load_inventory(str(xlsx_path), inv_store)
+    # 마지막 실판매 시각 (item-day별 max) — receipts_df에서
+    last_sale = (
+        receipts_df.groupby(["date", "item_id"], as_index=False)["timestamp"].max()
+        .rename(columns={"timestamp": "last_sale_ts"})
+    )
+
+    daily = aggregate_daily(sales, items, inventory, last_sale, measured_profiles=measured_profiles)
     if rename_store_id is not None:
         daily["store_id"] = rename_store_id
         # Re-key measured_profiles to the renamed store_id
