@@ -52,6 +52,7 @@ from .features.population_features import (
     compute_store_population_features,
 )
 from .features.potential_demand import StoreHours
+from .features.scale import compute_item_scale
 from .features.weather_features import add_weather_features
 from .ingest import (
     calendar_api,
@@ -66,6 +67,7 @@ from .ingest import (
 from .ingest.inventory import load_inventory, handle_negative_waste
 from .ingest.store_mapping import load_store_mapping
 from .models.category_total import fit_category_total
+from .models.conformal_order import ConformalOrderCalibrator, DEFAULT_SERVICE_LEVEL
 from .models.item_proportion import distribute_total
 from .models.lightgbm_regressor import VALID_FEATURE_SETS, GlobalLGBM, LGBMParams
 from .models.moving_average import MovingAverage
@@ -1925,6 +1927,71 @@ def _our_order_predictions(
         f"(store={store_id}, quantile α={production_quantile})"
     )
     return preds
+
+
+def _apply_conformal_to_folds(
+    pred_df: pd.DataFrame, scale: dict[str, float], *,
+    service_level: float, cal_fold_frac: float,
+) -> pd.DataFrame:
+    """fold별 base 예측을 앞쪽(cal)/뒤쪽(test)로 half-split → conformal 보정.
+
+    순수 함수(실 LGBM 무관): pred_df[item_id,date,fold,adjusted_demand,yhat] +
+    item scale dict → test folds의 [item_id,date,fold,our_order].
+    """
+    folds = sorted(pred_df["fold"].unique())
+    n_cal = max(1, int(len(folds) * cal_fold_frac))
+    cal_folds, test_folds = set(folds[:n_cal]), set(folds[n_cal:])
+    cal = pred_df[pred_df["fold"].isin(cal_folds)]
+    test = pred_df[pred_df["fold"].isin(test_folds)].copy()
+
+    def _scale_of(items: pd.Series) -> np.ndarray:
+        return items.astype(str).map(scale).fillna(1.0).to_numpy()
+
+    cal_scale = _scale_of(cal["item_id"])
+    scores = ((cal["adjusted_demand"].to_numpy() - cal["yhat"].to_numpy()) / cal_scale)
+    calib = ConformalOrderCalibrator().fit(scores, service_level)
+    test["our_order"] = calib.apply(test["yhat"].to_numpy(), _scale_of(test["item_id"]))
+    return test[["item_id", "date", "fold", "our_order"]].reset_index(drop=True)
+
+
+def _median_base_fold_predictions(
+    daily: pd.DataFrame, *, val_weeks: int, n_folds: int,
+) -> tuple[pd.DataFrame, list]:
+    """v2 LGBM q0.5(median) base로 expanding backtest. pred_df에 actual+yhat+fold 보존."""
+    windows = generate_time_splits(
+        daily["date"], n_splits=n_folds,
+        val_horizon_days=val_weeks * 7, step_days=val_weeks * 7,
+    )
+    forecaster = GlobalLGBM(
+        feature_set="v2", y_col="adjusted_demand",
+        params=LGBMParams(objective="quantile", alpha=0.5),
+    )
+    _, pred_df = run_backtest(daily, [forecaster], windows, y_col="adjusted_demand")
+    pred_df["item_id"] = pred_df["item_id"].astype(str)
+    return pred_df[["item_id", "date", "fold", "adjusted_demand", "yhat"]], windows
+
+
+def _conformal_order_predictions(
+    store_id: str, *, service_level: float = DEFAULT_SERVICE_LEVEL,
+    val_weeks: int = 8, n_folds: int = 8, cal_fold_frac: float = 0.5,
+    alpha: float = DEFAULT_ALPHA,
+) -> pd.DataFrame:
+    """base median 발주 + cross-fold half-split conformal 보정 → test folds our_order."""
+    ds = _load_dataset("real", None)
+    daily = _enrich_if_needed(ds, ["v2"])
+    daily = build_item_adjusted_demand(daily, alpha=alpha)
+    pred_df, windows = _median_base_fold_predictions(daily, val_weeks=val_weeks, n_folds=n_folds)
+    first_val_start = min(w.val_start for w in windows)
+    scale = compute_item_scale(daily, before_date=first_val_start, y_col="adjusted_demand")
+    out = _apply_conformal_to_folds(
+        pred_df, scale, service_level=service_level, cal_fold_frac=cal_fold_frac
+    )
+    console.print(
+        f"[cyan]conformal our_order[/] {n_folds} fold(s)(cal {int(n_folds*cal_fold_frac)}/"
+        f"test {n_folds-int(n_folds*cal_fold_frac)}), s={service_level}, "
+        f"{out['date'].nunique()} dates × {out['item_id'].nunique()} items"
+    )
+    return out
 
 
 def _fill_our_order(rows: pd.DataFrame, predictions: pd.DataFrame) -> pd.DataFrame:
