@@ -2017,10 +2017,13 @@ def _fill_our_order(rows: pd.DataFrame, predictions: pd.DataFrame) -> pd.DataFra
 def _real_prospective_inputs(
     store_id: str, *, production_quantile: float = 0.85, val_weeks: int = 8, n_folds: int = 1,
     order_level: str = "item", alpha: float = DEFAULT_ALPHA,
+    calibrate: bool = False, service_level: float = DEFAULT_SERVICE_LEVEL,
+    cal_fold_frac: float = 0.5,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
     """실데이터 조립: bonavi_daily + 재고정보(생산량/폐기량) join +
     our_order=production-quantile backtest 예측(최근 n_folds×val_weeks만 채움, Task C).
-    order_level="category"면 v4 카테고리 총합→배분 경로(_category_order_predictions) 사용."""
+    order_level="category"면 v4 카테고리 총합→배분 경로(_category_order_predictions) 사용.
+    calibrate=True(+order_level="item")면 conformal 보정 발주(_conformal_order_predictions) 사용."""
     daily = _load_real_daily(store_id)
     daily = build_item_adjusted_demand(daily, alpha=alpha)
     inventory = load_inventory(REAL_INVENTORY_XLSX_PATH, store_id)
@@ -2031,6 +2034,11 @@ def _real_prospective_inputs(
         predictions = _category_order_predictions(
             store_id, production_quantile=production_quantile, val_weeks=val_weeks,
             n_folds=n_folds, alpha=alpha,
+        )
+    elif calibrate:
+        predictions = _conformal_order_predictions(
+            store_id, service_level=service_level, val_weeks=val_weeks,
+            n_folds=n_folds, cal_fold_frac=cal_fold_frac, alpha=alpha,
         )
     else:
         predictions = _our_order_predictions(
@@ -2047,14 +2055,18 @@ def _load_prospective_inputs(
     source: str, store_id: str, *,
     production_quantile: float = 0.85, val_weeks: int = 8, n_folds: int = 1,
     order_level: str = "item", alpha: float = DEFAULT_ALPHA,
+    calibrate: bool = False, service_level: float = DEFAULT_SERVICE_LEVEL,
+    cal_fold_frac: float = 0.5,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
-    """(rows, receipts, unit_prices) 반환. production_quantile/val_weeks/n_folds/order_level/alpha는 real 소스만 사용."""
+    """(rows, receipts, unit_prices) 반환. production_quantile/val_weeks/n_folds/order_level/alpha/
+    calibrate/service_level/cal_fold_frac은 real 소스만 사용."""
     if source == "synthetic":
         return _synthetic_prospective_inputs()
     if source == "real":
         return _real_prospective_inputs(
             store_id, production_quantile=production_quantile, val_weeks=val_weeks,
             n_folds=n_folds, order_level=order_level, alpha=alpha,
+            calibrate=calibrate, service_level=service_level, cal_fold_frac=cal_fold_frac,
         )
     raise ValueError(f"unknown source: {source!r} (expected 'synthetic' or 'real')")
 
@@ -2102,6 +2114,15 @@ def cmd_prospective_eval(
     alpha: float = typer.Option(
         DEFAULT_ALPHA, help="adjusted_demand의 마감할인 실수요 비율 α (real 소스만 사용)"
     ),
+    calibrate: bool = typer.Option(
+        False, help="conformal 보정 발주 사용(real+item 경로). base median + cross-fold half-split"
+    ),
+    target_service_level: float = typer.Option(
+        DEFAULT_SERVICE_LEVEL, help="conformal 목표 서비스레벨 s (초과율 목표=1−s, 기본 0.74)"
+    ),
+    cal_fold_frac: float = typer.Option(
+        0.5, help="앞쪽 folds 중 calibration 비율(나머지=test)"
+    ),
     out_csv: str = typer.Option("reports/prospective_kpi.csv"),
 ) -> None:
     """우리 발주 추천 vs 현행 발주를 KPI(폐기/매진시각/매진률)로 비교.
@@ -2114,6 +2135,7 @@ def cmd_prospective_eval(
         source, store_id,
         production_quantile=production_quantile, val_weeks=our_order_val_weeks, n_folds=n_folds,
         order_level=order_level, alpha=alpha,
+        calibrate=calibrate, service_level=target_service_level, cal_fold_frac=cal_fold_frac,
     )
     profiles = build_arrival_profile(
         receipts, group_cols=["item_id"],
