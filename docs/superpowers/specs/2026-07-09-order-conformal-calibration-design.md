@@ -35,38 +35,38 @@
 기호: item i, day. `y_i` = adjusted_demand(실현수요 잣대, ③). `ŷ_i` = base median 예측. `scale_i` = leakage-safe item 규모. 서비스레벨 `s`(기본 0.74).
 
 1. **base**: v2 LGBM, `objective="quantile", alpha=0.5` (median). target과 무관하게 고정.
-2. **scale_i**: 해당 item의 **train 기간** adjusted_demand 평균, floor `max(mean, 1.0)`. test/cal 미포함(leakage-safe).
-3. **calibration set**: 시간순 train→cal→test. 각 fold의 train 말미 `cal_weeks`(기본 8주)를 calibration으로 분리(train'로 base 적합, cal로 conformity 산출). test는 불변.
-4. **conformity score**: `E_i = (y_i − ŷ_i) / scale_i` (one-sided; 양수=under-order).
-5. **margin quantile**: `Q_s` = pooled(전 품목·cal) `E_i`의 `s`-분위 (numpy quantile, one-sided 상방). 유한표본 보정 `ceil((n+1)s)/n` 옵션(작은 n).
-6. **calibrated order**: `order_i = ŷ_i + Q_s × scale_i`.
-7. **보장**: exchangeability 하 `P(y_i > order_i) ≈ 1 − s`.
+2. **scale_i**: 해당 item의 adjusted_demand 평균 — 첫 val 창(backtest 시작) **이전 전체 이력**에서 산출, floor `max(mean, 1.0)`. 모든 fold val이 그 이후라 leakage-safe(단일 scale/item).
+3. **calibration set — cross-fold half-split** (⚠️nested 아님, lag history 단절 회피): expanding backtest의 각 fold는 기존과 동일하게 "그 fold val 직전 전체"로 base median 학습(lag/rolling 정상). n_folds개 val 예측을 시간순으로 **앞쪽 `cal_fold_frac`(기본 0.5, `floor(n_folds×frac)`)개 folds = calibration, 나머지 뒤쪽 folds = test**로 분할. base 모델 재설계 0, split-conformal 정합(cal이 test보다 시간상 앞).
+4. **conformity score**: cal folds에서 `E_i = (y_i − ŷ_i) / scale_i` (one-sided; 양수=under-order).
+5. **margin quantile**: `Q_s` = pooled(전 품목·전 cal folds) `E_i`의 `s`-분위 (numpy quantile, one-sided 상방). 유한표본 보정 `ceil((n+1)s)/n` 옵션(작은 n).
+6. **calibrated order** (test folds): `order_i = ŷ_i + Q_s × scale_i`.
+7. **보장**: exchangeability 하 `P(y_i > order_i) ≈ 1 − s`. 평가는 **test folds에서만** 측정.
 
 프론티어: 동일 base·동일 cal `E_i`에서 `Q_s`만 여러 s로 재산출 → 재학습 0.
 
 ## 컴포넌트 (파일 구조)
 
 - `src/bakery/models/conformal_order.py` (신규) — `ConformalOrderCalibrator`:
-  - `fit(residuals: np.ndarray, scales: np.ndarray, service_level: float) -> None` : normalized score 분위 `Q_s` 저장.
-  - `margin(scales: np.ndarray) -> np.ndarray` : `Q_s × scale`.
+  - `fit(scores: np.ndarray, service_level: float) -> None` : normalized score(=E, 호출자가 `(y−ŷ)/scale`로 산출)의 `s`-분위 `Q_s` 저장.
   - `apply(base_pred: np.ndarray, scales: np.ndarray) -> np.ndarray` : `base_pred + Q_s×scale`, 음수 클립 0.
   - 순수·상태최소·path-agnostic(입력이 배열이라 item/category 무관). 기존 `ConformalInterval`은 interval·양방향·per-dow라 계약 불일치 → 재사용 대신 잔차분위 아이디어만 차용.
 - `src/bakery/features/` 또는 cli 헬퍼 — item scale (train-only 평균) 계산.
-- `src/bakery/cli.py` — `prospective-eval`에 `--calibrate/--no-calibrate`(기본 off로 하위호환) + `--target-service-level`(기본 0.74) + `--cal-weeks`(기본 8). base median 예측 산출 → cal 잔차·scale → calibrator → our_order 교체. leakage: cal은 test 이전 구간만.
+- `src/bakery/cli.py` — `prospective-eval`에 `--calibrate/--no-calibrate`(기본 off로 하위호환) + `--target-service-level`(기본 0.74) + `--cal-fold-frac`(기본 0.5). base median 예측(fold별) 산출 → 앞쪽 folds 잔차·scale로 Q_s fit → 뒤쪽(test) folds our_order 교체. leakage: cal folds가 test folds보다 시간상 앞.
 - `docs/order_conformal_calibration_result.md` — 진단·프론티어·판정 (구현 Task 후반).
 
 ## 데이터 흐름
 
 ```
 adjusted_demand rows (③ 잣대)
-  └─ base median 예측 (v2 LGBM alpha=0.5, expanding fold)
-       ├─ [cal fold] E_i=(y−ŷ)/scale, scale=train평균  ─┐
-       └─ [test fold] ŷ_i, scale_i                      │
-                                                         ▼
-                          ConformalOrderCalibrator.fit(E, scale, s) → Q_s
-                          apply(ŷ_test, scale_test) → calibrated our_order
-                                                         ▼
-                          평가: 실현 초과율 P(y>order)≈1−s (adjusted 잣대)
+  └─ base median 예측 (v2 LGBM alpha=0.5, expanding fold별 '직전 전체' 학습)
+       │  scale_i = 첫 val 이전 이력 평균 (단일/item, leakage-safe)
+       ├─ [앞쪽 cal folds] E_i=(y−ŷ)/scale  ─┐
+       └─ [뒤쪽 test folds] ŷ_i, scale_i     │
+                                              ▼
+                    ConformalOrderCalibrator.fit(E, s) → Q_s
+                    apply(ŷ_test, scale_test) = ŷ + Q_s×scale → our_order
+                                              ▼
+                    평가(test folds만): 실현 초과율 P(y>order)≈1−s (adjusted 잣대)
 ```
 
 ## 검증
@@ -85,7 +85,8 @@ adjusted_demand rows (③ 잣대)
 
 - **exchangeability**: 시간 분포 shift(명절·12월 spike)서 coverage 약화 — rolling cal 완화, 잔존 리스크 문서화.
 - **scale 저빈도**: floor·pooled로 완화하나 극저빈도 품목 마진 과대/과소 가능.
-- **cal 표본 크기**: cal_weeks 너무 작으면 `Q_s` 불안정(interval 메모리 Mondrian min_n 교훈) — pooled라 per-dow보다 견고, 그래도 cal_weeks≥8 권장.
+- **cal 표본 크기**: cal folds 너무 적으면 `Q_s` 불안정(interval 메모리 Mondrian min_n 교훈) — pooled(전 품목×전 cal folds)라 per-dow보다 견고. n_folds=8·frac 0.5면 cal 4 folds. n_folds 작을 때(≤2) 주의.
+- **test folds 축소**: half-split이라 평가가 뒤쪽 절반 folds에서만 이뤄짐(n_folds=8→test 4 folds). full-window 대비 표본↓ — n_folds를 넉넉히(8+).
 - **coverage만이 순 신호**: KPI Δ vs baseline은 ③ 스케일 오염 상존. 판정은 초과율 수렴 기준.
 - **base=median 선택**: conformal이 서비스레벨 전부를 담당 → 마진이 큼. base=q_target 대비 스윙 효율↑이나 마진 분산이 scale 추정에 더 의존 — 진단에서 확인.
 - 광교 단독; category·다매장은 후속.
