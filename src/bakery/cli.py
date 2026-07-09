@@ -2178,8 +2178,11 @@ def cmd_prospective_eval(
         exceed = quantile_exceedance_rate(
             rows["adjusted_demand"].to_numpy(), rows["our_order"].to_numpy()
         )
+        nominal_label, nominal_value = (
+            ("s", 1 - target_service_level) if calibrate else ("α", 1 - production_quantile)
+        )
         console.print(f"[cyan]calibration[/] 초과율 P(demand>order)={exceed:.3f} "
-                      f"(nominal 1−α={1 - production_quantile:.2f})")
+                      f"(nominal 1−{nominal_label}={nominal_value:.2f})")
         console.print(f"[cyan]waste sanity[/] {compare_actual_vs_simulated_waste(rows, base)}")
     if source == "real" and order_level == "category":
         by_date = rows.groupby("date").agg(
