@@ -1,4 +1,3 @@
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -42,3 +41,22 @@ def test_missing_item_scale_defaults_to_floor_one():
     # test C: 5 + 1.0*1.0 = 6.0
     got = dict(zip(out["item_id"], out["our_order"]))
     assert got["C"] == pytest.approx(6.0)
+
+
+def test_cal_test_split_is_chronological_not_by_fold_index():
+    # fold 0 = LATER (2021-05-01), fold 1 = EARLIER (2021-02-01):
+    # generate_time_splits gives fold=0 the most-recent window, so cal/test
+    # must split on DATE, not raw fold int. cal = earlier (fold 1), test = fold 0.
+    preds = pd.DataFrame({
+        "item_id": ["A", "A"],
+        "date": pd.to_datetime(["2021-05-01", "2021-02-01"]),
+        "fold": [0, 1],
+        "adjusted_demand": [10.0, 14.0],
+        "yhat": [10.0, 10.0],
+    })
+    scale = {"A": 4.0}
+    out = _apply_conformal_to_folds(preds, scale, service_level=0.5, cal_fold_frac=0.5)
+    assert set(out["fold"].unique()) == {0}          # fold 0 (later) = test
+    # cal = fold 1 (earlier): score (14-10)/4 = 1.0 → q_s(higher@0.5)=1.0
+    # test fold 0: 10 + 1.0*4 = 14
+    assert out["our_order"].iloc[0] == pytest.approx(14.0)

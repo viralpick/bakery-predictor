@@ -1938,9 +1938,11 @@ def _apply_conformal_to_folds(
     순수 함수(실 LGBM 무관): pred_df[item_id,date,fold,adjusted_demand,yhat] +
     item scale dict → test folds의 [item_id,date,fold,our_order].
     """
-    folds = sorted(pred_df["fold"].unique())
-    n_cal = max(1, int(len(folds) * cal_fold_frac))
-    cal_folds, test_folds = set(folds[:n_cal]), set(folds[n_cal:])
+    # fold 정수는 시간순이 아님(generate_time_splits: fold=0=최신). pred_df의
+    # fold별 최소 날짜로 연대순 정렬해 앞쪽(이른)=cal, 뒤쪽(늦은)=test.
+    fold_order = pred_df.groupby("fold")["date"].min().sort_values().index.tolist()
+    n_cal = max(1, int(len(fold_order) * cal_fold_frac))
+    cal_folds, test_folds = set(fold_order[:n_cal]), set(fold_order[n_cal:])
     cal = pred_df[pred_df["fold"].isin(cal_folds)]
     test = pred_df[pred_df["fold"].isin(test_folds)].copy()
 
