@@ -52,6 +52,7 @@ from .features.population_features import (
     compute_store_population_features,
 )
 from .features.potential_demand import StoreHours
+from .features.scale import compute_item_scale
 from .features.weather_features import add_weather_features
 from .ingest import (
     calendar_api,
@@ -66,6 +67,7 @@ from .ingest import (
 from .ingest.inventory import load_inventory, handle_negative_waste
 from .ingest.store_mapping import load_store_mapping
 from .models.category_total import fit_category_total
+from .models.conformal_order import ConformalOrderCalibrator, DEFAULT_SERVICE_LEVEL
 from .models.item_proportion import distribute_total
 from .models.lightgbm_regressor import VALID_FEATURE_SETS, GlobalLGBM, LGBMParams
 from .models.moving_average import MovingAverage
@@ -1927,6 +1929,77 @@ def _our_order_predictions(
     return preds
 
 
+def _apply_conformal_to_folds(
+    pred_df: pd.DataFrame, scale: dict[str, float], *,
+    service_level: float, cal_fold_frac: float,
+) -> pd.DataFrame:
+    """fold별 base 예측을 앞쪽(cal)/뒤쪽(test)로 half-split → conformal 보정.
+
+    순수 함수(실 LGBM 무관): pred_df[item_id,date,fold,adjusted_demand,yhat] +
+    item scale dict → test folds의 [item_id,date,fold,our_order].
+    """
+    # fold 정수는 시간순이 아님(generate_time_splits: fold=0=최신). pred_df의
+    # fold별 최소 날짜로 연대순 정렬해 앞쪽(이른)=cal, 뒤쪽(늦은)=test.
+    fold_order = pred_df.groupby("fold")["date"].min().sort_values().index.tolist()
+    n_cal = max(1, int(len(fold_order) * cal_fold_frac))
+    cal_folds, test_folds = set(fold_order[:n_cal]), set(fold_order[n_cal:])
+    cal = pred_df[pred_df["fold"].isin(cal_folds)]
+    test = pred_df[pred_df["fold"].isin(test_folds)].copy()
+
+    def _scale_of(items: pd.Series) -> np.ndarray:
+        return items.astype(str).map(scale).fillna(1.0).to_numpy()
+
+    cal_scale = _scale_of(cal["item_id"])
+    scores = ((cal["adjusted_demand"].to_numpy() - cal["yhat"].to_numpy()) / cal_scale)
+    calib = ConformalOrderCalibrator().fit(scores, service_level)
+    test["our_order"] = calib.apply(test["yhat"].to_numpy(), _scale_of(test["item_id"]))
+    return test[["item_id", "date", "fold", "our_order"]].reset_index(drop=True)
+
+
+def _median_base_fold_predictions(
+    daily: pd.DataFrame, *, val_weeks: int, n_folds: int,
+) -> tuple[pd.DataFrame, list]:
+    """v2 LGBM q0.5(median) base로 expanding backtest. pred_df에 actual+yhat+fold 보존."""
+    windows = generate_time_splits(
+        daily["date"], n_splits=n_folds,
+        val_horizon_days=val_weeks * 7, step_days=val_weeks * 7,
+    )
+    forecaster = GlobalLGBM(
+        feature_set="v2", y_col="adjusted_demand",
+        params=LGBMParams(objective="quantile", alpha=0.5),
+    )
+    _, pred_df = run_backtest(daily, [forecaster], windows, y_col="adjusted_demand")
+    pred_df["item_id"] = pred_df["item_id"].astype(str)
+    return pred_df[["item_id", "date", "fold", "adjusted_demand", "yhat"]], windows
+
+
+def _conformal_order_predictions(
+    store_id: str, *, service_level: float = DEFAULT_SERVICE_LEVEL,
+    val_weeks: int = 8, n_folds: int = 8, cal_fold_frac: float = 0.5,
+    alpha: float = DEFAULT_ALPHA,
+) -> pd.DataFrame:
+    """base median 발주 + cross-fold half-split conformal 보정 → test folds our_order."""
+    if n_folds < 2:
+        raise ValueError(
+            f"--calibrate needs n_folds >= 2 (cal/test half-split); got {n_folds}"
+        )
+    ds = _load_dataset("real", None)
+    daily = _enrich_if_needed(ds, ["v2"])
+    daily = build_item_adjusted_demand(daily, alpha=alpha)
+    pred_df, windows = _median_base_fold_predictions(daily, val_weeks=val_weeks, n_folds=n_folds)
+    first_val_start = min(w.val_start for w in windows)
+    scale = compute_item_scale(daily, before_date=first_val_start, y_col="adjusted_demand")
+    out = _apply_conformal_to_folds(
+        pred_df, scale, service_level=service_level, cal_fold_frac=cal_fold_frac
+    )
+    console.print(
+        f"[cyan]conformal our_order[/] {n_folds} fold(s)(cal {int(n_folds*cal_fold_frac)}/"
+        f"test {n_folds-int(n_folds*cal_fold_frac)}), s={service_level}, "
+        f"{out['date'].nunique()} dates × {out['item_id'].nunique()} items"
+    )
+    return out
+
+
 def _fill_our_order(rows: pd.DataFrame, predictions: pd.DataFrame) -> pd.DataFrame:
     """rows(Task B, 전체 기간)를 our_order 예측이 존재하는 backtest val 기간(들)로
     제한한다. 예측 없는 item-day는 평가셋에서 제외 — 개수를 log로 명시(무언 축소 금지)."""
@@ -1948,10 +2021,13 @@ def _fill_our_order(rows: pd.DataFrame, predictions: pd.DataFrame) -> pd.DataFra
 def _real_prospective_inputs(
     store_id: str, *, production_quantile: float = 0.85, val_weeks: int = 8, n_folds: int = 1,
     order_level: str = "item", alpha: float = DEFAULT_ALPHA,
+    calibrate: bool = False, service_level: float = DEFAULT_SERVICE_LEVEL,
+    cal_fold_frac: float = 0.5,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
     """실데이터 조립: bonavi_daily + 재고정보(생산량/폐기량) join +
     our_order=production-quantile backtest 예측(최근 n_folds×val_weeks만 채움, Task C).
-    order_level="category"면 v4 카테고리 총합→배분 경로(_category_order_predictions) 사용."""
+    order_level="category"면 v4 카테고리 총합→배분 경로(_category_order_predictions) 사용.
+    calibrate=True(+order_level="item")면 conformal 보정 발주(_conformal_order_predictions) 사용."""
     daily = _load_real_daily(store_id)
     daily = build_item_adjusted_demand(daily, alpha=alpha)
     inventory = load_inventory(REAL_INVENTORY_XLSX_PATH, store_id)
@@ -1962,6 +2038,11 @@ def _real_prospective_inputs(
         predictions = _category_order_predictions(
             store_id, production_quantile=production_quantile, val_weeks=val_weeks,
             n_folds=n_folds, alpha=alpha,
+        )
+    elif calibrate:
+        predictions = _conformal_order_predictions(
+            store_id, service_level=service_level, val_weeks=val_weeks,
+            n_folds=n_folds, cal_fold_frac=cal_fold_frac, alpha=alpha,
         )
     else:
         predictions = _our_order_predictions(
@@ -1978,14 +2059,18 @@ def _load_prospective_inputs(
     source: str, store_id: str, *,
     production_quantile: float = 0.85, val_weeks: int = 8, n_folds: int = 1,
     order_level: str = "item", alpha: float = DEFAULT_ALPHA,
+    calibrate: bool = False, service_level: float = DEFAULT_SERVICE_LEVEL,
+    cal_fold_frac: float = 0.5,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
-    """(rows, receipts, unit_prices) 반환. production_quantile/val_weeks/n_folds/order_level/alpha는 real 소스만 사용."""
+    """(rows, receipts, unit_prices) 반환. production_quantile/val_weeks/n_folds/order_level/alpha/
+    calibrate/service_level/cal_fold_frac은 real 소스만 사용."""
     if source == "synthetic":
         return _synthetic_prospective_inputs()
     if source == "real":
         return _real_prospective_inputs(
             store_id, production_quantile=production_quantile, val_weeks=val_weeks,
             n_folds=n_folds, order_level=order_level, alpha=alpha,
+            calibrate=calibrate, service_level=service_level, cal_fold_frac=cal_fold_frac,
         )
     raise ValueError(f"unknown source: {source!r} (expected 'synthetic' or 'real')")
 
@@ -2033,6 +2118,15 @@ def cmd_prospective_eval(
     alpha: float = typer.Option(
         DEFAULT_ALPHA, help="adjusted_demand의 마감할인 실수요 비율 α (real 소스만 사용)"
     ),
+    calibrate: bool = typer.Option(
+        False, help="conformal 보정 발주 사용(real+item 경로). base median + cross-fold half-split"
+    ),
+    target_service_level: float = typer.Option(
+        DEFAULT_SERVICE_LEVEL, help="conformal 목표 서비스레벨 s (초과율 목표=1−s, 기본 0.74)"
+    ),
+    cal_fold_frac: float = typer.Option(
+        0.5, help="앞쪽 folds 중 calibration 비율(나머지=test)"
+    ),
     out_csv: str = typer.Option("reports/prospective_kpi.csv"),
 ) -> None:
     """우리 발주 추천 vs 현행 발주를 KPI(폐기/매진시각/매진률)로 비교.
@@ -2045,6 +2139,7 @@ def cmd_prospective_eval(
         source, store_id,
         production_quantile=production_quantile, val_weeks=our_order_val_weeks, n_folds=n_folds,
         order_level=order_level, alpha=alpha,
+        calibrate=calibrate, service_level=target_service_level, cal_fold_frac=cal_fold_frac,
     )
     profiles = build_arrival_profile(
         receipts, group_cols=["item_id"],
@@ -2087,8 +2182,11 @@ def cmd_prospective_eval(
         exceed = quantile_exceedance_rate(
             rows["adjusted_demand"].to_numpy(), rows["our_order"].to_numpy()
         )
+        nominal_label, nominal_value = (
+            ("s", 1 - target_service_level) if calibrate else ("α", 1 - production_quantile)
+        )
         console.print(f"[cyan]calibration[/] 초과율 P(demand>order)={exceed:.3f} "
-                      f"(nominal 1−α={1 - production_quantile:.2f})")
+                      f"(nominal 1−{nominal_label}={nominal_value:.2f})")
         console.print(f"[cyan]waste sanity[/] {compare_actual_vs_simulated_waste(rows, base)}")
     if source == "real" and order_level == "category":
         by_date = rows.groupby("date").agg(
