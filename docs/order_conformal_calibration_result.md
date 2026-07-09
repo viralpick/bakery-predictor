@@ -55,6 +55,10 @@ conformal margin. item-days = 6,904 (test-fold 절반만, diag의 절반 populat
   0.529 → 0.070으로, gap의 **약 87%가 닫힌다**.
 - WPE(s=0.74)=0.280 — 여전히 over-forecast 방향 편향이지만 raw q0.85의 −0.301(반대
   방향, under-forecast)보다 부호가 뒤집혔을 뿐 크기는 비슷한 수준.
+  이 WPE 비교는 서로 다른 baseline population(conformal item-days=6,904 vs raw
+  q0.85 진단 item-days=13,554) 간 비교라 방향(부호 반전)만 참고할 수 있고 절대
+  크기 비교는 부적절하다 — 아래 캐비엣의 "오직 초과율/방향 신호만 정성적으로
+  비교 가능" 원칙과 동일하게 적용된다.
 
 ## 표 3 — 프론티어: s ∈ {0.70, 0.74, 0.80, 0.85, 0.90, 0.95}
 

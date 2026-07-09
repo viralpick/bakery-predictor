@@ -1979,6 +1979,10 @@ def _conformal_order_predictions(
     alpha: float = DEFAULT_ALPHA,
 ) -> pd.DataFrame:
     """base median 발주 + cross-fold half-split conformal 보정 → test folds our_order."""
+    if n_folds < 2:
+        raise ValueError(
+            f"--calibrate needs n_folds >= 2 (cal/test half-split); got {n_folds}"
+        )
     ds = _load_dataset("real", None)
     daily = _enrich_if_needed(ds, ["v2"])
     daily = build_item_adjusted_demand(daily, alpha=alpha)

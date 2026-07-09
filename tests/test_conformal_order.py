@@ -30,6 +30,12 @@ def test_apply_positive_margin_exact():
     assert got.tolist() == [13.0]  # 10 + 1.0*3
 
 
+def test_apply_before_fit_raises_runtime_error():
+    calib = ConformalOrderCalibrator()  # fresh, unfitted — q_s never set
+    with pytest.raises(RuntimeError, match="before fit"):
+        calib.apply(np.array([10.0]), np.array([1.0]))
+
+
 def test_coverage_contract_on_exchangeable_synthetic():
     # 이유: conformal coverage는 통계적 보장이라 정확값 불가 → 허용오차 단언.
     rng = np.random.default_rng(42)

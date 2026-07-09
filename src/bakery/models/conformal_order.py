@@ -28,6 +28,8 @@ class ConformalOrderCalibrator:
 
     def apply(self, base_pred: np.ndarray, scales: np.ndarray) -> np.ndarray:
         """order = clip(base + q_s × scale, 0, None)."""
+        if not hasattr(self, "q_s"):
+            raise RuntimeError("ConformalOrderCalibrator.apply called before fit()")
         base_pred = np.asarray(base_pred, dtype=float)
         scales = np.asarray(scales, dtype=float)
         return np.clip(base_pred + self.q_s * scales, 0.0, None)

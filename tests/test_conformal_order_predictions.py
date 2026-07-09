@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from bakery.cli import _apply_conformal_to_folds
+from bakery.cli import _apply_conformal_to_folds, _conformal_order_predictions
 
 
 def _preds():
@@ -60,3 +60,11 @@ def test_cal_test_split_is_chronological_not_by_fold_index():
     # cal = fold 1 (earlier): score (14-10)/4 = 1.0 → q_s(higher@0.5)=1.0
     # test fold 0: 10 + 1.0*4 = 14
     assert out["our_order"].iloc[0] == pytest.approx(14.0)
+
+
+def test_n_folds_below_2_raises_before_any_data_load():
+    # half-split (cal/test) is undefined on a single fold: n_cal would consume the
+    # only fold, leaving 0 test rows. Guard is the first line of the function, so
+    # this must raise immediately — no dataset/LGBM load — even for a bogus store_id.
+    with pytest.raises(ValueError, match="n_folds >= 2"):
+        _conformal_order_predictions("store_gw01", n_folds=1)
