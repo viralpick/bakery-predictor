@@ -223,13 +223,20 @@ def cmd_predict_next_week(
 
 def _demand_points_next_week(
     ds: DailyDataset, model: str, use_forecast: bool,
+    source: str = "synthetic", closing_alpha: float = DEFAULT_ALPHA,
 ) -> tuple[pd.DataFrame, str]:
     """Per-item demand point estimates for the next 7 days (v6 point estimate)."""
     feature_set = _model_to_feature_set(model)
     daily = _enrich_if_needed(ds, [feature_set]) if feature_set else ds.daily
+    if feature_set in {"v2", "v3"}:
+        daily, target_col = _resolve_demand_col(daily, source, closing_alpha)
+    else:
+        target_col = None
     last = daily["date"].max()
     horizon = pd.date_range(last + pd.Timedelta(days=1), periods=7, freq="D")
     forecaster = _pick_model(model)
+    if feature_set in {"v2", "v3"}:
+        forecaster = GlobalLGBM(feature_set=feature_set, y_col=target_col)
     forecaster.fit(daily)
     pairs = daily[["store_id", "item_id", "category_id"]].drop_duplicates()
     target = pairs.merge(pd.DataFrame({"date": horizon}), how="cross")
@@ -250,6 +257,7 @@ def cmd_v6_predict(
     n_samples: int = 5000,
     use_forecast: bool = False,
     out_dir: Path = REPORTS_DIR,
+    closing_alpha: float = DEFAULT_ALPHA,
 ) -> None:
     """v6 산출물: 점추정 + 발주량 + 매진/폐기 위험 수치 + 결정 lineage.
 
@@ -258,7 +266,7 @@ def cmd_v6_predict(
     (docs/kinetic_layer_fit_analysis.md §8·§10). 예측 이후 단계라 leakage 없음.
     """
     ds = _load_dataset(source, data_dir)
-    items, model_name = _demand_points_next_week(ds, model, use_forecast)
+    items, model_name = _demand_points_next_week(ds, model, use_forecast, source, closing_alpha)
     rec = build_recommendation(
         items[["store_id", "category_id", "item_id", "date", "demand_point"]],
         PolicyParams(safety_margin=safety_margin),
