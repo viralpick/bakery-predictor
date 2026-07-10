@@ -33,8 +33,8 @@ uv sync                                                       # 의존성 설치
 uv run bakery generate-data                                   # synthetic hourly/daily/weather/calendar parquet
 uv run bakery ingest-calendar / ingest-weather                # 실 API 백필 (.env 필요)
 uv run bakery ingest-forecast                                 # 단기+중기 예보 (운영 시 사용)
-uv run bakery backtest --source real --variants v0,v1,v2      # 3종 LGBM + baselines 동시 비교
-uv run bakery predict-next-week --source real --model lightgbm_v2 --use-forecast --production-quantile 0.85
+uv run bakery backtest --source real --variants v0,v1,v2      # 3종 LGBM + baselines 동시 비교 (real: v2/v3는 adjusted_demand로 학습, --closing-alpha 기본 0.5; 출력 predictions.csv 컬럼은 yhat/sold_units 그대로)
+uv run bakery predict-next-week --source real --model lightgbm_v2 --use-forecast --production-quantile 0.85  # real: yhat_adjusted_demand 출력, --closing-alpha 기본 0.5
 uv run pytest                                                 # 테스트
 ```
 

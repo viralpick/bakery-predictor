@@ -304,6 +304,9 @@ def aggregate_daily(
         StoreHours(store_id=sid, open_hour=7, close_hour=22)
         for sid in daily["store_id"].unique()
     ]
+    # NOTE: potential_demand는 real에서 stockout_time 로더 버그로 오염됨(하루 다중
+    # 품절 이벤트 중 첫 것만 취함). real 소비 경로는 adjusted_demand로 전환됨
+    # (#3 감사, 2026-07-10). 이 컬럼은 schema 정합성·synthetic 패리티 위해서만 유지.
     daily = attach_potential_demand(
         daily, store_hours_for_daily, measured_profiles=measured_profiles
     )
@@ -401,6 +404,9 @@ def build(
                 StoreHours(store_id=sid, open_hour=7, close_hour=22)
                 for sid in daily["store_id"].unique()
             ]
+            # NOTE: potential_demand는 real에서 stockout_time 로더 버그로 오염됨(하루 다중
+            # 품절 이벤트 중 첫 것만 취함). real 소비 경로는 adjusted_demand로 전환됨
+            # (#3 감사, 2026-07-10). 이 컬럼은 schema 정합성·synthetic 패리티 위해서만 유지.
             daily = attach_potential_demand(
                 daily, store_hours,
                 outflow_ratio=matrix.outflow_ratio.clip(lower=0.0, upper=1.0),

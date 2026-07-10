@@ -17,6 +17,7 @@ from .decision import PolicyParams, RiskParams, build_recommendation, lineage_to
 from .data.synthetic import generate_synthetic_bundle
 from .data.weather import load_weather_forecast_from_local
 from .evaluation.backtest import aggregate_by_model, per_category_wape, run_backtest
+from .evaluation.business_metrics import CostParams, asymmetric_loss, simulate_profit
 from .evaluation.classifier_metrics import base_rate, precision_at_k, recall_at_k, roc_auc
 from .evaluation.diagnostics import decoupling_score
 from .evaluation.metrics import quantile_exceedance_rate, wape, wpe
@@ -116,15 +117,18 @@ def cmd_backtest(
     variants: str = "v0,v1",
     include_production: bool = False,
     out_dir: Path = REPORTS_DIR,
+    closing_alpha: float = DEFAULT_ALPHA,
 ) -> None:
     """Compare baselines + LightGBM variants on the same rolling folds."""
     variant_list = _parse_variants(variants)
     ds = _load_dataset(source, data_dir)
     daily = _enrich_if_needed(ds, variant_list)
+    daily, demand_col = _resolve_demand_col(daily, source, closing_alpha)
     windows = generate_time_splits(
         daily["date"], n_splits=n_splits, val_horizon_days=horizon_days, step_days=step_days
     )
-    forecasters = _build_forecasters(variant_list, include_production=include_production)
+    forecasters = _build_forecasters(variant_list, include_production=include_production,
+                                     v23_target=demand_col)
     console.print(
         f"[cyan]backtest[/] folds={len(windows)} horizon={horizon_days}d "
         f"variants={variant_list} models={[f.name for f in forecasters]}"
@@ -147,6 +151,7 @@ def cmd_predict_next_week(
     risk_bonus: float = 0.25,
     use_forecast: bool = False,
     out_dir: Path = REPORTS_DIR,
+    closing_alpha: float = DEFAULT_ALPHA,
 ) -> None:
     """Train on all history; emit demand prediction + recommended production.
 
@@ -160,9 +165,15 @@ def cmd_predict_next_week(
     feature_set = _model_to_feature_set(model)
     ds = _load_dataset(source, data_dir)
     daily = _enrich_if_needed(ds, [feature_set]) if feature_set else ds.daily
+    if feature_set in {"v2", "v3"}:
+        daily, target_col = _resolve_demand_col(daily, source, closing_alpha)
+    else:
+        target_col = None
     last = daily["date"].max()
     horizon = pd.date_range(last + pd.Timedelta(days=1), periods=7, freq="D")
     forecaster = _pick_model(model)
+    if feature_set in {"v2", "v3"}:
+        forecaster = GlobalLGBM(feature_set=feature_set, y_col=target_col)
     forecaster.fit(daily)
     pairs = daily[["store_id", "item_id", "category_id"]].drop_duplicates()
     target = pairs.merge(pd.DataFrame({"date": horizon}), how="cross")
@@ -172,12 +183,13 @@ def cmd_predict_next_week(
             target, ds, forecast_weather=forecast_weather, include_external=(feature_set == "v3"),
         )
     yhat = forecaster.predict(target)
-    demand_col = "yhat_potential_demand" if feature_set in {"v2", "v3"} else "yhat_sold_units"
+    demand_col = f"yhat_{target_col}" if feature_set in {"v2", "v3"} else "yhat_sold_units"
     target = target.assign(**{demand_col: yhat.round(2).to_numpy(), "model": forecaster.name})
 
     if feature_set in {"v2", "v3"}:
         prod_params = LGBMParams(objective="quantile", alpha=production_quantile)
-        prod_model = GlobalLGBM(feature_set=feature_set, params=prod_params).fit(daily)
+        prod_model = GlobalLGBM(feature_set=feature_set, params=prod_params,
+                                y_col=target_col).fit(daily)
         prod_yhat = prod_model.predict(target)
         target["stockout_prob"] = float("nan")
         target["recommended_production"] = prod_yhat.round(0).to_numpy()
@@ -211,13 +223,20 @@ def cmd_predict_next_week(
 
 def _demand_points_next_week(
     ds: DailyDataset, model: str, use_forecast: bool,
+    source: str = "synthetic", closing_alpha: float = DEFAULT_ALPHA,
 ) -> tuple[pd.DataFrame, str]:
     """Per-item demand point estimates for the next 7 days (v6 point estimate)."""
     feature_set = _model_to_feature_set(model)
     daily = _enrich_if_needed(ds, [feature_set]) if feature_set else ds.daily
+    if feature_set in {"v2", "v3"}:
+        daily, target_col = _resolve_demand_col(daily, source, closing_alpha)
+    else:
+        target_col = None
     last = daily["date"].max()
     horizon = pd.date_range(last + pd.Timedelta(days=1), periods=7, freq="D")
     forecaster = _pick_model(model)
+    if feature_set in {"v2", "v3"}:
+        forecaster = GlobalLGBM(feature_set=feature_set, y_col=target_col)
     forecaster.fit(daily)
     pairs = daily[["store_id", "item_id", "category_id"]].drop_duplicates()
     target = pairs.merge(pd.DataFrame({"date": horizon}), how="cross")
@@ -238,6 +257,7 @@ def cmd_v6_predict(
     n_samples: int = 5000,
     use_forecast: bool = False,
     out_dir: Path = REPORTS_DIR,
+    closing_alpha: float = DEFAULT_ALPHA,
 ) -> None:
     """v6 산출물: 점추정 + 발주량 + 매진/폐기 위험 수치 + 결정 lineage.
 
@@ -246,7 +266,7 @@ def cmd_v6_predict(
     (docs/kinetic_layer_fit_analysis.md §8·§10). 예측 이후 단계라 leakage 없음.
     """
     ds = _load_dataset(source, data_dir)
-    items, model_name = _demand_points_next_week(ds, model, use_forecast)
+    items, model_name = _demand_points_next_week(ds, model, use_forecast, source, closing_alpha)
     rec = build_recommendation(
         items[["store_id", "category_id", "item_id", "date", "demand_point"]],
         PolicyParams(safety_margin=safety_margin),
@@ -281,6 +301,28 @@ def _parse_variants(variants: str) -> list[str]:
     if bad:
         raise typer.BadParameter(f"unknown variants {bad}. choose from {list(VALID_FEATURE_SETS)}")
     return parts
+
+
+def _resolve_demand_col(
+    daily: pd.DataFrame,
+    source: str,
+    closing_alpha: float,
+    discount_rows: pd.DataFrame | None = None,
+) -> tuple[pd.DataFrame, str]:
+    """소스별 수요 컬럼 결정.
+
+    real  → build_item_adjusted_demand로 adjusted_demand 부착 후 컬럼명 반환.
+    synth → 입력 프레임 그대로, 'potential_demand'.
+
+    potential_demand는 real에서 stockout_time 로더 버그로 오염돼 소비 금지
+    (docs/superpowers/specs/2026-07-10-potential-demand-audit-design.md).
+    """
+    if source == "real":
+        enriched = build_item_adjusted_demand(
+            daily, discount_rows=discount_rows, alpha=closing_alpha
+        )
+        return enriched, "adjusted_demand"
+    return daily, "potential_demand"
 
 
 def _load_dataset(source: str, data_dir: Path | None) -> DailyDataset:
@@ -363,15 +405,21 @@ def _load_forecast_weather(horizon: pd.DatetimeIndex) -> pd.DataFrame | None:
 
 
 def _build_forecasters(variants: list[str], *, include_production: bool = False,
-                       production_quantile: float = 0.85):
+                       production_quantile: float = 0.85,
+                       v23_target: str | None = None):
     """Build baseline + LightGBM-per-variant list, optionally adding quantile
-    production models for v2/v3 (lightgbm_v2_q85 etc.)."""
+    production models for v2/v3 (lightgbm_v2_q85 etc.).
+
+    v23_target: v2/v3의 학습 target을 명시(예: real→'adjusted_demand'). None이면
+    모델 기본값(_default_target=potential_demand). v0/v1은 항상 sold_units.
+    """
     forecasters = [SeasonalNaive(n_weeks=4), MovingAverage(window=28)]
     for v in variants:
-        forecasters.append(GlobalLGBM(feature_set=v))  # demand (median) model
+        y = v23_target if (v23_target and v in {"v2", "v3"}) else None
+        forecasters.append(GlobalLGBM(feature_set=v, y_col=y))  # demand (median) model
         if include_production and v in {"v2", "v3"}:
             prod_params = LGBMParams(objective="quantile", alpha=production_quantile)
-            forecasters.append(GlobalLGBM(feature_set=v, params=prod_params))
+            forecasters.append(GlobalLGBM(feature_set=v, params=prod_params, y_col=y))
     return forecasters
 
 
@@ -536,6 +584,7 @@ def cmd_alpha_sweep(
     lost_sale_multiplier: float = 1.7,
     item_master: Path = Path("data/internal/보나비 데이터_20260520.xlsx"),
     out_dir: Path = REPORTS_DIR,
+    closing_alpha: float = DEFAULT_ALPHA,
 ) -> None:
     """Production-model quantile α sweep — net_profit-최대 α 찾기.
 
@@ -543,9 +592,6 @@ def cmd_alpha_sweep(
     """
     import warnings
     import numpy as np
-    from .evaluation.business_metrics import (
-        CostParams, asymmetric_loss, simulate_profit,
-    )
 
     warnings.filterwarnings("ignore")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -562,6 +608,7 @@ def cmd_alpha_sweep(
 
     ds = _load_dataset(source, None)
     daily = _enrich_if_needed(ds, [variant])
+    daily, demand_col = _resolve_demand_col(daily, source, closing_alpha)
     windows = generate_time_splits(
         daily["date"], n_splits=n_splits, val_horizon_days=horizon_days, step_days=step_days
     )
@@ -569,10 +616,10 @@ def cmd_alpha_sweep(
     forecasters = []
     for a in alpha_list:
         if a == 0.5:
-            forecasters.append(GlobalLGBM(feature_set=variant))  # median (regression)
+            forecasters.append(GlobalLGBM(feature_set=variant, y_col=demand_col))  # median (regression)
         else:
             params = LGBMParams(objective="quantile", alpha=a)
-            forecasters.append(GlobalLGBM(feature_set=variant, params=params))
+            forecasters.append(GlobalLGBM(feature_set=variant, params=params, y_col=demand_col))
 
     console.print(
         f"[cyan]alpha-sweep[/] variant={variant} αs={alpha_list} "
@@ -580,18 +627,19 @@ def cmd_alpha_sweep(
     )
     fold_df, pred_df = run_backtest(daily, forecasters, windows)
 
-    # Inject potential_demand for true-demand-aware profit simulation
-    if "potential_demand" in daily.columns:
-        pd_lookup = daily.set_index(["store_id", "item_id", "date"])["potential_demand"]
+    # Inject demand column for true-demand-aware profit simulation
+    if demand_col in daily.columns:
+        d_lookup = daily.set_index(["store_id", "item_id", "date"])[demand_col]
         pred_df = pred_df.copy()
-        pred_df["potential_demand"] = pred_df.set_index(
+        pred_df[demand_col] = pred_df.set_index(
             ["store_id", "item_id", "date"]
-        ).index.map(pd_lookup)
+        ).index.map(d_lookup)
 
     rows = []
     for model, sub in pred_df.groupby("model"):
         asym = asymmetric_loss(sub["yhat"], sub["sold_units"], params=cost_params)
-        profit = simulate_profit(sub, unit_prices=unit_prices, params=cost_params)
+        profit = simulate_profit(sub, unit_prices=unit_prices, params=cost_params,
+                                 potential_col=demand_col)
         rows.append({
             "model": model,
             "asymmetric_loss": asym,
@@ -639,6 +687,7 @@ def cmd_business_report(
     lost_sale_multiplier: float = 1.7,
     item_master: Path = Path("data/internal/보나비 데이터_20260520.xlsx"),
     out_dir: Path = REPORTS_DIR,
+    closing_alpha: float = DEFAULT_ALPHA,
 ) -> None:
     """v0 / v2 / v3 도입 시 광교 매장 예상 사업 임팩트 종합 리포트.
 
@@ -663,7 +712,6 @@ def cmd_business_report(
         CostParams,
         aggregate_profit,
         asymmetric_loss,
-        simulate_profit,
     )
 
     warnings.filterwarnings("ignore")
@@ -686,6 +734,7 @@ def cmd_business_report(
     variant_list = _parse_variants(variants)
     ds = _load_dataset(source, data_dir)
     daily = _enrich_if_needed(ds, variant_list)
+    daily, demand_col = _resolve_demand_col(daily, source, closing_alpha)
 
     console.print("\n[bold cyan]━━━ 사업 임팩트 리포트 ━━━[/]\n")
     console.print(
@@ -795,7 +844,8 @@ def cmd_business_report(
         daily["date"], n_splits=n_splits, val_horizon_days=horizon_days, step_days=step_days
     )
     forecasters = _build_forecasters(
-        variant_list, include_production=True, production_quantile=production_quantile
+        variant_list, include_production=True, production_quantile=production_quantile,
+        v23_target=demand_col,
     )
     fold_df, pred_df = run_backtest(daily, forecasters, windows)
     summary = aggregate_by_model(fold_df).sort_values("wape_all")
@@ -812,18 +862,19 @@ def cmd_business_report(
 
     # ─── D. Business KPI per model ───
     console.print("\n[bold]4. 모델별 사업 KPI (asymmetric loss + profit simulation)[/]")
-    # Inject potential_demand into pred_df from the enriched daily so simulate_profit
+    # Inject demand column into pred_df from the enriched daily so simulate_profit
     # can see the censoring-corrected target.
-    if "potential_demand" in daily.columns:
-        pd_lookup = daily.set_index(["store_id", "item_id", "date"])["potential_demand"]
+    if demand_col in daily.columns:
+        d_lookup = daily.set_index(["store_id", "item_id", "date"])[demand_col]
         pred_df = pred_df.copy()
-        pred_df["potential_demand"] = pred_df.set_index(
+        pred_df[demand_col] = pred_df.set_index(
             ["store_id", "item_id", "date"]
-        ).index.map(pd_lookup)
+        ).index.map(d_lookup)
     biz_rows = []
     for model, sub in pred_df.groupby("model"):
         asym = asymmetric_loss(sub["yhat"], sub["sold_units"], params=cost_params)
-        profit = simulate_profit(sub, unit_prices=unit_prices, params=cost_params)
+        profit = simulate_profit(sub, unit_prices=unit_prices, params=cost_params,
+                                 potential_col=demand_col)
         biz_rows.append({
             "model": model, "asymmetric_loss": asym,
             "revenue_krw": float(profit["revenue_krw"].sum()),

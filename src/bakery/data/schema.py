@@ -22,6 +22,7 @@ HOURLY_COLUMNS: dict[str, str] = {
 # non-stockout days; > sold_units for early-stockout days). See
 # features/potential_demand.py for the correction formula. Stored as float32
 # because it's a derived continuous quantity, not a count.
+# ⚠️ real에서는 stockout_time 버그로 오염 — real 경로는 adjusted_demand 사용(#3 감사).
 DAILY_COLUMNS: dict[str, str] = {
     "store_id": "string",
     "item_id": "string",
