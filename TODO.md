@@ -16,7 +16,7 @@
 ## 발주 calibration 후속 (PR#30 conformal 이후, 2026-07-09 합의 순서 3→4→1→2)
 
 - [x] **#3 `potential_demand` 전역 감사·제거** (PR#31) — 소스별 규칙(real→adjusted_demand, synthetic→potential_demand)을 공유 헬퍼 `_resolve_demand_col`/`_resolve_demand_proxy`로 통일. 6개 real 소비처 전환(backtest/predict-next-week/alpha-sweep/business-report/ontology v7/v6-predict). **모델 레벨 `_default_target` 불변** — CLI/ontology 레이어 y_col 명시로 국소화. 데이터 레이어/schema는 deprecation 마커만(synthetic 생성기·arrival 헬퍼·필드 유지). `--closing-alpha` 옵션. 435 passed. defer(Minor): alpha-sweep 전 variant override(v2도구라 무해)/predict·v6 v2/v3 synthetic smoke만(real e2e 데이터부재).
-- [ ] **#4 stockout_classifier 재학습** (★다음) — is_stockout 92%→60.4% 재정의(PR#28) 후 옛 라벨로 학습된 분류기가 "거의 항상 품절"만 학습(무의미, P매진 아티팩트). 새 라벨 bonavi_daily로 재학습+재측정. 데이터 준비됨, 값쌈.
+- [x] **#4 stockout_classifier 재측정** — 고친 라벨(60.4%)에서 재측정. 재학습은 자동(런타임 fit, 데이터 고쳐진 시점). base_rate 92%→~0.48–0.59 균형 회복(degenerate 해소=재정의 성공), but AUC 평균~0.63 약판별·성탄주 0.45. 판정: 아티팩트 청산 완료, 분류기 자체는 약함, **현 PoC 비주류**(v2/v3·v6·ontology 미사용, predict-next-week v1 legacy만 소비)→추가 투자 없음. docs/stockout_classifier_retrain_result.md.
 - [ ] **#1 category 경로 conformal 적용** — `ConformalOrderCalibrator`가 path-agnostic이라 잣대를 카테고리-총합으로 바꿔 재사용. 카테고리 총량에 마진→품목 배분. category under-cover(초과율 0.458) 교정.
 - [ ] **#2 (축소) conformal 잔차 진단 1회** — 원래 "홀리데이 Mondrian"이었으나 **재검토 결과 드롭 방향**: 특수일(발렌타인/화이트데이/빼빼로/명절 days_to_* + is_*)은 이미 base 모델 피처라 홀리데이 조건화는 중복. +0.02~0.07 균일 잔차의 유력 원인=cal(과거)↔test(최근) **시간 드리프트** or 품목 volume 이질성(홀리데이 아님). 진단(잔차를 명절/평일·volume tier·cal-test gap로 분해)만 하고, 드리프트가 주범이면 drift-aware conformal 검토. 운영 s=0.74 잔차 +0.039로 작아 **PoC 충분** 가능 → 최저 우선순위, 진단 결과로 종료 여부 결정.
 
