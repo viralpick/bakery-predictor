@@ -4,9 +4,11 @@ provider="auto" picks Azure when AZURE_OPENAI_API_KEY is set)."""
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 
 from ...data.loader import DailyDataset, load_dataset
+from ...features.category_aggregate import DEFAULT_ALPHA, build_item_adjusted_demand
 from .arms import run_grounded, run_rag_only
 from .llm import LLMClient, make_llm_client
 from .questions import QUESTIONS, build_gold
@@ -33,4 +35,8 @@ def run_eval_with_client(client: LLMClient, dataset: DailyDataset) -> EvalReport
 def run_eval(provider: str = "auto", model: str = "gpt-5-mini",
              source: str = "synthetic") -> EvalReport:
     client = make_llm_client(provider, model)
-    return run_eval_with_client(client, load_dataset(source))
+    dataset = load_dataset(source)
+    if source == "real":
+        enriched = build_item_adjusted_demand(dataset.daily, alpha=DEFAULT_ALPHA)
+        dataset = dataclasses.replace(dataset, daily=enriched)
+    return run_eval_with_client(client, dataset)

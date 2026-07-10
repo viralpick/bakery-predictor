@@ -6,10 +6,12 @@ layer (commit 8d13157) — no new modeling logic. The numbers come from the
 deterministic engine; the agent's job is only to call + interpret (docs §2,
 "수치 = 엔진, 해석 = LLM").
 
-Demand point estimate: this pre-work uses historical `potential_demand` (the
-censoring-corrected target) as the point-estimate proxy, since the live forecast
-is not wired in yet. Swap `demand_col`/inject a forecast when LayerA lands —
-the function signatures don't change. Labeled, not hidden (fairness contract §7).
+Demand point estimate: historical demand proxy, auto-resolved per call via
+`_resolve_demand_proxy` — `adjusted_demand` when present (real data, enriched
+by grounding/run.py's real-source path), else `potential_demand` (synthetic,
+or a raw frame without the fix). Swap `demand_col`/inject a live forecast when
+LayerA lands — the function signatures don't change. Labeled, not hidden
+(fairness contract §7).
 
 All functions are *read-only* over the ontology (AOS rule). Writeback lives in
 writeback.py (S4) behind a human-approval gate.
@@ -32,9 +34,18 @@ from ..decision import (
 from . import scenario
 from .writeback import WritebackStore
 
-DEMAND_PROXY_COL = "potential_demand"
+DEMAND_PROXY_COL = "potential_demand"  # fallback when adjusted_demand isn't attached
 CONDITION_ON, CONDITION_OFF = 1, 0   # 0/1 flag values for demand_diff_by_condition
 DEFAULT_CLOSE_HOUR = 22  # 라벨된 가정: bonavi loader 하드코딩·synthetic store_A와 일치 (spec D3)
+
+
+def _resolve_demand_proxy(daily: pd.DataFrame) -> str:
+    """수요 점추정 컬럼 결정: adjusted_demand 있으면 그것(real), 없으면 potential_demand.
+
+    real 데이터의 potential_demand는 stockout_time 로더 버그로 오염 →
+    grounding/run.py가 real일 때 adjusted_demand를 부착하면 자동 채택된다.
+    """
+    return "adjusted_demand" if "adjusted_demand" in daily.columns else DEMAND_PROXY_COL
 
 
 def _period_slice(daily: pd.DataFrame, store_id: str, start: str, end: str) -> pd.DataFrame:
@@ -59,11 +70,12 @@ def rank_stockout_risk(
     period: tuple[str, str],
     k: int = 5,
     *,
-    demand_col: str = DEMAND_PROXY_COL,
+    demand_col: str | None = None,
     policy: PolicyParams = PolicyParams(),
     risk: RiskParams = RiskParams(),
 ) -> pd.DataFrame:
     """Top-k items by P(stockout) for a store over a period (uses risk.py MC)."""
+    demand_col = demand_col or _resolve_demand_proxy(daily)
     items = _item_demand_points(_period_slice(daily, store_id, *period), demand_col)
     rec = build_recommendation(items, policy=policy, risk=risk)
     ranked = rec.table.sort_values("p_stockout", ascending=False).head(k)
@@ -111,10 +123,11 @@ def explain_order(
     item_id: str,
     period: tuple[str, str],
     *,
-    demand_col: str = DEMAND_PROXY_COL,
+    demand_col: str | None = None,
     policy: PolicyParams = PolicyParams(),
 ) -> pd.DataFrame:
     """Decision lineage for one item's order: base → safety → floor → rounding."""
+    demand_col = demand_col or _resolve_demand_proxy(daily)
     items = _item_demand_points(_period_slice(daily, store_id, *period), demand_col)
     match = items.loc[items["item_id"] == item_id, "demand_point"]
     if match.empty:
