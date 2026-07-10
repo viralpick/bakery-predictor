@@ -143,3 +143,32 @@ KRW로 급등하는데 stockout_rate Δ 개선은 +0.090→+0.0001로 거의 사
 
 `reports/`는 `.gitignore`에 포함되어 있어 CSV/로그는 git에 커밋되지 않는다(재현하려면 위
 brief의 명령을 그대로 재실행).
+
+## 후속 #1 (category 경로 conformal) — 결정: 미실행 (2026-07-10)
+
+원래 후속 백로그 #1은 "`ConformalOrderCalibrator`(path-agnostic)를 카테고리-총합에 재사용해
+category under-calibration을 교정"이었다. 착수 단계에서 재검토한 결과 **conformal은 item
+경로 전용으로 확정하고 카테고리 경로에는 적용하지 않기로 결정**했다.
+
+**근거**
+- conformal이 item 경로에 필요했던 이유는 item quantile 모델이 **구조적으로
+  under-dispersed**이기 때문이다. 위 진단표(표 1)대로 q를 0.85→0.99로 15배 좁혀도 실현
+  초과율은 0.679→0.421까지만 내려가 q-tuning만으로는 nominal에 못 닿았다. 그래서 잔차
+  마진(conformal)이 필요했다.
+- 반면 **카테고리 총합은 매끈한 aggregate 시계열**이라 sparse/under-dispersed 문제가
+  약하고, LGBM production_q(quantile 회귀)가 총합 분위를 직접 예측하는 게 자연스럽다.
+  그 위에 conformal 잔차를 덧씌우는 것은 "보정의 보정"으로 설계상 지저분하고, 애초에
+  필요성도 불분명하다.
+
+**남기는 loose end — 카테고리 총합 초과율 0.346**
+- `target_unification_remeasure_result.md` 기준, 통일 target(adjusted_demand)·q=0.85·
+  full-window n_folds=8·광교에서 **카테고리-총합** 초과율 `P(Σdemand>Σorder)=0.346`
+  (nominal 0.15). 배분 **후** item-day 초과율은 0.458이지만, conformal이 직접 손댈 잣대는
+  배분 **전** 총합값 0.346이다.
+- 이 총합 under-calibration은 교정하지 않고 남긴다. 카테고리 경로는 PR#27 재측정에서
+  item-level을 못 이긴 **non-primary 경로**이므로(운영 경로 = item + conformal), 쓰지 않는
+  경로를 calibrate하는 데 추가 투자하지 않는다. 향후 카테고리 총합을 nominal에 맞춰야 할
+  일이 생기면, 우선 검토할 레버는 conformal이 아니라 **LGBM production_q 스윕**(0.85→0.90/
+  0.95 — 매끈한 aggregate라 q-tuning으로 잡힐 가능성이 item보다 높다)이다.
+
+**코드 변경 없음.** 이 태스크는 설계 결정으로 종료한다.
