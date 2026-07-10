@@ -283,6 +283,28 @@ def _parse_variants(variants: str) -> list[str]:
     return parts
 
 
+def _resolve_demand_col(
+    daily: pd.DataFrame,
+    source: str,
+    closing_alpha: float,
+    discount_rows: pd.DataFrame | None = None,
+) -> tuple[pd.DataFrame, str]:
+    """소스별 수요 컬럼 결정.
+
+    real  → build_item_adjusted_demand로 adjusted_demand 부착 후 컬럼명 반환.
+    synth → 입력 프레임 그대로, 'potential_demand'.
+
+    potential_demand는 real에서 stockout_time 로더 버그로 오염돼 소비 금지
+    (docs/superpowers/specs/2026-07-10-potential-demand-audit-design.md).
+    """
+    if source == "real":
+        enriched = build_item_adjusted_demand(
+            daily, discount_rows=discount_rows, alpha=closing_alpha
+        )
+        return enriched, "adjusted_demand"
+    return daily, "potential_demand"
+
+
 def _load_dataset(source: str, data_dir: Path | None) -> DailyDataset:
     if source == "parquet" and data_dir is None:
         data_dir = REPORTS_DIR
