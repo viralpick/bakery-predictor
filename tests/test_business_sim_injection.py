@@ -48,7 +48,7 @@ def capture_profit(monkeypatch):
     )
     monkeypatch.setattr("bakery.cli.pd.read_excel",
                         lambda *a, **k: pd.DataFrame({"품목코드": ["A"], "상품구분": ["SS"],
-                                                      "판매단가": [3000]}))
+                                                      "판매단가": [3000], "POS메뉴명": ["빵A"]}))
     return seen
 
 
@@ -57,6 +57,16 @@ def test_alpha_sweep_real_uses_adjusted_demand(capture_profit, tmp_path):
     result = runner.invoke(app, [
         "alpha-sweep", "--source", "real", "--variant", "v0",
         "--alphas", "0.5", "--n-splits", "2", "--out-dir", str(tmp_path),
+    ])
+    assert result.exit_code == 0, result.output
+    assert capture_profit["potential_col"] == "adjusted_demand"
+
+
+def test_business_report_real_uses_adjusted_demand(capture_profit, tmp_path):
+    runner = CliRunner()
+    result = runner.invoke(app, [
+        "business-report", "--source", "real", "--variants", "v0",
+        "--n-splits", "2", "--out-dir", str(tmp_path),
     ])
     assert result.exit_code == 0, result.output
     assert capture_profit["potential_col"] == "adjusted_demand"

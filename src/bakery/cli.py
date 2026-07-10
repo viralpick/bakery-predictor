@@ -679,6 +679,7 @@ def cmd_business_report(
     lost_sale_multiplier: float = 1.7,
     item_master: Path = Path("data/internal/보나비 데이터_20260520.xlsx"),
     out_dir: Path = REPORTS_DIR,
+    closing_alpha: float = DEFAULT_ALPHA,
 ) -> None:
     """v0 / v2 / v3 도입 시 광교 매장 예상 사업 임팩트 종합 리포트.
 
@@ -703,7 +704,6 @@ def cmd_business_report(
         CostParams,
         aggregate_profit,
         asymmetric_loss,
-        simulate_profit,
     )
 
     warnings.filterwarnings("ignore")
@@ -726,6 +726,7 @@ def cmd_business_report(
     variant_list = _parse_variants(variants)
     ds = _load_dataset(source, data_dir)
     daily = _enrich_if_needed(ds, variant_list)
+    daily, demand_col = _resolve_demand_col(daily, source, closing_alpha)
 
     console.print("\n[bold cyan]━━━ 사업 임팩트 리포트 ━━━[/]\n")
     console.print(
@@ -835,7 +836,8 @@ def cmd_business_report(
         daily["date"], n_splits=n_splits, val_horizon_days=horizon_days, step_days=step_days
     )
     forecasters = _build_forecasters(
-        variant_list, include_production=True, production_quantile=production_quantile
+        variant_list, include_production=True, production_quantile=production_quantile,
+        v23_target=demand_col,
     )
     fold_df, pred_df = run_backtest(daily, forecasters, windows)
     summary = aggregate_by_model(fold_df).sort_values("wape_all")
@@ -852,18 +854,19 @@ def cmd_business_report(
 
     # ─── D. Business KPI per model ───
     console.print("\n[bold]4. 모델별 사업 KPI (asymmetric loss + profit simulation)[/]")
-    # Inject potential_demand into pred_df from the enriched daily so simulate_profit
+    # Inject demand column into pred_df from the enriched daily so simulate_profit
     # can see the censoring-corrected target.
-    if "potential_demand" in daily.columns:
-        pd_lookup = daily.set_index(["store_id", "item_id", "date"])["potential_demand"]
+    if demand_col in daily.columns:
+        d_lookup = daily.set_index(["store_id", "item_id", "date"])[demand_col]
         pred_df = pred_df.copy()
-        pred_df["potential_demand"] = pred_df.set_index(
+        pred_df[demand_col] = pred_df.set_index(
             ["store_id", "item_id", "date"]
-        ).index.map(pd_lookup)
+        ).index.map(d_lookup)
     biz_rows = []
     for model, sub in pred_df.groupby("model"):
         asym = asymmetric_loss(sub["yhat"], sub["sold_units"], params=cost_params)
-        profit = simulate_profit(sub, unit_prices=unit_prices, params=cost_params)
+        profit = simulate_profit(sub, unit_prices=unit_prices, params=cost_params,
+                                 potential_col=demand_col)
         biz_rows.append({
             "model": model, "asymmetric_loss": asym,
             "revenue_krw": float(profit["revenue_krw"].sum()),
