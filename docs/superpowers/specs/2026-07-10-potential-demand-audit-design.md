@@ -15,18 +15,23 @@
 
 수요 target은 `adjusted_demand`(= `sold_units − closing_qty × (1−α)`, `features/category_aggregate.py:build_item_adjusted_demand`)로 확정됐다. PR#29/#30에서 **prospective-eval 경로**는 이미 adjusted_demand로 통일됐으나, 다음 경로들이 아직 real에서 `potential_demand`를 소비한다:
 
-| 경로 | 소비 형태 | 상태 |
+| 경로 | 소비 형태 | 기본 source |
 |---|---|---|
-| **ontology `rank_stockout_risk` / `_item_demand_points`** (v7 AOS 데모, ★현재 기준) | 수요 점추정 프록시 기본값 `DEMAND_PROXY_COL` | real 광교에서 **오염된 필드 live 소비** |
-| **backtest** (`cmd_backtest`, v2/v3) | 학습 target(`_default_target`) + profit-sim "true demand" 주입 + `business_metrics` 잣대 | PoC 이전 경로 |
-| **predict-next-week** (`cmd_predict_next_week`, v2/v3) | 학습 target + `yhat_potential_demand` 출력 컬럼 | PoC 이전/운영 경로 |
+| **ontology `rank_stockout_risk` / `_item_demand_points`** (v7 AOS 데모, ★현재 기준) | 수요 점추정 프록시 기본값 `DEMAND_PROXY_COL` | grounding-eval `--source` |
+| **backtest** (`cmd_backtest`, v2/v3) | v2/v3 **학습 target만** (평가는 sold_units 잣대) | synthetic |
+| **predict-next-week** (`cmd_predict_next_week`, v2/v3) | 학습 target + `yhat_potential_demand` 출력 컬럼 | (인자) |
+| **alpha-sweep** (`cmd_alpha_sweep`, v2) | 학습 target + profit-sim "true demand" 주입(cli:583) | **real** |
+| **business-report** (`cmd_business_report`, v0~v3) | 학습 target + profit-sim + 사업 KPI 주입(cli:817) | **real** |
 | prospective-eval | — | ✅ 이미 adjusted_demand (PR#29/#30) |
+
+**주입(profit-sim/KPI) 지점은 `alpha-sweep`·`business-report`** 두 커맨드다(spec 초안이 backtest로 오기). `backtest`는 v2/v3를 potential_demand로 학습만 하고 fold WAPE는 sold_units로 평가한다.
 
 ## 목표 / 비목표
 
 **목표**
-- real 데이터 경로(ontology + backtest + predict-next-week + business_metrics 잣대)가 `potential_demand`를 소비하지 않게 한다.
+- real 데이터 경로(ontology + backtest + predict-next-week + alpha-sweep + business-report)가 `potential_demand`를 소비하지 않게 한다.
 - 소스별 단일 결정 규칙으로 통일한다.
+- **국소화 원칙**: 모델 레벨 `_default_target`(v2/v3→potential_demand)은 **변경하지 않는다**(synthetic 기본값 + 기존 pin 테스트 보존). 전환은 CLI/ontology 레이어에서 real일 때 `y_col`/`demand_col`을 `adjusted_demand`로 **명시 전달**하는 방식으로만 한다.
 
 **비목표 (YAGNI)**
 - `potential_demand` 필드·모듈의 물리적 제거 (synthetic ground-truth + schema 정합성 때문에 불가·불필요).
@@ -61,20 +66,29 @@ def _resolve_demand_col(daily, source, alpha) -> (daily, col):
 
 ### 2. 경로별 변경
 
+공유 메커니즘: `_build_forecasters(variants, *, v23_target=...)` / 개별 `GlobalLGBM(..., y_col=demand_col)` 로 v2/v3 target을 CLI에서 주입. v0/v1은 항상 `sold_units`. `--closing-alpha`(기본 `DEFAULT_ALPHA`) 옵션 추가(alpha-sweep의 quantile `alphas`와 이름 충돌 회피 위해 `closing_alpha` 명명).
+
 **backtest (`cmd_backtest`)**
 - source==real이면 `_resolve_demand_col`로 daily enrich.
-- v2/v3 forecaster를 `y_col="adjusted_demand"`로 구성 (배관은 PR#29 `run_backtest(..., y_col=)` 로 이미 존재). v0/v1은 `sold_units` 그대로.
-- profit-sim 주입부(cli.py:583, 815) + `business_metrics` 잣대: real=`adjusted_demand` / synthetic=`potential_demand`.
+- `_build_forecasters(..., v23_target=demand_col)` → v2/v3가 real에서 `adjusted_demand` 학습(배관은 PR#29 검증). fold 평가 잣대(run_backtest y_col=sold_units)는 operations view라 그대로.
 
 **predict-next-week (`cmd_predict_next_week`)**
 - 동일 enrich.
-- 점추정 모델 + production-quantile 모델(cli.py:180) 둘 다 `y_col` 명시.
+- 점추정 모델 + production-quantile 모델(cli.py:180) 둘 다 `y_col=demand_col` 명시.
 - 출력 컬럼: `yhat_adjusted_demand`(real) / `yhat_potential_demand`(synthetic). (`demand_col` 변수, cli.py:175.)
 
+**alpha-sweep (`cmd_alpha_sweep`)**
+- 동일 enrich. 루프의 `GlobalLGBM(feature_set=variant, ...)`에 `y_col=demand_col`.
+- profit-sim 주입부(cli:583) → `demand_col` 사용. `simulate_profit(..., potential_col=demand_col)`.
+
+**business-report (`cmd_business_report`)**
+- 동일 enrich. `_build_forecasters(..., v23_target=demand_col)`.
+- profit-sim + 사업 KPI 주입부(cli:817) → `demand_col`. `simulate_profit(..., potential_col=demand_col)`.
+
 **ontology grounding (`rank_stockout_risk` / `_item_demand_points`, v7 AOS)**
-- grounding 진입점(`cli.py:1194` run_eval, `ontology/grounding/tools.py:101`, `questions.py:76`)이 `dataset.daily`를 함수에 전달. real이면 이 프레임을 enrich.
-- real일 때 `demand_col="adjusted_demand"` 전달.
-- `DEMAND_PROXY_COL`은 synthetic 기본값으로 유지. `functions.py` docstring "라이브 forecast 아직 안 wired" 문구를 real=adjusted 전환 반영으로 갱신.
+- `run_eval(source)`(grounding/run.py)가 `load_dataset(source)` 단일 지점 → real이면 여기서 `dataset.daily`를 `build_item_adjusted_demand`로 enrich (frozen dataclass이므로 `dataclasses.replace`).
+- `functions.py`에 `_resolve_demand_proxy(daily)` 추가: 프레임에 `adjusted_demand` 있으면 그것, 없으면 `potential_demand`. rank/point 함수 기본 `demand_col`을 이 리졸버로. → **source를 tools/arms까지 스레딩할 필요 없이** enrich된 프레임이 자동으로 adjusted 채택(real), synthetic은 potential 유지.
+- `DEMAND_PROXY_COL`은 fallback 상수로 유지. `functions.py` docstring "라이브 forecast 아직 안 wired" 문구를 real=adjusted 전환 반영으로 갱신.
 
 ### 3. 유지 (변경 없음)
 
@@ -99,13 +113,15 @@ synth: synthetic.daily ───────────────────
 
 ## 테스트 / 마이그레이션
 
-**영향 테스트 (착수 전 grep으로 fixture 포함 재확인)**
-- `test_v2_pipeline`, `test_v3_pipeline` — v2/v3 target을 `potential_demand`로 못박은 단언 → real 맥락이면 `adjusted_demand`로 이관.
-- `test_backtest_clone` — `_clone` y_col 보존(PR#29). y_col 변경 시 동작 확인.
-- `test_potential_demand` — 모듈 자체 테스트, synthetic/함수 단위라 유지.
-- `test_discount_analysis` — adjusted_demand 계산 관련, 유지·보강.
-- ontology grounding 테스트 (`test_grounding_run` 등) — real 데모 수요점 == adjusted 단언 갱신.
-- `test_prospective*` — 이미 adjusted, 회귀 방지 유지.
+**기존 pin 테스트는 그대로 통과 (국소화 효과)**
+- `test_v2_pipeline::test_v2_default_target_is_potential_demand`, `test_v3_pipeline::test_v3_default_target_is_potential_demand`, `test_backtest_clone`(y_col=="potential_demand") — 모두 `_default_target` **미변경**이라 green 유지. (모델 기본값은 potential_demand 그대로, CLI만 real에서 override.)
+- `test_potential_demand`, `test_discount_analysis`, `test_prospective*`, `test_ontology_functions` — 기존 동작 보존, 회귀 방지 유지.
+
+**신규/보강 테스트 (helper 단위 — real 파일 의존 회피)**
+- `_resolve_demand_col`: `discount_rows` 주입해 결정론 테스트 — synthetic→(frame 불변, "potential_demand"), real→("adjusted_demand" 컬럼 존재).
+- `_build_forecasters(v23_target=...)`: v2/v3 forecaster.y_col == 전달값, v0/v1 == "sold_units".
+- `_resolve_demand_proxy(daily)`: adjusted_demand 있는 프레임→"adjusted_demand", 없으면 "potential_demand".
+- `run_eval` real enrich: `load_dataset` monkeypatch로 real 소스 시 dataset.daily에 adjusted_demand 부착 확인.
 
 **필수 통과 (회귀 게이트)**
 - `test_split_leakage` / `test_features_leakage` — lag/rolling이 `adjusted_demand`로 재구성돼도 leakage-safe (PR#29에서 검증됨). 반드시 green.
