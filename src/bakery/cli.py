@@ -17,6 +17,7 @@ from .decision import PolicyParams, RiskParams, build_recommendation, lineage_to
 from .data.synthetic import generate_synthetic_bundle
 from .data.weather import load_weather_forecast_from_local
 from .evaluation.backtest import aggregate_by_model, per_category_wape, run_backtest
+from .evaluation.business_metrics import CostParams, asymmetric_loss, simulate_profit
 from .evaluation.classifier_metrics import base_rate, precision_at_k, recall_at_k, roc_auc
 from .evaluation.diagnostics import decoupling_score
 from .evaluation.metrics import quantile_exceedance_rate, wape, wpe
@@ -575,6 +576,7 @@ def cmd_alpha_sweep(
     lost_sale_multiplier: float = 1.7,
     item_master: Path = Path("data/internal/보나비 데이터_20260520.xlsx"),
     out_dir: Path = REPORTS_DIR,
+    closing_alpha: float = DEFAULT_ALPHA,
 ) -> None:
     """Production-model quantile α sweep — net_profit-최대 α 찾기.
 
@@ -582,9 +584,6 @@ def cmd_alpha_sweep(
     """
     import warnings
     import numpy as np
-    from .evaluation.business_metrics import (
-        CostParams, asymmetric_loss, simulate_profit,
-    )
 
     warnings.filterwarnings("ignore")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -601,6 +600,7 @@ def cmd_alpha_sweep(
 
     ds = _load_dataset(source, None)
     daily = _enrich_if_needed(ds, [variant])
+    daily, demand_col = _resolve_demand_col(daily, source, closing_alpha)
     windows = generate_time_splits(
         daily["date"], n_splits=n_splits, val_horizon_days=horizon_days, step_days=step_days
     )
@@ -608,10 +608,10 @@ def cmd_alpha_sweep(
     forecasters = []
     for a in alpha_list:
         if a == 0.5:
-            forecasters.append(GlobalLGBM(feature_set=variant))  # median (regression)
+            forecasters.append(GlobalLGBM(feature_set=variant, y_col=demand_col))  # median (regression)
         else:
             params = LGBMParams(objective="quantile", alpha=a)
-            forecasters.append(GlobalLGBM(feature_set=variant, params=params))
+            forecasters.append(GlobalLGBM(feature_set=variant, params=params, y_col=demand_col))
 
     console.print(
         f"[cyan]alpha-sweep[/] variant={variant} αs={alpha_list} "
@@ -619,18 +619,19 @@ def cmd_alpha_sweep(
     )
     fold_df, pred_df = run_backtest(daily, forecasters, windows)
 
-    # Inject potential_demand for true-demand-aware profit simulation
-    if "potential_demand" in daily.columns:
-        pd_lookup = daily.set_index(["store_id", "item_id", "date"])["potential_demand"]
+    # Inject demand column for true-demand-aware profit simulation
+    if demand_col in daily.columns:
+        d_lookup = daily.set_index(["store_id", "item_id", "date"])[demand_col]
         pred_df = pred_df.copy()
-        pred_df["potential_demand"] = pred_df.set_index(
+        pred_df[demand_col] = pred_df.set_index(
             ["store_id", "item_id", "date"]
-        ).index.map(pd_lookup)
+        ).index.map(d_lookup)
 
     rows = []
     for model, sub in pred_df.groupby("model"):
         asym = asymmetric_loss(sub["yhat"], sub["sold_units"], params=cost_params)
-        profit = simulate_profit(sub, unit_prices=unit_prices, params=cost_params)
+        profit = simulate_profit(sub, unit_prices=unit_prices, params=cost_params,
+                                 potential_col=demand_col)
         rows.append({
             "model": model,
             "asymmetric_loss": asym,
