@@ -1,5 +1,6 @@
 import pandas as pd
-from bakery.cli import _resolve_demand_col
+from bakery.cli import _build_forecasters, _resolve_demand_col
+from bakery.models.lightgbm_regressor import GlobalLGBM
 
 
 def _daily():
@@ -33,3 +34,23 @@ def test_real_attaches_adjusted_demand():
     assert float(row["adjusted_demand"]) == 18.0
     # closing 매칭 없는 날은 adjusted == sold
     assert float(out.set_index("date").loc["2026-01-01"]["adjusted_demand"]) == 10.0
+
+
+def _lgbm_by_fs(forecasters):
+    return {f.feature_set: f for f in forecasters if isinstance(f, GlobalLGBM)}
+
+
+def test_build_forecasters_default_keeps_potential():
+    fs = _build_forecasters(["v0", "v2"])
+    lg = _lgbm_by_fs(fs)
+    assert lg["v0"].y_col == "sold_units"
+    assert lg["v2"].y_col == "potential_demand"
+
+
+def test_build_forecasters_v23_target_override():
+    fs = _build_forecasters(["v0", "v1", "v2", "v3"], v23_target="adjusted_demand")
+    lg = _lgbm_by_fs(fs)
+    assert lg["v0"].y_col == "sold_units"
+    assert lg["v1"].y_col == "sold_units"
+    assert lg["v2"].y_col == "adjusted_demand"
+    assert lg["v3"].y_col == "adjusted_demand"

@@ -116,15 +116,18 @@ def cmd_backtest(
     variants: str = "v0,v1",
     include_production: bool = False,
     out_dir: Path = REPORTS_DIR,
+    closing_alpha: float = DEFAULT_ALPHA,
 ) -> None:
     """Compare baselines + LightGBM variants on the same rolling folds."""
     variant_list = _parse_variants(variants)
     ds = _load_dataset(source, data_dir)
     daily = _enrich_if_needed(ds, variant_list)
+    daily, demand_col = _resolve_demand_col(daily, source, closing_alpha)
     windows = generate_time_splits(
         daily["date"], n_splits=n_splits, val_horizon_days=horizon_days, step_days=step_days
     )
-    forecasters = _build_forecasters(variant_list, include_production=include_production)
+    forecasters = _build_forecasters(variant_list, include_production=include_production,
+                                     v23_target=demand_col)
     console.print(
         f"[cyan]backtest[/] folds={len(windows)} horizon={horizon_days}d "
         f"variants={variant_list} models={[f.name for f in forecasters]}"
@@ -385,15 +388,21 @@ def _load_forecast_weather(horizon: pd.DatetimeIndex) -> pd.DataFrame | None:
 
 
 def _build_forecasters(variants: list[str], *, include_production: bool = False,
-                       production_quantile: float = 0.85):
+                       production_quantile: float = 0.85,
+                       v23_target: str | None = None):
     """Build baseline + LightGBM-per-variant list, optionally adding quantile
-    production models for v2/v3 (lightgbm_v2_q85 etc.)."""
+    production models for v2/v3 (lightgbm_v2_q85 etc.).
+
+    v23_target: v2/v3의 학습 target을 명시(예: real→'adjusted_demand'). None이면
+    모델 기본값(_default_target=potential_demand). v0/v1은 항상 sold_units.
+    """
     forecasters = [SeasonalNaive(n_weeks=4), MovingAverage(window=28)]
     for v in variants:
-        forecasters.append(GlobalLGBM(feature_set=v))  # demand (median) model
+        y = v23_target if (v23_target and v in {"v2", "v3"}) else None
+        forecasters.append(GlobalLGBM(feature_set=v, y_col=y))  # demand (median) model
         if include_production and v in {"v2", "v3"}:
             prod_params = LGBMParams(objective="quantile", alpha=production_quantile)
-            forecasters.append(GlobalLGBM(feature_set=v, params=prod_params))
+            forecasters.append(GlobalLGBM(feature_set=v, params=prod_params, y_col=y))
     return forecasters
 
 
