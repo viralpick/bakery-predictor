@@ -7,6 +7,16 @@ from bakery.models.event_prior import EventLevelPrior
 TARGET = "adjusted_demand_unit"
 
 
+def _lunar_daily():
+    # 추석 date-map (실제 LUNAR_EVENT_DATES 형식)으로 합성 시리즈
+    chuseok = {2021: "2021-09-21", 2022: "2022-09-10", 2023: "2023-09-29", 2024: "2024-09-17"}
+    dates = pd.date_range("2021-06-01", periods=1400, freq="D")
+    df = pd.DataFrame({"date": dates, TARGET: 100.0})
+    for yr, lvl in {2021: 200.0, 2022: 210.0, 2023: 220.0}.items():
+        df.loc[df["date"] == pd.Timestamp(chuseok[yr]), TARGET] = lvl
+    return df, {"chuseok": chuseok}
+
+
 def _daily(start="2021-06-01", periods=1800, value=100.0) -> pd.DataFrame:
     dates = pd.date_range(start, periods=periods, freq="D")
     df = pd.DataFrame({"date": dates, TARGET: float(value)})
@@ -90,3 +100,42 @@ def test_blend_applies_when_at_min_events():
     exp2, _ = p.blend([pd.Timestamp(2023, 12, 25)], np.array([200.0]), np.array([230.0]))
     shrink = 2 / (2 + 1.5)
     assert exp2[0] == pytest.approx(shrink * 305.0 + (1 - shrink) * 200.0)
+
+
+def test_is_event_day_matches_lunar_date():
+    _, lunar = _lunar_daily()
+    p = EventLevelPrior(lunar_events=lunar)
+    assert p.is_event_day(pd.Timestamp(2023, 9, 29)) is True   # 추석 당일
+    assert p.is_event_day(pd.Timestamp(2023, 9, 28)) is False  # 전날
+
+
+def test_level_for_lunar_uses_past_lunar_actuals():
+    df, lunar = _lunar_daily()
+    p = EventLevelPrior(lunar_events=lunar).fit(df, target_col=TARGET)
+    # 2024 추석(2024-09-17) 예측 → 과거 3개(200,210,220) median=210
+    level, n_past = p.level_for(pd.Timestamp(2024, 9, 17))
+    assert n_past == 3
+    assert level == pytest.approx(210.0)
+
+
+def test_multi_event_prior_does_not_mix_events():
+    """한 매장에 xmas+추석 둘 다 등록돼도 이벤트별로 분리(mixing 회귀 가드).
+
+    xmas=900(높게), 추석=300(낮게)로 심으면 mixing 시 추석 prior가
+    (900+300)/2 쪽으로 오염된다. per-event 분리면 추석은 300만 본다.
+    """
+    chuseok = {2021: "2021-09-21", 2022: "2022-09-10", 2023: "2023-09-29", 2024: "2024-09-17"}
+    dates = pd.date_range("2021-06-01", periods=1400, freq="D")
+    df = pd.DataFrame({"date": dates, TARGET: 100.0})
+    for yr in (2021, 2022, 2023):
+        df.loc[df["date"] == pd.Timestamp(yr, 12, 25), TARGET] = 900.0
+        df.loc[df["date"] == pd.Timestamp(chuseok[yr]), TARGET] = 300.0
+    p = EventLevelPrior(events={"xmas": (12, 25)}, lunar_events={"chuseok": chuseok}).fit(df, target_col=TARGET)
+    # 2024 추석 예측: 과거 추석 3개(300,300,300)만 → median 300, n_past 3 (xmas 900 미포함)
+    chu_level, chu_n = p.level_for(pd.Timestamp(2024, 9, 17))
+    assert chu_n == 3
+    assert chu_level == pytest.approx(300.0)
+    # 2024 xmas 예측: 과거 xmas 3개(900)만 → median 900, n_past 3 (추석 300 미포함)
+    xmas_level, xmas_n = p.level_for(pd.Timestamp(2024, 12, 25))
+    assert xmas_n == 3
+    assert xmas_level == pytest.approx(900.0)
