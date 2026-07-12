@@ -73,3 +73,20 @@ def test_blend_first_occurrence_unchanged():
     exp2, prod2 = p.blend(dates, np.array([250.0]), np.array([280.0]))
     assert exp2[0] == pytest.approx(250.0)
     assert prod2[0] == pytest.approx(280.0)
+
+
+def test_blend_skips_when_below_min_events():
+    # 2022 xmas 예측: 과거 1개(2021=300)뿐 → n_past=1 < min_events=2 → base 유지
+    p = EventLevelPrior(min_events=2).fit(_daily(), target_col=TARGET)
+    dates = [pd.Timestamp(2022, 12, 25)]
+    exp2, prod2 = p.blend(dates, np.array([250.0]), np.array([280.0]))
+    assert exp2[0] == pytest.approx(250.0)   # 단일샘플이라 미보정
+    assert prod2[0] == pytest.approx(280.0)
+
+
+def test_blend_applies_when_at_min_events():
+    # 2023 xmas 예측: 과거 2개(300,310) median=305, n_past=2 == min_events → 보정
+    p = EventLevelPrior(min_events=2).fit(_daily(), target_col=TARGET)
+    exp2, _ = p.blend([pd.Timestamp(2023, 12, 25)], np.array([200.0]), np.array([230.0]))
+    shrink = 2 / (2 + 1.5)
+    assert exp2[0] == pytest.approx(shrink * 305.0 + (1 - shrink) * 200.0)
