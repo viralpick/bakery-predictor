@@ -23,7 +23,7 @@ from bakery.data.calendar import LUNAR_EVENT_DATES
 
 
 TARGET_CATEGORIES = ("bread", "pastry", "sandwich")   # cake 제외 (사전 예약 + 시즌 특수)
-DEFAULT_ALPHA = 0.5
+DEFAULT_ALPHA = 0.8   # 마감할인 실수요 비율 α (2026-07 상향: 저녁 상시할인 구조상 높은 α 방향 증거)
 LAG_DAYS = (1, 7, 14, 28)
 ROLLING_WINDOWS = (7, 28)
 EWMA_HALFLIVES = (7, 28)

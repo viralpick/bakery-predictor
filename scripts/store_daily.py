@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from bakery.data.bulk import flag_bulk_lines
 from v4_new_data_backtest import CLOSING_CODES, V2, map_category
 
 STORE_MAP = {
@@ -35,14 +36,19 @@ def build_store_daily(store_cd: str, store_id: str, exclude_bulk: bool = True) -
     sales["QT_SALE"] = pd.to_numeric(sales["QT_SALE"], errors="coerce").fillna(0)
 
     if exclude_bulk:
-        flag = pd.read_parquet(V2 / "sales_with_bulk_flag.parquet")
-        flag = flag[flag["cd"] == store_cd]
-        sales["receipt_id"] = (
-            sales["CD_PARTNER"].astype(str) + "_" + sales["DT_SALE"].astype(str)
-            + "_" + sales["NO_POS"].astype(str) + "_" + sales["SLIP_NO"].astype(str)
+        # 신규 bulk 검출 (bakery.data.bulk.flag_bulk_lines) — line-level 제거, 매장×품목 통계.
+        # 구 sales_with_bulk_flag.parquet(whole-receipt) 대체, 패키지 CLI 경로와 단일 출처 통일.
+        lines = pd.DataFrame(
+            {
+                "receipt_id": sales["CD_PARTNER"].astype(str) + "_" + sales["DT_SALE"].astype(str)
+                + "_" + sales["NO_POS"].astype(str) + "_" + sales["SLIP_NO"].astype(str),
+                "item_id": sales["CD_ITEM"].astype(str),
+                "date": sales["date"],
+                "qty": sales["QT_SALE"],
+            },
+            index=sales.index,
         )
-        bulk_receipts = set(flag[flag["is_bulk"]]["receipt_id"])
-        sales = sales[~sales["receipt_id"].isin(bulk_receipts)]
+        sales = sales[~flag_bulk_lines(lines).to_numpy()]
 
     daily = sales.groupby(["date", "CD_ITEM"])["QT_SALE"].sum().reset_index()
     daily = daily.rename(columns={"CD_ITEM": "item_id", "QT_SALE": "sold_units"})

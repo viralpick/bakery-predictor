@@ -20,6 +20,21 @@
 - [x] **#1 category 경로 conformal 적용 — 미실행(설계 결정, 2026-07-10)**. 검토 결과 **conformal은 item 경로 전용**으로 확정. 근거: (a) conformal은 item quantile 모델이 구조적 under-dispersed(q 0.85→0.99로 15배 좁혀도 초과율 0.679→0.421까지만)라 도입한 fix인데, (b) 카테고리 총합은 매끈한 aggregate라 LGBM production_q가 직접 예측하는 게 맞고 conformal을 덧씌우면 "보정의 보정"으로 지저분함. 카테고리 총합 under-calibration(초과율 **0.346**@q0.85, nominal 0.15 — 원 TODO의 "0.458"은 배분 **후** item-day 값이고 conformal이 직접 손대는 총합값은 0.346)은 loose end로 남기되, 카테고리 경로가 PR#27서 item-level 못 이긴 non-primary 경로라 추가 투자 안 함. 코드 변경 없음. 결정 기록 = docs/order_conformal_calibration_result.md §후속 #1.
 - [x] **#2 conformal 잔차 진단 — 완료 + #2 종료(PoC 충분, 2026-07-10)**. 진단 스크립트 `scripts/diagnose_conformal_residual.py`, 결과 `docs/conformal_residual_diagnosis_result.md`. 헤드라인(s=0.74,n_folds=8) 재현 잔차 +0.046. **결론**: (1) 메모리의 드리프트 가설은 주범 아님 — cal/test score **median 동일**(+0.595 vs +0.593, location 이동 없음), 단 coverage 지배하는 q74가 cal 0.99→test 1.16으로 실재 상승(부차적, 더 최근/가중 cal 창은 저우선 미검증 레버). (2) **지배적 원인=volume 이질성** — pooled scale-정규화 Q_s가 저volume slow-mover under-cover(초과율 0.63, 필요 Q_s 4.65) ↔ 중/고volume over-cover(0.13, 필요 0.71~0.80). 평균-정규화가 간헐수요 tail 못 맞춤. (3) 요일은 2차(평일 −0.01 정확, 주말 +0.17; volume과 교차 미확인). **운영 측정**: 저volume=전체 shortfall의 79%(5879u), 중/고=과잉발주(overage 22.5K≫shortfall 7.5K) → mis-allocation. **종료 근거**: 전체 잔차 작고 운영 주력(평일+중/고) calibrate, 드리프트 반증. 보강 후보=volume-Mondrian(측정상 Pareto 여지 있으나 stale tier·소표본 리스크, PoC 필수 아님)은 미실행. 코드 변경 없음.
 
+## bulk(예약) 필터링 재설계 + α 상향 + CLI 배선 (2026-07-10)
+
+배경: bulk 제외가 scripts 다매장 경로(store_daily)에만 있고 패키지 CLI 경로(bonavi_loader/bonavi_daily)엔 없던 불일치 발견. 사용자 결정: (B) CLI 경로에 배선 + 검출 로직 재설계 + α 0.5→0.8.
+
+- [x] **검출 로직 재설계** — `src/bakery/data/bulk.py` `flag_bulk_lines` (단일 출처). T1 단일품목 집중(qty≥10 & 3×median_daily & active≥14) + T2 다품목 event(영수증 total≥30 & maxit≥5 → qty≥5 라인만 line-level 제거). 근거: 광교 5년 분포 재산정(평균→중앙값 순환성 제거, floor 5→10, total≥30=92% 집중형, ground-truth 없어 정밀도 우선). 테스트 tests/test_bulk.py 10개.
+- [x] **bonavi_loader 배선** — load_sales에 receipt_id(판매일자+POS번호+영수증번호) 조립 + bulk 라인 제거. bonavi_daily 재생성: sold_units 510,585→509,520(−1065, 0.21%), 타깃 카테고리 item-day 최대 136→42(스파이크 정상화).
+- [x] **α 0.5→0.8** — category_aggregate.DEFAULT_ALPHA(real 경로 전파). potential_demand.py의 것(deprecated synthetic)·cli.py:2020 quantile median은 불변. 445 passed.
+- [ ] **재측정 (5)** — real backtest + conformal 재보정 재실행 (α=0.8·bulk제외 하에서). 기존 헤드라인(초과율 0.679→0.299, WPE +0.039)은 α=0.5·bulk포함이라 **무효 → 재산출 필요**. ⚠️ 별도 세션 권장(compute 큼).
+- [ ] **리포트 재작성 (6)** — Notion 종합 기술 검증 리포트 §3-3(메커니즘=flag_bulk_lines/T1·T2, 기존 build_store_daily·5·2.5·15·14 서술 교체)·§4-3·§5(α=0.8)·§8 수치를 재측정 결과로 갱신.
+- [ ] **scripts 다매장 detector 통일 (선택)** — scripts/bulk_detector.py를 새 bulk.py로 마이그레이션 시 다매장 분석(substitution/interval_backtest_4stores/rfecv) 결과도 이동(의식적 선택). non-blocking.
+
+## 할인 종류별 feature화 검토 (2026-07-10 사용자 요청, deferred)
+
+- [ ] 인풋 feature에 할인 관련 신호 반영 여부 검토. **마감/대량구매 할인 제외**(이미 target 보정·bulk 제거로 처리), **시즌성·이벤트성 할인**(marketing 라벨: T DAY·LSM 스탬프 등)이 수요에 미치는 영향을 feature로 반영할 방법. discount.py의 label 분류(closing/payment/staff/b2b/marketing/menu) 활용. leakage 주의(할인은 예측시점 이후 관측이면 안 됨 — 사전 계획된 이벤트 캘린더성만 가능). 브레인스토밍부터.
+
 ## 후속 (실데이터/운영 의존)
 
 - [x] W0 게이트 = 수요이전(흡수) 검증 — 카테고리 총량보존 β/TOST 직접검정. 광교 bread/pastry absorb, walk-away 0개 → 통과. 결과 docs/w0_demand_absorption_result.md. (다매장 store_daily 경로 후속)
