@@ -39,7 +39,8 @@ class EventLevelPrior:
         past = [a for (ed, a) in self._event_actuals if ed < date]
         if not past:
             return None, 0
-        return float(np.mean(past)), len(past)
+        # median: anomaly-robust (v2, design §8)
+        return float(np.median(past)), len(past)
 
     def blend(self, dates, base_expected, base_production):
         dates = [pd.Timestamp(d) for d in dates]

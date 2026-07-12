@@ -30,6 +30,18 @@ def test_level_for_averages_strictly_past_events():
     assert level == pytest.approx(310.0)
 
 
+def test_level_for_uses_median_not_mean():
+    # 과거 4개 이벤트에 outlier 심어 median≠mean 구분
+    df = _daily()
+    # 2025 xmas 예측 시 과거 2021..2024 = {300,310,320,330} + outlier 하나로 교체
+    df.loc[df["date"] == pd.Timestamp(2024, 12, 25), TARGET] = 900.0  # outlier
+    p = EventLevelPrior().fit(df, target_col=TARGET)
+    level, n_past = p.level_for(pd.Timestamp(2025, 12, 25))
+    assert n_past == 4
+    # median of [300,310,320,900] = (310+320)/2 = 315  (mean would be 457.5)
+    assert level == pytest.approx(315.0)
+
+
 def test_level_for_first_occurrence_returns_none():
     p = EventLevelPrior().fit(_daily(), target_col=TARGET)
     level, n_past = p.level_for(pd.Timestamp(2021, 12, 25))
