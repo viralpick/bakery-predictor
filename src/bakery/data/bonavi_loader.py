@@ -11,7 +11,7 @@ The vendor delivers a single multi-sheet xlsx:
 The xlsx is delivered with a dummy first row (CD_PARTNER / CD_ITEM / etc as
 column placeholders) we drop, and every-sheet 판매구분 = 0 (정상) and
 셋트상품구분 = SS (단품) only — we exclude returns and bundles for the
-first PoC pass.
+first PoC pass. 예약(대량) 주문 라인은 `bulk.flag_bulk_lines`로 추가 제거한다.
 
 Output: `data/internal/bonavi_daily.parquet` conforming to
 `schema.DAILY_COLUMNS` so `loader._load_real_dataset` can swap it in.
@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 
 from ..features.potential_demand import StoreHours, attach_potential_demand
+from .bulk import flag_bulk_lines
 from .schema import DAILY_COLUMNS, validate_daily
 
 XLSX_DEFAULT = Path("data/internal/보나비 데이터_20260520.xlsx")
@@ -127,11 +128,16 @@ def load_sales(xlsx: Path, store_code: str = DEFAULT_STORE_CODE) -> pd.DataFrame
     Drops the dummy header row (점포코드 == 'CD_PARTNER'), filters to the
     requested store, keeps only 정상 sales (판매구분 = 0) and 단품 lines
     (셋트상품구분 = SS). Includes hour (parsed from sale_time YYYYMMDDHHMMSS).
+
+    예약(대량) 주문 라인은 `bulk.flag_bulk_lines`로 판별해 제거한다 — 사전예약은
+    실수요가 아니라 예측 불가·불필요하고, 특정일 특정품목에 가짜 스파이크를 남긴다.
     """
     raw = pd.read_excel(xlsx, "판매정보")
     set_col = next(c for c in raw.columns if c.startswith("셋트상품구분"))
     sale_col = next(c for c in raw.columns if c.startswith("판매구분"))
     time_col = next(c for c in raw.columns if c.startswith("판매시간"))
+    pos_col = next(c for c in raw.columns if c.startswith("POS번호"))
+    receipt_col = next(c for c in raw.columns if c.startswith("영수증번호"))
     raw = raw[raw["점포코드"].astype(str) == store_code]
     raw = raw[raw[set_col] == "SS"]
     raw = raw[raw[sale_col].astype(str) == "0"]
@@ -140,6 +146,20 @@ def load_sales(xlsx: Path, store_code: str = DEFAULT_STORE_CODE) -> pd.DataFrame
     raw[time_col] = raw[time_col].astype(str)
     raw["hour"] = raw[time_col].str.slice(8, 10)
     raw["hour"] = pd.to_numeric(raw["hour"], errors="coerce")
+
+    # 예약(대량) 주문 라인 제거 (실수요 아님) — receipt = 판매일자+POS번호+영수증번호
+    lines = pd.DataFrame(
+        {
+            "receipt_id": raw["판매일자"].astype(str) + "_"
+            + raw[pos_col].astype(str) + "_" + raw[receipt_col].astype(str),
+            "item_id": raw["품목코드"].astype(str),
+            "date": raw["date"],
+            "qty": pd.to_numeric(raw["판매수량"], errors="coerce").fillna(0),
+        },
+        index=raw.index,
+    )
+    raw = raw[~flag_bulk_lines(lines).to_numpy()]
+
     return raw[["점포코드", "date", "품목코드", "판매수량", "hour"]].rename(
         columns={"점포코드": "store_id", "품목코드": "item_id", "판매수량": "qty"}
     )
