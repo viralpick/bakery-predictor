@@ -66,10 +66,12 @@ def collect_store(cd: str, sid: str, label: str) -> pd.DataFrame:
     print(f"[{label}] build features ...")
     sd = sp.build_store_data(cd, sid, label)
     print(f"[{label}] collect quantile preds ({len(Q_GRID)} quantiles × {sp.MAIN_FOLDS} folds) ...")
+    cfg = sp.STORE_EVENT_PRIORS.get(label, {})   # 특수일 레벨-앵커 prior (qmat이 발주/버퍼 섹션 근거)
     base = None
     for q in Q_GRID:
         res = sp.windowed_backtest(sd.feat, window_days=sp.DEFAULT_WINDOW_DAYS,
-                                   n_folds=sp.MAIN_FOLDS, production_q=float(q))
+                                   n_folds=sp.MAIN_FOLDS, production_q=float(q),
+                                   events=cfg.get("events"), lunar_events=cfg.get("lunar_events"))
         p = res.predictions[["date", "actual", "production"]].copy()
         p["date"] = pd.to_datetime(p["date"])
         p = p.rename(columns={"production": f"q{q:.2f}"})
