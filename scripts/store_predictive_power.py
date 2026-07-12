@@ -1045,6 +1045,32 @@ ASSUMPTIONS_BOX = """<div class="chart-block">
 </div>"""
 
 
+# 특수일 레벨-앵커 prior 설명 (verify_event_prior.py 재측정 결과 정적 반영).
+EVENT_PRIOR_BOX = """<div class="chart-block">
+<h2>특수일 sharp 당일 — 레벨-앵커 prior</h2>
+<div class="desc">캘린더 lead-up 피처(<code>days_to_*</code>, ±14일)는 <b>뭉툭한 완만 상승만</b> 잡고 <b>당일 sharp 피크는 못 잡습니다</b>.
+ 예: 광교 크리스마스 당일 5년 실측이 ~330에 고정인데, 모델은 <b>주말 크리스마스를 평소 바쁜 주말로(→과대), 평일 크리스마스를 평소 한산한 평일로(→과소)</b> 예측합니다.
+ 이벤트가 요일 계절성을 덮어써 <b>고유 레벨로 끌어당기는</b> 현상(부호 = 상권: 주거/복합↑ · 오피스↓)입니다.</div>
+<div class="desc" style="margin-top:8px;">트리(LightGBM)로는 못 배웁니다 — 카테고리 총량은 하루 1행이라 2년 학습창 안에 이벤트당 <b>2샘플</b>뿐,
+ <code>min_child_samples</code>가 그 소수 샘플의 분리(split)를 막습니다(실증: 값을 낮춰도 해당 dummy의 gain=0). 당일 dummy·<code>요일×이벤트</code> interaction 모두 사망.</div>
+<div class="desc" style="margin-top:8px;">해법 = <b>EventLevelPrior</b>(예측 이후 post-model 블렌드, 트리 밖): 과거 <b>같은 이벤트</b> 실측의 <b>중앙값(median, anomaly-robust)</b>에 shrink로 앵커합니다.
+ <code>min_events=2</code>(단일 샘플 prior 차단) · <b>이벤트별 분리</b>(한 매장에 여러 이벤트가 등록돼도 안 섞임) · leakage-safe(예측 시점 이전 이벤트만).</div>
+<table class="mtab">
+<tr><th>매장 · 이벤트</th><th>기존 WAPE</th><th>+ prior</th></tr>
+<tr><td>광교 · 크리스마스</td><td>0.231</td><td><b>0.102</b></td></tr>
+<tr><td>광교 · 추석</td><td>0.214</td><td><b>0.145</b></td></tr>
+<tr><td>삼성타운 · 크리스마스</td><td>0.827</td><td><b>0.421</b></td></tr>
+<tr><td>메세나폴리스 · 크리스마스</td><td>0.174</td><td><b>0.100</b></td></tr>
+<tr><td>메세나폴리스 · 설</td><td>0.179</td><td><b>0.101</b></td></tr>
+<tr><td>광화문 · 크리스마스</td><td>0.151</td><td><b>0.085</b></td></tr>
+</table>
+<div class="desc" style="margin-top:12px;"><b>등록</b>(매장×이벤트 OOS 순개선 확인된 것만): 광교[크리스마스·추석] · 메세나[크리스마스·설] · 삼성·광화문[크리스마스].
+ <b>미등록</b>: 광화문 설·메세나 추석(OOS 악화), 어린이날(기존 예측이 이미 정확한 매장에선 역효과 → 보류).</div>
+<div class="desc" style="margin-top:8px;">⚠️ <b>한계</b>: 이벤트당 과거 3~5샘플로 OOS 증거가 얇고, 첫 발생은 교정 불가(과거 없음), median도 완만한 추세는 지연됩니다.
+ 삼성은 하향 보정(매진위험 높은 날 생산 축소)이라 운영 주의. 오피스(삼성·광화문)는 설/추석에 사실상 휴무.</div>
+</div>"""
+
+
 def _best_window(rows: list[dict]) -> int:
     return min(rows, key=lambda r: r["wape"])["window_days"]
 
@@ -1305,6 +1331,7 @@ def run_render(bundle: dict | None = None) -> None:
     overview = REGIME_BOX
     overview += build_findings(summary, stores)
     overview += ASSUMPTIONS_BOX
+    overview += EVENT_PRIOR_BOX
     overview += '<div class="intro"><h2>종합 — 매장 간 예측력 비교</h2></div>\n'
     # headline 요약 — 예측 정확도(q0.5) + daily/weekly 최적 q 운영점
     rows = ""
