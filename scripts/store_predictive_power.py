@@ -43,6 +43,7 @@ from bakery.features.category_aggregate import (
     build_features,
 )
 from bakery.models.category_total import BacktestResult, fit_category_total
+from bakery.models.event_prior import EventLevelPrior
 from store_daily import build_store_closing_rows, build_store_daily, item_category_map
 from v4_new_data_backtest import V2
 
@@ -123,6 +124,10 @@ def windowed_backtest(
         )
         exp_pred = model.predict_expected(test_df)
         prod_pred = model.predict_production(test_df)
+        # 특수일 레벨-앵커 prior: pre-test 전체 history로 fit (train window보다 길게, leakage-safe)
+        hist = df[df["date"] < test_start_date]
+        prior = EventLevelPrior().fit(hist, target_col=target_col)
+        exp_pred, prod_pred = prior.blend(test_df["date"].values, exp_pred, prod_pred)
         actual = test_df[target_col].values
         wape = np.abs(actual - exp_pred).sum() / max(np.abs(actual).sum(), 1)
         folds.append(dict(
