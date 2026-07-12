@@ -14,10 +14,23 @@ DEFAULT_K = 1.5
 
 
 class EventLevelPrior:
-    def __init__(self, events: dict[str, tuple[int, int]] | None = None, k: float = DEFAULT_K, min_events: int = 2):
-        self.events = dict(events) if events is not None else dict(DEFAULT_EVENTS)
+    def __init__(self, events: dict[str, tuple[int, int]] | None = None, k: float = DEFAULT_K, min_events: int = 2,
+                 lunar_events: dict[str, dict[int, str]] | None = None):
+        # Use provided events, or defaults only if neither events nor lunar_events specified
+        if events is not None:
+            self.events = dict(events)
+        elif lunar_events:
+            self.events = {}  # No default events if lunar_events provided
+        else:
+            self.events = dict(DEFAULT_EVENTS)
+
         self.k = k
         self.min_events = min_events
+        self.lunar_events = dict(lunar_events) if lunar_events else {}
+        self._lunar_dates: set[pd.Timestamp] = set()
+        for datemap in self.lunar_events.values():
+            for date_str in datemap.values():
+                self._lunar_dates.add(pd.Timestamp(date_str).normalize())
         self._event_actuals: list[tuple[pd.Timestamp, float]] = []  # (date, actual)
 
     def fit(self, history: pd.DataFrame, date_col: str = "date",
@@ -33,7 +46,9 @@ class EventLevelPrior:
 
     def is_event_day(self, date: pd.Timestamp) -> bool:
         date = pd.Timestamp(date)
-        return any((date.month, date.day) == (m, day) for m, day in self.events.values())
+        if any((date.month, date.day) == (m, day) for m, day in self.events.values()):
+            return True
+        return date.normalize() in self._lunar_dates
 
     def level_for(self, date: pd.Timestamp) -> tuple[float | None, int]:
         date = pd.Timestamp(date)
