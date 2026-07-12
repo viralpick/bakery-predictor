@@ -81,6 +81,16 @@ STORE_COLORS = {
 LABEL_BY_SID = {sid: label for _, sid, label, _ in STORES}
 SID_BY_LABEL = {label: sid for _, sid, label, _ in STORES}
 
+# 매장×이벤트 opt-in (verify_event_prior OOS 순개선 매장만 등록).
+# 현행: xmas만(4매장 전부 개선 검증됨). 설/추석/어린이날은 per-event 검증 후 등록.
+XMAS = {"xmas": (12, 25)}
+STORE_EVENT_PRIORS: dict[str, dict[str, tuple[int, int]]] = {
+    "광교": dict(XMAS),
+    "삼성타운": dict(XMAS),
+    "메세나폴리스": dict(XMAS),
+    "광화문": dict(XMAS),
+}
+
 
 # ---------------------------------------------------------------------------
 # leakage-safe windowed backtest (expanding_window_backtest 복제 + train slice 교체)
@@ -94,6 +104,7 @@ def windowed_backtest(
     n_folds: int = MAIN_FOLDS,
     horizon_days: int = HORIZON,
     production_q: float = PROD_Q,
+    events: dict[str, tuple[int, int]] | None = None,
 ) -> BacktestResult:
     """category_total.expanding_window_backtest 와 동일하되 train slice 만 교체.
 
@@ -126,7 +137,7 @@ def windowed_backtest(
         prod_pred = model.predict_production(test_df)
         # 특수일 레벨-앵커 prior: pre-test 전체 history로 fit (train window보다 길게, leakage-safe)
         hist = df[df["date"] < test_start_date]
-        prior = EventLevelPrior().fit(hist, target_col=target_col)
+        prior = EventLevelPrior(events=events).fit(hist, target_col=target_col)
         exp_pred, prod_pred = prior.blend(test_df["date"].values, exp_pred, prod_pred)
         actual = test_df[target_col].values
         wape = np.abs(actual - exp_pred).sum() / max(np.abs(actual).sum(), 1)
@@ -1100,7 +1111,8 @@ def run_store(sd: StoreData, n_folds: int, sens_folds: int, *, full: bool = Fals
     window=2Y 고정·추세 피쳐 폐기가 확정된 뒤엔 재계산 불필요한 탐색 분석이라 기본 off.
     """
     print(f"  [{sd.label}] main backtest (2Y, {n_folds} folds) ...")
-    main = windowed_backtest(sd.feat, window_days=DEFAULT_WINDOW_DAYS, n_folds=n_folds)
+    main = windowed_backtest(sd.feat, window_days=DEFAULT_WINDOW_DAYS, n_folds=n_folds,
+                              events=STORE_EVENT_PRIORS.get(sd.label))
     main_preds = main.predictions.copy()
     main_preds["date"] = pd.to_datetime(main_preds["date"])
     headline = metrics_from_preds(main_preds)
@@ -1110,13 +1122,15 @@ def run_store(sd: StoreData, n_folds: int, sens_folds: int, *, full: bool = Fals
     if full:
         print(f"  [{sd.label}] window sensitivity ({sens_folds} folds) ...")
         for wd in WINDOWS:
-            res = windowed_backtest(sd.feat, window_days=wd, n_folds=sens_folds)
+            res = windowed_backtest(sd.feat, window_days=wd, n_folds=sens_folds,
+                                     events=STORE_EVENT_PRIORS.get(sd.label))
             m = metrics_from_preds(res.predictions)
             m["window_days"] = wd
             window_rows.append(m)
 
         print(f"  [{sd.label}] variant (trend_ratio) ...")
-        var_res = windowed_backtest(sd.feat_variant, window_days=DEFAULT_WINDOW_DAYS, n_folds=n_folds)
+        var_res = windowed_backtest(sd.feat_variant, window_days=DEFAULT_WINDOW_DAYS, n_folds=n_folds,
+                                     events=STORE_EVENT_PRIORS.get(sd.label))
         assert list(main_preds["date"]) == list(pd.to_datetime(var_res.predictions["date"])), \
             f"{sd.label}: baseline/variant date misalignment"
         variant = {"baseline": headline, "variant": metrics_from_preds(var_res.predictions)}
@@ -1231,7 +1245,8 @@ def run_compute(full: bool = False) -> dict:
     # anchor 재검증: 새 windowed_backtest 로 광교 window=1825, n_folds=26 → ≈expanding
     print("\n[anchor] 광교 window=1825 n_folds=26 (via windowed_backtest) ...")
     gw = next(s for s in stores if s.label == "광교")
-    ares = windowed_backtest(gw.feat, window_days=1825, n_folds=26)
+    ares = windowed_backtest(gw.feat, window_days=1825, n_folds=26,
+                              events=STORE_EVENT_PRIORS.get("광교"))
     am = metrics_from_preds(ares.predictions)
     anchor_result = {"wape": am["wape"], "stockout_risk": am["stockout_risk"], "n_test": am["n_test"]}
     anchor_ok = abs(am["wape"] - 0.077) <= 0.005 and abs(am["stockout_risk"] - 0.15) <= 0.03

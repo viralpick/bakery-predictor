@@ -14,9 +14,10 @@ DEFAULT_K = 1.5
 
 
 class EventLevelPrior:
-    def __init__(self, events: dict[str, tuple[int, int]] | None = None, k: float = DEFAULT_K):
+    def __init__(self, events: dict[str, tuple[int, int]] | None = None, k: float = DEFAULT_K, min_events: int = 2):
         self.events = dict(events) if events is not None else dict(DEFAULT_EVENTS)
         self.k = k
+        self.min_events = min_events
         self._event_actuals: list[tuple[pd.Timestamp, float]] = []  # (date, actual)
 
     def fit(self, history: pd.DataFrame, date_col: str = "date",
@@ -39,7 +40,8 @@ class EventLevelPrior:
         past = [a for (ed, a) in self._event_actuals if ed < date]
         if not past:
             return None, 0
-        return float(np.mean(past)), len(past)
+        # median: anomaly-robust (v2, design §8)
+        return float(np.median(past)), len(past)
 
     def blend(self, dates, base_expected, base_production):
         dates = [pd.Timestamp(d) for d in dates]
@@ -49,7 +51,7 @@ class EventLevelPrior:
             if not self.is_event_day(d):
                 continue
             prior, n_past = self.level_for(d)
-            if prior is None or exp[i] <= 0:
+            if prior is None or n_past < self.min_events or exp[i] <= 0:
                 continue
             shrink = n_past / (n_past + self.k)
             blended_exp = shrink * prior + (1 - shrink) * exp[i]

@@ -30,6 +30,18 @@ def test_level_for_averages_strictly_past_events():
     assert level == pytest.approx(310.0)
 
 
+def test_level_for_uses_median_not_mean():
+    # 과거 4개 이벤트에 outlier 심어 median≠mean 구분
+    df = _daily()
+    # 2025 xmas 예측 시 과거 2021..2024 = {300,310,320,330} + outlier 하나로 교체
+    df.loc[df["date"] == pd.Timestamp(2024, 12, 25), TARGET] = 900.0  # outlier
+    p = EventLevelPrior().fit(df, target_col=TARGET)
+    level, n_past = p.level_for(pd.Timestamp(2025, 12, 25))
+    assert n_past == 4
+    # median of [300,310,320,900] = (310+320)/2 = 315  (mean would be 457.5)
+    assert level == pytest.approx(315.0)
+
+
 def test_level_for_first_occurrence_returns_none():
     p = EventLevelPrior().fit(_daily(), target_col=TARGET)
     level, n_past = p.level_for(pd.Timestamp(2021, 12, 25))
@@ -61,3 +73,20 @@ def test_blend_first_occurrence_unchanged():
     exp2, prod2 = p.blend(dates, np.array([250.0]), np.array([280.0]))
     assert exp2[0] == pytest.approx(250.0)
     assert prod2[0] == pytest.approx(280.0)
+
+
+def test_blend_skips_when_below_min_events():
+    # 2022 xmas 예측: 과거 1개(2021=300)뿐 → n_past=1 < min_events=2 → base 유지
+    p = EventLevelPrior(min_events=2).fit(_daily(), target_col=TARGET)
+    dates = [pd.Timestamp(2022, 12, 25)]
+    exp2, prod2 = p.blend(dates, np.array([250.0]), np.array([280.0]))
+    assert exp2[0] == pytest.approx(250.0)   # 단일샘플이라 미보정
+    assert prod2[0] == pytest.approx(280.0)
+
+
+def test_blend_applies_when_at_min_events():
+    # 2023 xmas 예측: 과거 2개(300,310) median=305, n_past=2 == min_events → 보정
+    p = EventLevelPrior(min_events=2).fit(_daily(), target_col=TARGET)
+    exp2, _ = p.blend([pd.Timestamp(2023, 12, 25)], np.array([200.0]), np.array([230.0]))
+    shrink = 2 / (2 + 1.5)
+    assert exp2[0] == pytest.approx(shrink * 305.0 + (1 - shrink) * 200.0)
