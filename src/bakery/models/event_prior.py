@@ -33,7 +33,10 @@ class EventLevelPrior:
         self._event_actuals: dict[str, list[tuple[pd.Timestamp, float]]] = {}
 
     def _event_name_for(self, date: pd.Timestamp) -> str | None:
-        """이 날짜가 속한 등록 이벤트명. 어느 이벤트도 아니면 None."""
+        """이 날짜가 속한 등록 이벤트명. 어느 이벤트도 아니면 None.
+
+        solar 우선: 양력/음력 날짜가 겹치면 양력 이벤트명을 반환(현 이벤트셋은 충돌 없음).
+        """
         date = pd.Timestamp(date)
         for name, (m, day) in self.events.items():
             if (date.month, date.day) == (m, day):
