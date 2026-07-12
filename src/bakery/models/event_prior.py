@@ -40,3 +40,20 @@ class EventLevelPrior:
         if not past:
             return None, 0
         return float(np.mean(past)), len(past)
+
+    def blend(self, dates, base_expected, base_production):
+        dates = [pd.Timestamp(d) for d in dates]
+        exp = np.asarray(base_expected, dtype=float).copy()
+        prod = np.asarray(base_production, dtype=float).copy()
+        for i, d in enumerate(dates):
+            if not self.is_event_day(d):
+                continue
+            prior, n_past = self.level_for(d)
+            if prior is None or exp[i] <= 0:
+                continue
+            shrink = n_past / (n_past + self.k)
+            blended_exp = shrink * prior + (1 - shrink) * exp[i]
+            correction = blended_exp / exp[i]
+            exp[i] = blended_exp
+            prod[i] = prod[i] * correction
+        return exp, prod
