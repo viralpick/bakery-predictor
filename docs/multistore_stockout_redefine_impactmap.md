@@ -25,7 +25,11 @@
 
 ## 2. 소비처 분류
 
-`grep -rln "is_stockout\|stockout_time" scripts/ src/ | grep -v test` 결과 28개 파일.
+`grep -rln "is_stockout\|stockout_time" scripts/ src/ | grep -v test` 결과 **29개 파일**.
+이 중 `src/bakery/data/bonavi_loader.py`는 **정의처(upstream)** — `assign_stockout_fields`(재정의
+공식 자체)를 두는 곳이지 `scripts/store_daily.py`의 소비처가 아니다. 단매장 파이프라인의 원천이며
+Task1이 안 건드림(`121de35`에서 이미 재정의 확정) → **B (upstream/불변)**. 아래 표는 나머지 28개
+소비처를 분류한다(29 = 정의처 1 + 소비처 28).
 
 | 소비처 | 어떻게 쓰는가 | 분류 | 비고 |
 |---|---|---|---|
@@ -47,7 +51,9 @@
 | `src/bakery/evaluation/prospective.py` | 전향 검증에서 `is_stockout` 비율/공유 계산 | **B (단매장, PR#26 전향 harness)** | 다매장 경로 미사용 |
 | `src/bakery/data/schema.py`, `src/bakery/data/synthetic.py` | 스키마 상수/synthetic 데이터 생성 시 `is_stockout(_hour)` 필드 정의 | **B (스키마/synthetic, 다매장 무관)** | synthetic은 PoC 초기 데이터, real 경로와 별개 |
 | `src/bakery/cli.py` | 리포트 출력(`stockout days: N/M`), `stockout_classifier` 검증 경로(`val["is_stockout"]`) | **B (단매장)** | `store_daily` import 없음 |
-| `scripts/{rfecv_per_store,diag_anchor_gh,window_rfecv_pipeline,all4_unified_features,train_window_sensitivity,rfecv_composite,all4_stores_backtest,interval_backtest_4stores,window_composite_pipeline,diag_chuseok_gh,grid_backtest_cache,alpha_sensitivity,permutation_importance_all4,auto_feature_selection,interval_anchor_compare,store_predictive_power,verify_event_prior}.py` (17개) | `store_daily.build_store_daily`를 호출해 다매장 daily를 받지만, grep에 `is_stockout`/`stockout_time` 자체가 안 잡힘 — LGBM feature/backtest에만 사용, stockout 컬럼은 안 씀(`store_predictive_power.py`의 "stockout_risk"는 몬테카를로 draw 기반 별도 산출물로 `is_stockout` 컬럼과 무관) | **B (불변)** | Step1 테스트가 확인한 LEAK_COLS 제외와 정합 — 다매장 backtest 헤드라인(RFECV, α sensitivity, window composite 등)은 이번 재정의로 안 바뀜 |
+| `scripts/{rfecv_per_store,window_rfecv_pipeline,all4_unified_features,train_window_sensitivity,rfecv_composite,interval_backtest_4stores,window_composite_pipeline,grid_backtest_cache,alpha_sensitivity,permutation_importance_all4,auto_feature_selection,store_predictive_power,verify_event_prior}.py` (13개) | `store_daily.build_store_daily`를 **실제로 import·호출**해 다매장 daily를 받지만, grep에 `is_stockout`/`stockout_time` 자체가 안 잡힘 — 반환 daily를 LGBM feature/backtest에만 쓰고 stockout 컬럼은 소비 안 함(`store_predictive_power.py`의 "stockout_risk"는 몬테카를로 draw 기반 별도 산출물로 `is_stockout` 컬럼과 무관) | **B (커플링은 있으나 stockout pass-through)** | Step1 테스트가 확인한 LEAK_COLS 제외와 정합 — 다매장 backtest 헤드라인(RFECV, α sensitivity, window composite 등)은 이번 재정의로 안 바뀜 |
+| `scripts/{diag_anchor_gh,diag_chuseok_gh,interval_anchor_compare}.py` (3개) | `store_daily`에서 **`STORE_MAP`만 import**(`build_store_daily` 미호출) — 매장 코드 매핑만 씀, daily 빌드는 다른 경로/모듈에 위임 | **B (다매장 stockout 경로와 무커플링)** | `grep -n "store_daily\|build_store_daily"` 확인: `from store_daily import STORE_MAP` 한 줄뿐. is_stockout 정의 변경과 무관 |
+| `scripts/all4_stores_backtest.py` (1개) | `scripts/store_daily`를 **import하지 않음**. 자체 동명 함수 `build_store_daily`(line 49)를 정의하며 `bakery.data.bonavi_loader.map_category`만 가져와 sales/inventory에서 `adjusted_demand`를 직접 계산 — stockout 컬럼 자체를 만들지도 소비하지도 않음 | **B (독립 로더)** | Task1이 바꾼 `scripts/store_daily.py`와 코드 경로가 완전히 분리. 동명 함수라 grep에 잡혔을 뿐 커플링 없음 |
 | `src/bakery/analysis/{demand_absorption,self_fulfillment,mnl_substitution,nested_logit,substitution,substitution_did,popularity}.py` (공유 분석 라이브러리, 그 자체로는 호출자 아님) | `is_stockout`(availability/`~is_stockout`)·`stockout_time`(대체·자기충족 타이밍)을 실제 분석 입력으로 사용 — 함수 자체는 데이터 소스를 안 가림 | **호출자 기준으로 분류** (라이브러리 자체는 A/B 아님) | `grep -rl "self_fulfillment\|analysis\.popularity\|demand_absorption" scripts/` → 다매장 호출자는 `absorption_4stores.py` 하나뿐(이미 위에서 분류). `mnl_substitution`/`nested_logit`/`substitution`/`substitution_did`의 다매장 호출자는 `substitution_4stores.py`(이미 A). `self_fulfillment`는 `src/bakery/cli.py`(단매장)에서만, `popularity.py`는 어떤 scripts/에서도 호출되지 않음(미사용) — 따라서 이 라이브러리들을 통한 다매장 영향은 이미 위 3개 행(`substitution_4stores`/`absorption_4stores`/`revalidate_popularity_stockout`)에 전부 반영됨, 추가 소비처 없음 |
 
 **A 요약 (재검증 후보, 사용자 선택)**:
