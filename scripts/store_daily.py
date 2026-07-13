@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from bakery.data.bonavi_loader import assign_stockout_fields
 from bakery.data.bulk import flag_bulk_lines
 from v4_new_data_backtest import CLOSING_CODES, V2, map_category
 
@@ -58,23 +59,28 @@ def build_store_daily(store_cd: str, store_id: str, exclude_bulk: bool = True) -
     cat_map = item_category_map()
     daily["category_id"] = daily["item_id"].map(cat_map).fillna("etc")
 
-    so = pd.read_parquet(V2 / "stockout.parquet")
-    so = so[so["CD_PARTNER"].astype(str) == store_cd].copy()
-    so["date"] = pd.to_datetime(so["DT_SALE"].astype(str))
-    so["item_id"] = so["CD_ITEM"].astype(str)
-    so["SOLD_TIME"] = pd.to_numeric(so["SOLD_TIME"], errors="coerce")
-    so["hh"] = so["SOLD_TIME"].astype("Int64") // 100
-    so["mm"] = so["SOLD_TIME"].astype("Int64") % 100
-    so["stockout_time"] = pd.to_datetime(
-        so["date"].astype(str) + " " + so["hh"].astype(str) + ":" + so["mm"].astype(str),
-        errors="coerce",
-    )
-    so_first = (
-        so.sort_values("stockout_time")
-        .groupby(["date", "item_id"])["stockout_time"].first().reset_index()
-    )
-    daily = daily.merge(so_first, on=["date", "item_id"], how="left")
-    daily["is_stockout"] = daily["stockout_time"].notna()
+    # === 재정의 stockout: 폐기0 & 완판 (단매장 assign_stockout_fields 공식 공유) ===
+    # ② 생산/폐기 (bulk 무관 물리수량) → 재정의 입력 컬럼명으로
+    inv = pd.read_parquet(V2 / "inventory.parquet")
+    inv = inv[inv["CD_PARTNER"].astype(str) == store_cd].copy()
+    inv["date"] = pd.to_datetime(inv["DT_SALE"].astype(str))
+    inv["item_id"] = inv["CD_ITEM"].astype(str)
+    inv = inv.rename(columns={"QT_MADE": "production_qty", "QT_OUT": "waste_qty"})
+    inv = inv[["date", "item_id", "production_qty", "waste_qty"]]
+
+    # ③ 마지막 실판매 시각 — bulk 제외본 sales에서 (sold_units와 동일 필터)
+    ls = sales.copy()
+    ls["date"] = pd.to_datetime(ls["DT_SALE"].astype(str))
+    ls["item_id"] = ls["CD_ITEM"].astype(str)
+    ls["last_sale_ts"] = pd.to_datetime(ls["SALES_TIME"].astype(str),
+                                        format="%Y%m%d%H%M%S", errors="coerce")
+    ls = ls.groupby(["date", "item_id"], as_index=False)["last_sale_ts"].max()
+
+    # ④ merge → 재정의 공식
+    daily = daily.merge(inv, on=["date", "item_id"], how="left")
+    daily = daily.merge(ls, on=["date", "item_id"], how="left")
+    daily = assign_stockout_fields(daily)
+    daily = daily.drop(columns=["production_qty", "waste_qty", "last_sale_ts"])
     return daily
 
 
