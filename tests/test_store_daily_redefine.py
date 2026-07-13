@@ -38,3 +38,20 @@ def test_build_store_daily_uses_redefinition():
     so = d[d["is_stockout"]]; nso = d[~d["is_stockout"]]
     assert so["stockout_time"].notna().all()
     assert nso["stockout_time"].isna().all()
+
+
+def test_stockout_cols_excluded_from_training_features():
+    # 재정의된 is_stockout/stockout_time이 학습 feature로 새지 않음을 고정
+    # (품절 컬럼은 LEAK_COLS로 제외되므로 store_daily 재정의는 HTML/발주 예측에 영향 없음)
+    import sys, pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
+    from store_daily import build_store_daily, build_store_closing_rows
+    from bakery.features.category_aggregate import build_category_daily, build_features
+    from bakery.models.category_total import select_feature_cols
+    daily = build_store_daily("1000000047", "store_gw01", exclude_bulk=True)
+    cd = build_category_daily(daily_raw=daily,
+                              discount_rows=build_store_closing_rows("1000000047"), alpha=0.8)
+    feat = build_features(cd, target_col="adjusted_demand_unit")
+    cols = select_feature_cols(feat, "adjusted_demand_unit")
+    leaked = [c for c in cols if "stockout" in c.lower()]
+    assert leaked == [], f"stockout cols leaked into features: {leaked}"
