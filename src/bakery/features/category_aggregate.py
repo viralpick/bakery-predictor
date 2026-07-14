@@ -76,6 +76,7 @@ def build_category_daily(
     discount_rows: pd.DataFrame | None = None,
     alpha: float = DEFAULT_ALPHA,
     categories: tuple[str, ...] = TARGET_CATEGORIES,
+    closing_returns: pd.DataFrame | None = None,
 ) -> CategoryDaily:
     """카테고리 합 daily: unit + revenue 두 metric."""
     if daily_raw is None:
@@ -93,6 +94,9 @@ def build_category_daily(
         ds = load_sales_with_discount()
         discount_rows = ds.closing_discount().copy()
         discount_rows["item_id"] = discount_rows["item_id"].astype(str)
+        if closing_returns is None:
+            from bakery.analysis.discount import load_closing_returns
+            closing_returns = load_closing_returns()
 
     cd = filter_seasonal(discount_rows)
     cd["date"] = pd.to_datetime(cd["date"])
@@ -107,6 +111,30 @@ def build_category_daily(
         sold_closing=("qty", "sum"),
         sold_closing_revenue=("closing_revenue", "sum"),
     )
+
+    # 마감할인 반품 net-out (sold_units 파퀫과 기준 통일) — unit + revenue 모두 차감(clip≥0)
+    if closing_returns is not None and not closing_returns.empty:
+        cr = closing_returns.copy()
+        cr["item_id"] = cr["item_id"].astype(str)
+        cr["date"] = pd.to_datetime(cr["date"])
+        cr = filter_seasonal(cr)
+        cr = cr.assign(category_id=cr["item_id"].map(cat_map))
+        cr = cr[cr["category_id"].isin(categories)]
+        cr = _attach_unit_price(cr.rename(columns={"ret_qty": "sold_units"})).rename(
+            columns={"sold_units": "ret_qty"}
+        )
+        cr["ret_revenue"] = cr["ret_qty"] * cr["unit_price"]
+        cr_by_date = cr.groupby("date").agg(
+            ret_unit=("ret_qty", "sum"), ret_revenue=("ret_revenue", "sum")
+        )
+        closing_by_date = closing_by_date.join(cr_by_date, how="left")
+        closing_by_date["sold_closing"] = (
+            closing_by_date["sold_closing"] - closing_by_date["ret_unit"].fillna(0)
+        ).clip(lower=0)
+        closing_by_date["sold_closing_revenue"] = (
+            closing_by_date["sold_closing_revenue"] - closing_by_date["ret_revenue"].fillna(0)
+        ).clip(lower=0)
+        closing_by_date = closing_by_date.drop(columns=["ret_unit", "ret_revenue"])
 
     daily["stockout_hour"] = pd.to_datetime(daily["stockout_time"]).dt.hour
 
@@ -132,6 +160,7 @@ def build_category_daily(
 def build_item_adjusted_demand(
     daily: pd.DataFrame,
     discount_rows: pd.DataFrame | None = None,
+    closing_returns: pd.DataFrame | None = None,
     alpha: float = DEFAULT_ALPHA,
 ) -> pd.DataFrame:
     """item-day별 adjusted_demand = sold_units − closing_qty × (1 − α) 를 추가.
@@ -139,9 +168,16 @@ def build_item_adjusted_demand(
     adjusted = normal + closing×α = (sold − closing) + closing×α = sold − closing×(1−α).
     closing 매칭 없는 item-day는 closing=0 → adjusted == sold_units.
     당일 관측 label(leakage-safe). 입력은 변형하지 않는다.
+
+    closing_returns(load_closing_returns 출력, [item_id,date,ret_qty])가 주어지면
+    closing_qty에서 마감할인 반품을 차감(clip≥0)한다 — sold_units(파퀫)이 이미 반품 net
+    이므로 두 항 기준 통일. discount_rows 자동로드 시 closing_returns도 자동로드.
     """
     if discount_rows is None:
         discount_rows = load_sales_with_discount().closing_discount()
+        if closing_returns is None:
+            from bakery.analysis.discount import load_closing_returns
+            closing_returns = load_closing_returns()
     out = daily.copy()
     out["item_id"] = out["item_id"].astype(str)
     out["date"] = pd.to_datetime(out["date"])
@@ -153,6 +189,16 @@ def build_item_adjusted_demand(
     )
     out = out.merge(closing_qty, on=["item_id", "date"], how="left")
     out["closing_qty"] = out["closing_qty"].fillna(0.0)
+
+    # 마감할인 반품 net-out (sold_units와 기준 통일)
+    if closing_returns is not None and not closing_returns.empty:
+        cr = closing_returns.copy()
+        cr["item_id"] = cr["item_id"].astype(str)
+        cr["date"] = pd.to_datetime(cr["date"])
+        out = out.merge(cr[["item_id", "date", "ret_qty"]], on=["item_id", "date"], how="left")
+        out["closing_qty"] = (out["closing_qty"] - out["ret_qty"].fillna(0.0)).clip(lower=0)
+        out = out.drop(columns=["ret_qty"])
+
     out["adjusted_demand"] = out["sold_units"] - out["closing_qty"] * (1.0 - alpha)
     return out.drop(columns=["closing_qty"])
 
