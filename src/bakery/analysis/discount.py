@@ -128,6 +128,38 @@ def load_sales_with_discount(xlsx_path: Path | str = DEFAULT_XLSX) -> DiscountSa
     return DiscountSales(rows=rows)
 
 
+def load_closing_returns(xlsx_path: Path | str = DEFAULT_XLSX) -> pd.DataFrame:
+    """마감할인 반품(판매구분=1 + closing label) → (item_id, date, ret_qty).
+
+    `load_sales_with_discount`는 반품을 drop하므로 sold_closing이 gross-of-returns가
+    된다(반품된 마감할인 매출이 남음). 이 함수가 마감할인 반품을 (item, date)별로 집계해
+    sold_closing에서 차감(net-out)하게 한다 — sold_units(파퀫)이 이미 net이므로 타깃 두
+    항의 기준을 통일. 대량취소 제외는 `_aggregate_returns`(단품 sold_units와 단일 출처).
+    """
+    from bakery.data.bonavi_loader import _aggregate_returns
+
+    sales = pd.read_excel(xlsx_path, sheet_name="판매정보")
+    set_col = next(c for c in sales.columns if "셋트상품구분" in c)
+    sale_col = next(c for c in sales.columns if "판매구분" in c)
+    ret = sales[
+        (sales[sale_col].astype(str) == "1") & (sales[set_col].astype(str) == "SS")
+    ].copy()
+    if ret.empty:
+        return pd.DataFrame({"item_id": [], "date": [], "ret_qty": []})
+    code = ret["할인코드"].astype(str).str.strip()
+    amt = pd.to_numeric(ret["할인금액"], errors="coerce").fillna(0)
+    label = code.map(classify_code).where(amt > 0, "none")
+    closing = ret[label == "closing"]
+    if closing.empty:
+        return pd.DataFrame({"item_id": [], "date": [], "ret_qty": []})
+    lines = pd.DataFrame({
+        "item_id": closing["품목코드"].astype(str),
+        "date": pd.to_datetime(closing["판매일자"].astype(str), format="%Y%m%d"),
+        "qty": pd.to_numeric(closing["판매수량"], errors="coerce").fillna(0),
+    })
+    return _aggregate_returns(lines)
+
+
 # ---------------------------------------------------------------------------
 # Aggregations
 # ---------------------------------------------------------------------------

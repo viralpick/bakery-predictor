@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 
 from ..features.potential_demand import StoreHours, attach_potential_demand
-from .bulk import flag_bulk_lines
+from .bulk import SINGLE_FLOOR, flag_bulk_lines
 from .schema import DAILY_COLUMNS, validate_daily
 
 XLSX_DEFAULT = Path("data/internal/보나비 데이터_20260520.xlsx")
@@ -165,6 +165,54 @@ def load_sales(xlsx: Path, store_code: str = DEFAULT_STORE_CODE) -> pd.DataFrame
     )
 
 
+def _aggregate_returns(
+    lines: pd.DataFrame, *, single_floor: int = SINGLE_FLOOR
+) -> pd.DataFrame:
+    """반품 라인 → (item_id, date)별 반품수량(ret_qty) 집계.
+
+    대량취소(qty >= single_floor)는 제외한다 — 짝이 되는 대량매출(예약)은
+    `load_sales`에서 bulk 필터가 이미 제거하므로, 그 반품까지 차감하면 이중차감이
+    되어 실제 소매 수요를 과소 추정한다. 소매 반품(qty < floor)만 net-out 대상.
+
+    lines columns: item_id, date, qty.
+    """
+    if lines.empty:
+        return pd.DataFrame({"item_id": [], "date": [], "ret_qty": []})
+    retail = lines[lines["qty"] < single_floor]
+    return (
+        retail.groupby(["item_id", "date"], as_index=False, observed=True)["qty"]
+        .sum()
+        .rename(columns={"qty": "ret_qty"})
+    )
+
+
+def load_returns(xlsx: Path, store_code: str = DEFAULT_STORE_CODE) -> pd.DataFrame:
+    """판매정보 → (item_id, date)별 소매 반품수량 프레임 (net-out용).
+
+    반품은 판매수량 음수가 아니라 **판매구분 = 1** (양수 수량) 별도 행으로 기록된다.
+    `load_sales`는 판매구분=0(정상매출)만 취해 반품 행을 버리지만, **반품된 원 매출은
+    그대로 카운트**되므로 sold_units가 실수요를 과대계상한다(광교 5년 ~1.84%). 이 함수가
+    반품수량을 (item, date)별로 집계해 `aggregate_daily`에서 차감하게 한다.
+
+    Same store/단품(SS) 필터. 대량취소 제외는 `_aggregate_returns` 참조.
+    Output columns: item_id, date, ret_qty.
+    """
+    raw = pd.read_excel(xlsx, "판매정보")
+    set_col = next(c for c in raw.columns if c.startswith("셋트상품구분"))
+    sale_col = next(c for c in raw.columns if c.startswith("판매구분"))
+    raw = raw[raw["점포코드"].astype(str) == store_code]
+    raw = raw[raw[set_col] == "SS"]
+    raw = raw[raw[sale_col].astype(str) == "1"]
+    if raw.empty:
+        return pd.DataFrame({"item_id": [], "date": [], "ret_qty": []})
+    lines = pd.DataFrame({
+        "item_id": raw["품목코드"].astype(str),
+        "date": pd.to_datetime(raw["판매일자"].astype(str), format="%Y%m%d").dt.normalize(),
+        "qty": pd.to_numeric(raw["판매수량"], errors="coerce").fillna(0),
+    })
+    return _aggregate_returns(lines)
+
+
 def load_receipts_with_time(xlsx: Path, store_code: str = DEFAULT_STORE_CODE) -> pd.DataFrame:
     """판매정보 → receipts frame including hh:mm timestamp.
 
@@ -275,11 +323,14 @@ def aggregate_daily(
     inventory: pd.DataFrame,
     last_sale: pd.DataFrame,
     *,
+    returns: pd.DataFrame | None = None,
     measured_profiles: dict[str, np.ndarray] | None = None,
 ) -> pd.DataFrame:
     """Combine sales + items + inventory + last_sale → DAILY_COLUMNS frame.
 
     sold_units: sum of qty per (store, item, date) — 정상 단품만.
+                `returns`(load_returns 출력)가 주어지면 (item, date)별 소매 반품수량을
+                차감하고 0으로 clip한다(반품된 매출 과대계상 제거). None이면 무변경.
     is_stockout / stockout_time: 물리 leftover 기반 진짜 최종소진.
     potential_demand: features/potential_demand.py의 attach_potential_demand가 계산
                       (stockout 보정 적용 — sold_units 그대로가 아님. 아래에서 호출).
@@ -293,6 +344,19 @@ def aggregate_daily(
         .sum()
         .rename(columns={"qty": "sold_units"})
     )
+
+    # 반품 net-out — 반품된 매출을 실수요에서 차감 (판매구분=1, load_returns 집계).
+    if returns is not None and not returns.empty:
+        ret = returns.copy()
+        ret["item_id"] = ret["item_id"].astype(str)
+        ret["date"] = pd.to_datetime(ret["date"]).dt.normalize()
+        daily["item_id"] = daily["item_id"].astype(str)
+        daily = daily.merge(ret, on=["item_id", "date"], how="left")
+        daily["sold_units"] = (
+            (daily["sold_units"] - daily["ret_qty"].fillna(0)).clip(lower=0)
+        )
+        daily = daily.drop(columns=["ret_qty"])
+
     daily = daily.merge(items[["item_id", "category_id"]], on="item_id", how="left")
     daily["category_id"] = daily["category_id"].fillna("etc")
 
@@ -377,6 +441,7 @@ def build(
     out_path = Path(out_path)
     items = load_items(xlsx_path)
     sales = load_sales(xlsx_path, store_code=store_code)
+    returns = load_returns(xlsx_path, store_code=store_code)
 
     # Receipts with hh:mm — written once and reused by DiD substitution.
     receipts_out = Path(receipts_path or "data/internal/bonavi_receipts.parquet")
@@ -403,7 +468,7 @@ def build(
         .rename(columns={"timestamp": "last_sale_ts"})
     )
 
-    daily = aggregate_daily(sales, items, inventory, last_sale, measured_profiles=measured_profiles)
+    daily = aggregate_daily(sales, items, inventory, last_sale, returns=returns, measured_profiles=measured_profiles)
     if rename_store_id is not None:
         daily["store_id"] = rename_store_id
         # Re-key measured_profiles to the renamed store_id

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from bakery.data.bonavi_loader import assign_stockout_fields
+from bakery.data.bonavi_loader import _aggregate_returns, assign_stockout_fields
 from bakery.data.bulk import flag_bulk_lines
 from v4_new_data_backtest import CLOSING_CODES, V2, map_category
 
@@ -31,6 +31,15 @@ def build_store_daily(store_cd: str, store_id: str, exclude_bulk: bool = True) -
     """build_new_data_daily 의 store_cd 매개화 버전 — 전 카테고리 item-level daily."""
     sales = pd.read_parquet(V2 / "sales.parquet")
     sales = sales[sales["CD_PARTNER"].astype(str) == store_cd]
+    # 반품(SALES_FG=1) net-out용 — 단품(SS)만, (item,date)별 소매반품 집계.
+    # 대량취소 제외는 _aggregate_returns(단매장 bonavi_loader와 단일 출처 공유).
+    _ret_raw = sales[(sales["SALES_FG"].astype(str) == "1")
+                     & (sales["CD_USERDEF2"].astype(str) == "SS")]
+    returns = _aggregate_returns(pd.DataFrame({
+        "item_id": _ret_raw["CD_ITEM"].astype(str),
+        "date": pd.to_datetime(_ret_raw["DT_SALE"].astype(str)),
+        "qty": pd.to_numeric(_ret_raw["QT_SALE"], errors="coerce").fillna(0),
+    }))
     sales = sales[sales["SALES_FG"].astype(str) == "0"]
     sales = sales[sales["CD_USERDEF2"].astype(str) == "SS"]
     sales["date"] = pd.to_datetime(sales["DT_SALE"].astype(str))
@@ -55,6 +64,12 @@ def build_store_daily(store_cd: str, store_id: str, exclude_bulk: bool = True) -
     daily = daily.rename(columns={"CD_ITEM": "item_id", "QT_SALE": "sold_units"})
     daily["item_id"] = daily["item_id"].astype(str)
     daily["store_id"] = store_id
+
+    # 반품 net-out (SALES_FG=1) — sold_units = max(sold − 소매반품, 0). 단매장 파이프라인과 동일.
+    if not returns.empty:
+        daily = daily.merge(returns, on=["item_id", "date"], how="left")
+        daily["sold_units"] = (daily["sold_units"] - daily["ret_qty"].fillna(0)).clip(lower=0)
+        daily = daily.drop(columns=["ret_qty"])
 
     cat_map = item_category_map()
     daily["category_id"] = daily["item_id"].map(cat_map).fillna("etc")
@@ -88,8 +103,16 @@ def build_store_closing_rows(store_cd: str) -> pd.DataFrame:
     """build_closing_rows 의 store_cd 매개화 버전."""
     sales = pd.read_parquet(V2 / "sales.parquet")
     sales = sales[sales["CD_PARTNER"].astype(str) == store_cd]
-    sales = sales[sales["SALES_FG"].astype(str) == "0"]
     sales["CD_USERDEF1"] = sales["CD_USERDEF1"].astype(str)
+    # 마감할인 반품(SALES_FG=1 + CLOSING_CODES) net-out용 — sold_units/단매장과 기준 통일.
+    _ret = sales[(sales["SALES_FG"].astype(str) == "1")
+                 & (sales["CD_USERDEF1"].isin(CLOSING_CODES))]
+    closing_returns = _aggregate_returns(pd.DataFrame({
+        "item_id": _ret["CD_ITEM"].astype(str),
+        "date": pd.to_datetime(_ret["DT_SALE"].astype(str)),
+        "qty": pd.to_numeric(_ret["QT_SALE"], errors="coerce").fillna(0),
+    }))
+    sales = sales[sales["SALES_FG"].astype(str) == "0"]
     sales = sales[sales["CD_USERDEF1"].isin(CLOSING_CODES)]
     sales["date"] = pd.to_datetime(sales["DT_SALE"].astype(str))
     sales["QT_SALE"] = pd.to_numeric(sales["QT_SALE"], errors="coerce").fillna(0)
@@ -103,4 +126,9 @@ def build_store_closing_rows(store_cd: str) -> pd.DataFrame:
         ).reset_index().rename(columns={"CD_ITEM": "item_id"})
     )
     out["item_id"] = out["item_id"].astype(str)
+    # 마감 반품 net-out — qty 기준 통일 (revenue/discount_amt는 cost 분석용이라 gross 유지).
+    if not closing_returns.empty:
+        out = out.merge(closing_returns, on=["date", "item_id"], how="left")
+        out["qty"] = (out["qty"] - out["ret_qty"].fillna(0)).clip(lower=0)
+        out = out.drop(columns=["ret_qty"])
     return out
