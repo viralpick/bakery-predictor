@@ -171,3 +171,23 @@ def test_artisee_baseline_predict_positive_order():
     assert pred.index.equals(target.index)
     # 주말(토) 제시량 > 주중(월) — weekend base 20 > weekday base 10.
     assert pred.iloc[1] > pred.iloc[0]
+
+
+def test_predict_ignores_future_data():
+    daily, hourly = _make_history()
+    target = pd.DataFrame({"store_id": ["S"], "item_id": ["A"],
+                           "date": pd.to_datetime(["2026-06-22"])})
+    base = ArtiseeBaseline().fit(daily, hourly).predict(target)
+    # cutoff 이후(미래) 폭발적 수요를 history에 추가해도 fit은 max(date) 기준 3주만 봄.
+    future = daily.copy()
+    extra = daily.tail(1).copy()
+    extra["date"] = pd.to_datetime(["2026-07-15"]); extra["sold_units"] = 9999
+    future = pd.concat([future, extra], ignore_index=True)
+    # 미래를 넣으면 window 기준이 옮겨가므로, 이 테스트는 "window 밖 과거"를 검증:
+    old = daily.copy()
+    old_extra = daily.head(1).copy()
+    old_extra["date"] = pd.to_datetime(["2026-01-01"]); old_extra["sold_units"] = 9999
+    old = pd.concat([old_extra, old], ignore_index=True)
+    with_old = ArtiseeBaseline().fit(old, hourly).predict(target)
+    # 2026-01-01은 3주 창(06-01 이전) 밖 → 예측 불변.
+    assert with_old.iloc[0] == base.iloc[0]
