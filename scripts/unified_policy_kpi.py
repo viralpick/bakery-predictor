@@ -44,19 +44,20 @@ def _kpi(rows: pd.DataFrame, profiles, order_col: str) -> dict:
         group_cols=["item_id"], demand_col=DEMAND,
     )
     so = k["is_stockout"].astype(bool)
-    # 관점①(풀매진): 그날 전 품목이 매진 / 카테고리 총량 소진(Σdemand>Σorder)
+    # 관점①(카테고리 매진) = 총량 소진: 그날 빵 총수요 > 총발주 → 카테고리가 동남.
+    #   (전 품목 *동시* 매진은 ~44품목이라 거의 0이라 무의미 → 참고로만 병기)
     by_date = k.groupby("date").apply(
         lambda g: pd.Series({
+            "cat_sellout": float(g[DEMAND].sum()) > float(g[order_col].sum()),
             "all_out": bool(g["is_stockout"].astype(bool).all()),
-            "total_sellout": float(g[DEMAND].sum()) > float(g[order_col].sum()),
         }),
         include_groups=False,
     )
     return {
         "waste_krw": float(k["waste_cost_krw"].sum()),
-        "stockout_partial": float(so.mean()),                     # 관점②: item-day 매진 비율
-        "stockout_full_allitems": float(by_date["all_out"].mean()),  # 관점①: 전 품목 매진 날 비율
-        "total_sellout_day": float(by_date["total_sellout"].mean()),  # 관점①: 총량 소진 날 비율
+        "cat_sellout_day": float(by_date["cat_sellout"].mean()),   # 관점①: 카테고리 매진(총량소진) 날 비율
+        "item_stockout": float(so.mean()),                          # 관점②: item-day 매진 비율
+        "all_items_out_day": float(by_date["all_out"].mean()),      # 참고(전 품목 동시매진, ~0)
         "soldout_median_h": float(k.loc[so, "soldout_hour"].median()) if so.any() else float("nan"),
     }
 
@@ -112,8 +113,8 @@ def main() -> None:
     # 4) 정책별 KPI
     def _fmt(name: str, m: dict, wd: float) -> str:
         return (f"{name:20s} waste={m['waste_krw']:>12,.0f} ({wd:+6.1f}%)  "
-                f"일부매진={m['stockout_partial']:.3f}  풀매진={m['stockout_full_allitems']:.3f}  "
-                f"총량소진={m['total_sellout_day']:.3f}  soldout_h={m['soldout_median_h']:.2f}")
+                f"카테고리매진①={m['cat_sellout_day']:.3f}  item매진②={m['item_stockout']:.3f}  "
+                f"(전품목동시={m['all_items_out_day']:.3f})  soldout_h={m['soldout_median_h']:.2f}")
 
     ref = _kpi(rows, profiles, "order_actual_production")
     print("\n[기준] " + _fmt("actual_production", ref, 0.0))
@@ -127,7 +128,8 @@ def main() -> None:
     out = pd.DataFrame(result_rows)
     out.to_csv("reports/unified_policy_kpi.csv", index=False)
     print("\nwrote reports/unified_policy_kpi.csv")
-    print("※ waste 음수%=아띠제 실생산보다 덜 버림(좋음). 일부매진(관점②)·풀매진/총량소진(관점①) 낮을수록 좋음.")
+    print("※ waste 음수%=아띠제 실생산보다 덜 버림(좋음). 카테고리매진①(총량소진)·item매진② 낮을수록 좋음.")
+    print("※ 전품목동시매진은 ~44품목 동시라 거의 0(무의미) — 카테고리 매진의 실질 지표는 총량소진①.")
 
 
 if __name__ == "__main__":
