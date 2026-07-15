@@ -54,3 +54,24 @@ def build_item_residual_curve(hourly: pd.DataFrame, *,
         if residuals:
             out[str(item_id)] = np.vstack(residuals).mean(axis=0)
     return out
+
+
+def _missed_pct(row, curves: dict[str, np.ndarray]) -> float:
+    if not bool(row["is_stockout"]) or pd.isna(row["stockout_time"]):
+        return 0.0
+    curve = curves.get(str(row["item_id"]))
+    if curve is None:
+        return 0.0
+    hour = int(pd.Timestamp(row["stockout_time"]).hour)
+    return float(curve[min(hour, 23)])
+
+
+def soldout_multiplier(daily: pd.DataFrame, curves: dict[str, np.ndarray], *,
+                       weeks: int = 3) -> pd.DataFrame:
+    recent = _recent(daily, weeks).copy()
+    recent["dow_group"] = dow_group(recent["date"])
+    recent["missed"] = recent.apply(lambda r: _missed_pct(r, curves), axis=1)
+    out = (recent.groupby(["store_id", "item_id", "dow_group"])["missed"].mean()
+           .rename("multiplier").reset_index())
+    out["multiplier"] = 1.0 + out["multiplier"]
+    return out

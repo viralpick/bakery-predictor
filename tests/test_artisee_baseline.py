@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from bakery.models.artisee_baseline import applied_quantity, build_item_residual_curve, dow_group
+from bakery.models.artisee_baseline import applied_quantity, build_item_residual_curve, dow_group, soldout_multiplier
 
 
 def _daily(rows):
@@ -81,3 +81,29 @@ def test_residual_curve_skips_zero_demand_day():
     # 07시 직후 잔여 = 1 - 10/10 = 0.0 (0일 미포함, 정상일만 평균).
     assert curves["A"][7] == pytest.approx(0.0)
     assert curves["A"][6] == pytest.approx(1.0)
+
+
+def test_soldout_multiplier_reads_curve_at_stockout_hour():
+    # 곡선: 12시 잔여 0.4. 주중 3일 매진(12시), 나머지 매진無.
+    curves = {"A": np.array([1.0]*12 + [0.4] + [0.0]*11)}
+    rows = []
+    for d in pd.date_range("2026-06-01", "2026-06-05"):  # 월~금
+        so = d.day <= 3
+        rows.append({"store_id": "S", "item_id": "A", "date": d,
+                     "sold_units": 10, "is_stockout": so, "is_holiday": False,
+                     "stockout_time": (d + pd.Timedelta(hours=12)) if so else pd.NaT})
+    daily = pd.DataFrame(rows); daily["date"] = pd.to_datetime(daily["date"])
+    out = soldout_multiplier(daily, curves, weeks=3)
+    wk = out.set_index("dow_group").loc["weekday", "multiplier"]
+    # 놓친% = [0.4, 0.4, 0.4, 0, 0] 평균 = 0.24 → 1.24.
+    assert wk == pytest.approx(1.24)
+
+
+def test_soldout_multiplier_no_stockout_is_one():
+    curves = {"A": np.array([1.0]*24)}
+    rows = [{"store_id": "S", "item_id": "A", "date": d, "sold_units": 10,
+             "is_stockout": False, "is_holiday": False, "stockout_time": pd.NaT}
+            for d in pd.date_range("2026-06-01", "2026-06-05")]
+    daily = pd.DataFrame(rows); daily["date"] = pd.to_datetime(daily["date"])
+    out = soldout_multiplier(daily, curves, weeks=3)
+    assert out.set_index("dow_group").loc["weekday", "multiplier"] == pytest.approx(1.0)
