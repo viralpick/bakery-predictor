@@ -22,10 +22,13 @@ def test_fold_predictions_shape_and_folds():
     out = _category_total_fold_predictions(
         feats, production_quantile=0.85, horizon_days=30, n_folds=2,
     )
-    # 계약: fold별 horizon_days개 test date, fold 라벨 {0,1}, 발주 비음수.
+    # 계약(2026-07 갱신): fold별 horizon_days개 test date, fold 라벨 {0,1},
+    # base_median/base_prod/actual 반환(마진 적용 전 — total_order는 _apply_category_margin이 산출).
     assert set(out["fold"].unique()) == {0, 1}
     assert len(out) == 2 * 30
-    assert (out["total_order"] >= 0).all()
+    assert {"base_median", "base_prod", "actual"} <= set(out.columns)
+    assert (out["base_prod"] >= 0).all()
+    assert (out["base_median"] >= 0).all()
 
 
 def test_fold_predictions_raises_when_insufficient_days():

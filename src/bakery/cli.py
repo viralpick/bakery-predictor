@@ -1921,23 +1921,92 @@ def _category_total_fold_predictions(
             df.iloc[:test_start], target_col=target_col, production_q=production_quantile,
         )
         test_df = df.iloc[test_start:test_end]
-        order = np.clip(model.predict_production(test_df), 0.0, None)
-        chunks.append(pd.DataFrame({"date": test_df["date"].to_numpy(), "fold": k, "total_order": order}))
+        base_prod = np.clip(model.predict_production(test_df), 0.0, None)
+        base_median = np.clip(model.predict_expected(test_df), 0.0, None)
+        chunks.append(pd.DataFrame({
+            "date": test_df["date"].to_numpy(), "fold": k,
+            "base_median": base_median, "base_prod": base_prod,
+            "actual": test_df[target_col].to_numpy(),
+        }))
     return pd.concat(chunks, ignore_index=True)
+
+
+def _apply_category_margin(
+    totals: pd.DataFrame, method: str, *,
+    nk_mult: float = 1.0, nk_add: float = 0.0,
+    service_level: float = 0.85, cal_fold_frac: float = 0.5,
+) -> pd.DataFrame:
+    """총량 fold 예측[date,fold,base_median,base_prod,actual] → [date,fold,total_order].
+
+    발주 마진을 카테고리 **총량**에 적용하는 3방식(선택):
+    - quantile: total_order = base_prod (LGBM production-quantile 직접). 현행·하위호환.
+    - nk: total_order = base_prod × nk_mult + nk_add (수동 안전마진, margin_optimize식).
+    - conformal: base_median + q_s × scale (scale=base_median, 레벨-정규화 승법 마진).
+      fold half-split(앞=cal/뒤=test)로 q_s를 데이터에서 fit → 목표 서비스레벨 s 달성.
+      cal folds는 결과에서 빠진다(item conformal과 동일).
+    """
+    import numpy as np
+
+    if method == "quantile":
+        return totals.assign(total_order=totals["base_prod"])[["date", "fold", "total_order"]]
+    if method == "nk":
+        order = np.clip(totals["base_prod"].to_numpy() * nk_mult + nk_add, 0.0, None)
+        return totals.assign(total_order=order)[["date", "fold", "total_order"]]
+    if method == "conformal":
+        return _category_conformal_total(
+            totals, service_level=service_level, cal_fold_frac=cal_fold_frac,
+        )
+    raise ValueError(f"unknown category-margin method: {method!r}")
+
+
+def _category_conformal_total(
+    totals: pd.DataFrame, *, service_level: float, cal_fold_frac: float,
+) -> pd.DataFrame:
+    """카테고리 총량 conformal 보정(순수 함수). base=median, scale=median(레벨 정규화).
+
+    fold 정수는 시간순 아님 → fold별 최소 날짜로 연대 정렬, 앞쪽=cal/뒤쪽=test.
+    E=(actual−base_median)/scale 의 s-분위 q_s를 cal에서 fit, test에 base+q_s×scale 적용.
+    """
+    import numpy as np
+
+    fold_order = totals.groupby("fold")["date"].min().sort_values().index.tolist()
+    n_cal = max(1, int(len(fold_order) * cal_fold_frac))
+    cal_folds = set(fold_order[:n_cal])
+    test_folds = set(fold_order[n_cal:]) or {fold_order[-1]}   # 최소 1개 test 보장
+    cal = totals[totals["fold"].isin(cal_folds)]
+    test = totals[totals["fold"].isin(test_folds)].copy()
+
+    def _scale(base: np.ndarray) -> np.ndarray:
+        return np.where(base > 0, base, 1.0)
+
+    cal_scale = _scale(cal["base_median"].to_numpy())
+    scores = (cal["actual"].to_numpy() - cal["base_median"].to_numpy()) / cal_scale
+    calib = ConformalOrderCalibrator().fit(scores, service_level)
+    test["total_order"] = calib.apply(
+        test["base_median"].to_numpy(), _scale(test["base_median"].to_numpy())
+    )
+    return test[["date", "fold", "total_order"]].reset_index(drop=True)
 
 
 def _category_order_predictions(
     store_id: str, *, production_quantile: float = 0.85, val_weeks: int = 8, n_folds: int = 1,
-    alpha: float = DEFAULT_ALPHA,
+    alpha: float = DEFAULT_ALPHA, margin_method: str = "quantile",
+    nk_mult: float = 1.0, nk_add: float = 0.0,
+    service_level: float = 0.85, cal_fold_frac: float = 0.5,
 ) -> pd.DataFrame:
-    """v4 카테고리 스택: build_category_daily → fold별 q총합(Task1) → distribute_total 배분
-    → item별 our_order. item 경로(_our_order_predictions)와 동일 [item_id,date,fold,our_order]."""
+    """v4 카테고리 스택: build_category_daily → fold별 총합 base(Task1) → 마진 적용
+    (quantile/nk/conformal) → distribute_total 배분 → item별 our_order.
+    item 경로(_our_order_predictions)와 동일 [item_id,date,fold,our_order]."""
     # build_category_daily()는 store-agnostic(parquet 전체 읽음) — 단일매장 데이터셋 +
     # _load_real_daily의 단일매장 가드 덕에 안전. 다매장 확장 시 store_id 필터링 재검토 필요.
     features = build_features(build_category_daily(alpha=alpha), target_col="adjusted_demand_unit")
-    totals = _category_total_fold_predictions(
+    base = _category_total_fold_predictions(
         features, production_quantile=production_quantile,
         horizon_days=val_weeks * 7, n_folds=n_folds,
+    )
+    totals = _apply_category_margin(
+        base, margin_method, nk_mult=nk_mult, nk_add=nk_add,
+        service_level=service_level, cal_fold_frac=cal_fold_frac,
     )
     daily = _load_real_daily(store_id)          # 배분 비율 history (compute_proportions가 <date만 사용)
     chunks = []
@@ -1948,8 +2017,13 @@ def _category_order_predictions(
         chunks.append(q[["item_id", "date", "fold", "our_order"]])
     preds = pd.concat(chunks, ignore_index=True)
     preds["item_id"] = preds["item_id"].astype(str)
+    margin_desc = {
+        "quantile": f"q={production_quantile}",
+        "nk": f"nk(×{nk_mult}+{nk_add}, base q={production_quantile})",
+        "conformal": f"conformal(s={service_level}, cal_frac={cal_fold_frac})",
+    }.get(margin_method, margin_method)
     console.print(
-        f"[cyan]category our_order[/] {n_folds} fold(s) × {val_weeks}주, q={production_quantile}, "
+        f"[cyan]category our_order[/] {n_folds} fold(s) × {val_weeks}주, margin={margin_desc}, "
         f"{preds['date'].nunique()} dates × {preds['item_id'].nunique()} items"
     )
     return preds
@@ -2143,10 +2217,12 @@ def _real_prospective_inputs(
     order_level: str = "item", alpha: float = DEFAULT_ALPHA,
     calibrate: bool = False, service_level: float = DEFAULT_SERVICE_LEVEL,
     cal_fold_frac: float = 0.5,
+    category_margin: str = "quantile", nk_mult: float = 1.0, nk_add: float = 0.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
     """실데이터 조립: bonavi_daily + 재고정보(생산량/폐기량) join +
     our_order=production-quantile backtest 예측(최근 n_folds×val_weeks만 채움, Task C).
-    order_level="category"면 v4 카테고리 총합→배분 경로(_category_order_predictions) 사용.
+    order_level="category"면 v4 카테고리 총합→배분 경로(_category_order_predictions) 사용
+    (총량 마진 = category_margin: quantile|nk|conformal).
     calibrate=True(+order_level="item")면 conformal 보정 발주(_conformal_order_predictions) 사용."""
     daily = _load_real_daily(store_id)
     daily = build_item_adjusted_demand(daily, alpha=alpha)
@@ -2157,7 +2233,9 @@ def _real_prospective_inputs(
     if order_level == "category":
         predictions = _category_order_predictions(
             store_id, production_quantile=production_quantile, val_weeks=val_weeks,
-            n_folds=n_folds, alpha=alpha,
+            n_folds=n_folds, alpha=alpha, margin_method=category_margin,
+            nk_mult=nk_mult, nk_add=nk_add,
+            service_level=service_level, cal_fold_frac=cal_fold_frac,
         )
     elif calibrate:
         predictions = _conformal_order_predictions(
@@ -2181,9 +2259,10 @@ def _load_prospective_inputs(
     order_level: str = "item", alpha: float = DEFAULT_ALPHA,
     calibrate: bool = False, service_level: float = DEFAULT_SERVICE_LEVEL,
     cal_fold_frac: float = 0.5,
+    category_margin: str = "quantile", nk_mult: float = 1.0, nk_add: float = 0.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
     """(rows, receipts, unit_prices) 반환. production_quantile/val_weeks/n_folds/order_level/alpha/
-    calibrate/service_level/cal_fold_frac은 real 소스만 사용."""
+    calibrate/service_level/cal_fold_frac/category_margin/nk_*은 real 소스만 사용."""
     if source == "synthetic":
         return _synthetic_prospective_inputs()
     if source == "real":
@@ -2191,6 +2270,7 @@ def _load_prospective_inputs(
             store_id, production_quantile=production_quantile, val_weeks=val_weeks,
             n_folds=n_folds, order_level=order_level, alpha=alpha,
             calibrate=calibrate, service_level=service_level, cal_fold_frac=cal_fold_frac,
+            category_margin=category_margin, nk_mult=nk_mult, nk_add=nk_add,
         )
     raise ValueError(f"unknown source: {source!r} (expected 'synthetic' or 'real')")
 
@@ -2245,8 +2325,16 @@ def cmd_prospective_eval(
         DEFAULT_SERVICE_LEVEL, help="conformal 목표 서비스레벨 s (초과율 목표=1−s, 기본 0.74)"
     ),
     cal_fold_frac: float = typer.Option(
-        0.5, help="앞쪽 folds 중 calibration 비율(나머지=test)"
+        0.5, help="앞쪽 folds 중 calibration 비율(나머지=test). conformal 계열(item calibrate·category conformal) 공용"
     ),
+    category_margin: str = typer.Option(
+        "quantile",
+        help="order_level=category 총량 마진: quantile(production-q 직접) | nk(base_prod×mult+add 수동버퍼) | "
+             "conformal(base median+q_s×scale, 목표 s=--target-service-level). real+category 전용",
+        click_type=click.Choice(["quantile", "nk", "conformal"]),
+    ),
+    nk_mult: float = typer.Option(1.0, help="category-margin=nk의 곱셈 계수 K (order=base_prod×K+N)"),
+    nk_add: float = typer.Option(0.0, help="category-margin=nk의 덧셈 버퍼 N (order=base_prod×K+N)"),
     baseline: str = typer.Option(
         "proxy",
         help="proxy(기존 base_order=production_qty proxy) | artisee(ArtiseeBaseline 재구현 제시량). "
@@ -2274,6 +2362,7 @@ def cmd_prospective_eval(
         production_quantile=production_quantile, val_weeks=our_order_val_weeks, n_folds=n_folds,
         order_level=order_level, alpha=alpha,
         calibrate=calibrate, service_level=target_service_level, cal_fold_frac=cal_fold_frac,
+        category_margin=category_margin, nk_mult=nk_mult, nk_add=nk_add,
     )
     if baseline == "artisee":
         rows = rows.assign(base_order=_artisee_baseline_order(store_id, rows))
