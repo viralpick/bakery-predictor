@@ -217,20 +217,24 @@ def load_receipts_with_time(xlsx: Path, store_code: str = DEFAULT_STORE_CODE) ->
     """판매정보 → receipts frame including hh:mm timestamp.
 
     Output columns:
-        receipt_id (str)  — 영수증번호
+        receipt_id (str)  — 영수증번호 (판매일자+영수증번호, POS 미포함 — 하위호환 유지)
         date (datetime64) — 판매일자 (normalized to 00:00)
         item_id (str)     — 품목코드
         hour (int 0-23)   — 판매시간 hour
         minute (int 0-59) — 판매시간 minute
         timestamp (datetime64) — full datetime (date + hour + minute)
+        qty (float)       — 판매수량 (라인 수량 — 수량-가중 arrival profile용)
+        is_bulk (bool)    — 예약(대량) 라인 여부(flag_bulk_lines). 소비처가 opt-in으로
+                            profile 등에서 제외(행은 보존 — substitution 등 다른 소비처 불변).
 
     Same filters as load_sales: store + 정상매출(판매구분=0) + 단품(SS).
-    Used by DiD substitution analysis where intra-day timing matters.
+    Used by DiD substitution analysis (receipt_id 기준) 및 수요보정 arrival profile(qty 기준).
     """
     raw = pd.read_excel(xlsx, "판매정보")
     set_col = next(c for c in raw.columns if c.startswith("셋트상품구분"))
     sale_col = next(c for c in raw.columns if c.startswith("판매구분"))
     time_col = next(c for c in raw.columns if c.startswith("판매시간"))
+    pos_col = next(c for c in raw.columns if c.startswith("POS번호"))
     raw = raw[raw["점포코드"].astype(str) == store_code]
     raw = raw[raw[set_col] == "SS"]
     raw = raw[raw[sale_col].astype(str) == "0"]
@@ -251,7 +255,22 @@ def load_receipts_with_time(xlsx: Path, store_code: str = DEFAULT_STORE_CODE) ->
     raw["receipt_id"] = (
         raw["date"].dt.strftime("%Y%m%d") + "_" + raw["영수증번호"].astype(str)
     )
-    return raw[["receipt_id", "date", "품목코드", "hour", "minute", "timestamp"]].rename(
+    raw["qty"] = pd.to_numeric(raw["판매수량"], errors="coerce").fillna(0.0).astype(float)
+    # bulk 판정: load_sales와 동일한 receipt 키(판매일자+POS+영수증번호)로 판정하되
+    # 이 키는 persist하지 않는다(기존 receipt_id 불변 → substitution 등 소비처 보존).
+    # 판정 대상은 시각 유효 라인(dropna 후)이라 profile이 쓰는 행과 정확히 일치.
+    detect_lines = pd.DataFrame(
+        {
+            "receipt_id": raw["판매일자"].astype(str) + "_"
+            + raw[pos_col].astype(str) + "_" + raw["영수증번호"].astype(str),
+            "item_id": raw["품목코드"].astype(str),
+            "date": raw["date"],
+            "qty": raw["qty"],
+        },
+        index=raw.index,
+    )
+    raw["is_bulk"] = flag_bulk_lines(detect_lines).to_numpy()
+    return raw[["receipt_id", "date", "품목코드", "hour", "minute", "timestamp", "qty", "is_bulk"]].rename(
         columns={"품목코드": "item_id"}
     ).assign(
         receipt_id=lambda d: d["receipt_id"].astype("string"),

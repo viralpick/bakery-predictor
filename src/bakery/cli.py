@@ -1856,18 +1856,38 @@ def _load_real_daily(store_id: str) -> pd.DataFrame:
     return daily.reset_index(drop=True)
 
 
+def _receipts_profile_frame(receipts: pd.DataFrame, item_ids: set[str]) -> pd.DataFrame:
+    """receipts 프레임 → arrival profile 입력(item_id/date/hour/qty).
+
+    - **수량-가중**: qty=판매수량(라인당 실수량). 시간대별 재고 소진을 방문 건수가 아니라
+      실제 판매량으로 재구성 → 매진시각 시뮬 정교화.
+    - **bulk 국소 제외**: is_bulk(예약) 라인 제외. profile이 분배하는 daily 수요
+      (adjusted_demand)가 bulk 제외본이므로 shape도 walk-in 수량으로 population을 맞춘다.
+    - legacy parquet(qty·is_bulk 컬럼 부재)는 footfall 1-count로 graceful fallback.
+    """
+    receipts = receipts.copy()
+    receipts["item_id"] = receipts["item_id"].astype(str)
+    receipts = receipts[receipts["item_id"].isin(item_ids)]
+    if "is_bulk" in receipts.columns:
+        receipts = receipts[~receipts["is_bulk"].astype(bool)]
+    if "qty" in receipts.columns:
+        receipts = receipts.assign(
+            qty=pd.to_numeric(receipts["qty"], errors="coerce").fillna(0.0).astype(float)
+        )
+    else:
+        receipts = receipts.assign(qty=1.0)
+    return receipts[["item_id", "date", "hour", "qty"]].reset_index(drop=True)
+
+
 def _load_real_receipts(item_ids: set[str]) -> pd.DataFrame:
-    """bonavi_receipts.parquet → item_id/date/hour/qty. 영수증 라인 1건=1개 판매.
+    """bonavi_receipts.parquet → item_id/date/hour/qty (수량-가중·bulk 제외).
 
     주의: receipts 원본에는 store 컬럼이 없다. bonavi 데이터셋 자체가 광교(store_gw01)
     단일 매장 실측이라(bonavi_daily의 store_id도 store_gw01뿐) 현재는 store 필터가
     불필요하지만, 다매장 실데이터로 확장되면 이 함수는 store 컬럼 부재로 깨진다.
     """
     receipts = pd.read_parquet(REAL_RECEIPTS_PARQUET_PATH)
-    receipts["item_id"] = receipts["item_id"].astype(str)
-    receipts = receipts[receipts["item_id"].isin(item_ids)].copy()
-    receipts["qty"] = 1.0
-    return receipts[["item_id", "date", "hour", "qty"]].reset_index(drop=True)
+    return _receipts_profile_frame(receipts, item_ids)
 
 
 def _load_unit_prices(xlsx_path: str) -> dict[str, float]:

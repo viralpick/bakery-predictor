@@ -10,7 +10,7 @@ from bakery.evaluation.prospective import (
 )
 from bakery.evaluation.business_metrics import CostParams
 from bakery.evaluation.diagnostics import decoupling_score
-from bakery.cli import _assemble_real_rows, _fill_our_order, _quantile_backtest_predictions, _decoupling_by_category
+from bakery.cli import _assemble_real_rows, _fill_our_order, _quantile_backtest_predictions, _decoupling_by_category, _receipts_profile_frame
 
 
 def test_end_to_end_our_beats_worse_baseline():
@@ -196,3 +196,35 @@ def test_decoupling_by_category_with_two_categories():
 
     # only 2 categories
     assert len(scores) == 2
+
+
+def test_receipts_profile_frame_qty_weighted_and_bulk_excluded():
+    # a: 정상 3개(qty 2,4) + bulk 1개(qty 50) / b: 정상 1개. bulk는 profile에서 제외,
+    # 수량은 1.0이 아니라 판매수량 그대로 유지돼야 한다.
+    receipts = pd.DataFrame({
+        "item_id": ["a", "a", "a", "b"],
+        "date": pd.to_datetime(["2025-01-01"] * 4),
+        "hour": [9, 14, 15, 10],
+        "qty": [2.0, 4.0, 50.0, 3.0],
+        "is_bulk": [False, False, True, False],
+    })
+    out = _receipts_profile_frame(receipts, {"a", "b"})
+    # bulk 라인(qty=50) 제외 → 3행
+    assert len(out) == 3
+    assert 50.0 not in out["qty"].to_numpy()
+    # a는 정상 2행(qty 2,4) 유지, 합 6 (footfall 1-count였다면 2였을 것)
+    assert out[out["item_id"] == "a"]["qty"].sum() == 6.0
+    assert out[out["item_id"] == "b"]["qty"].sum() == 3.0
+    assert list(out.columns) == ["item_id", "date", "hour", "qty"]
+
+
+def test_receipts_profile_frame_legacy_parquet_falls_back_to_footfall():
+    # qty·is_bulk 컬럼 없는 legacy parquet → qty=1.0(footfall), 전 행 보존.
+    receipts = pd.DataFrame({
+        "item_id": ["a", "a", "c"],
+        "date": pd.to_datetime(["2025-01-01"] * 3),
+        "hour": [9, 14, 10],
+    })
+    out = _receipts_profile_frame(receipts, {"a"})
+    assert len(out) == 2  # item filter만
+    assert out["qty"].to_numpy().tolist() == [1.0, 1.0]
