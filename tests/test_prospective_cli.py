@@ -10,7 +10,9 @@ from bakery.evaluation.prospective import (
 )
 from bakery.evaluation.business_metrics import CostParams
 from bakery.evaluation.diagnostics import decoupling_score
-from bakery.cli import _assemble_real_rows, _fill_our_order, _quantile_backtest_predictions, _decoupling_by_category, _receipts_profile_frame
+import pytest
+from bakery.cli import _assemble_real_rows, _fill_our_order, _quantile_backtest_predictions, _decoupling_by_category, _receipts_profile_frame, _apply_category_margin
+from bakery.models.conformal_order import ConformalOrderCalibrator
 
 
 def test_end_to_end_our_beats_worse_baseline():
@@ -216,6 +218,43 @@ def test_receipts_profile_frame_qty_weighted_and_bulk_excluded():
     assert out[out["item_id"] == "a"]["qty"].sum() == 6.0
     assert out[out["item_id"] == "b"]["qty"].sum() == 3.0
     assert list(out.columns) == ["item_id", "date", "hour", "qty"]
+
+
+def _cat_totals():
+    """카테고리 총량 fold 예측 fixture (2 fold: fold0=이른=cal, fold1=늦은=test)."""
+    return pd.DataFrame({
+        "date": pd.to_datetime(["2025-01-01", "2025-01-02", "2025-01-03", "2025-01-04",
+                                "2025-02-01", "2025-02-02"]),
+        "fold": [0, 0, 0, 0, 1, 1],
+        "base_median": [100.0, 100.0, 100.0, 100.0, 200.0, 200.0],
+        "base_prod": [130.0, 130.0, 130.0, 130.0, 260.0, 260.0],
+        "actual": [110.0, 120.0, 130.0, 140.0, 0.0, 0.0],
+    })
+
+
+def test_apply_category_margin_quantile_is_base_prod():
+    totals = _cat_totals()
+    out = _apply_category_margin(totals, "quantile")
+    # quantile = production-quantile 직접, 전 fold 유지
+    assert out["total_order"].to_numpy().tolist() == [130.0, 130.0, 130.0, 130.0, 260.0, 260.0]
+
+
+def test_apply_category_margin_nk_is_mult_add_on_base_prod():
+    totals = _cat_totals()
+    add = _apply_category_margin(totals, "nk", nk_mult=1.0, nk_add=15.0)
+    assert add["total_order"].to_numpy().tolist() == [145.0]*4 + [275.0]*2
+    mult = _apply_category_margin(totals, "nk", nk_mult=1.2, nk_add=0.0)
+    assert mult["total_order"].to_numpy() == pytest.approx([156.0]*4 + [312.0]*2)
+
+
+def test_apply_category_margin_conformal_uses_median_base_and_level_scale():
+    totals = _cat_totals()
+    # cal(fold0) scores E=(actual−base_median)/base_median = [0.1,0.2,0.3,0.4]
+    q_s = ConformalOrderCalibrator().fit(np.array([0.1, 0.2, 0.3, 0.4]), 0.75).q_s
+    out = _apply_category_margin(totals, "conformal", service_level=0.75, cal_fold_frac=0.5)
+    # cal fold(0) 드롭, test fold(1)만. order = base_median + q_s×base_median = 200×(1+q_s)
+    assert out["fold"].unique().tolist() == [1]
+    assert out["total_order"].to_numpy() == pytest.approx([200.0 * (1 + q_s)] * 2)
 
 
 def test_receipts_profile_frame_legacy_parquet_falls_back_to_footfall():
