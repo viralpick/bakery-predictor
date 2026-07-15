@@ -2070,28 +2070,52 @@ def _fill_our_order(rows: pd.DataFrame, predictions: pd.DataFrame) -> pd.DataFra
     return merged
 
 
+def _artisee_fold_order(
+    store_id: str, daily: pd.DataFrame, hourly_all: pd.DataFrame, fold_rows: pd.DataFrame,
+) -> pd.Series:
+    """단일 fold 발주: cutoff=fold_rows 타깃 최소일 이전 데이터로만 fit → 이 fold만 예측.
+
+    Leakage 방지: train_daily/hourly 모두 cutoff 미만으로 절단 — fold_rows 기간 내
+    미래 실측이 곡선/배수에 섞이지 않는다.
+    M1: daily의 is_holiday(calendar 유래, 날짜 단위)를 target에 병합 — 명절/건물휴장
+    타깃일을 ArtiseeBaseline.predict가 주말로 취급하도록 신호 전달.
+    """
+    cutoff = pd.to_datetime(fold_rows["date"]).min()
+    train_daily = daily[daily["date"] < cutoff]
+    hourly = hourly_all[hourly_all["item_id"].isin(set(train_daily["item_id"]))]
+    hourly = hourly[hourly["date"] < cutoff]
+    model = ArtiseeBaseline().fit(train_daily, hourly)
+    holiday_by_date = daily.drop_duplicates("date").set_index("date")["is_holiday"]
+    target = fold_rows[["item_id", "date"]].copy()
+    target["store_id"] = store_id
+    target["is_holiday"] = target["date"].map(holiday_by_date).fillna(False)
+    order = model.predict(target)
+    return pd.Series(order.to_numpy(), index=fold_rows.index)
+
+
 def _artisee_baseline_order(store_id: str, rows: pd.DataFrame) -> pd.Series:
     """ArtiseeBaseline 재구현 발주(real 소스 전용).
 
     daily는 bonavi_daily(is_holiday 결측) + calendar의 is_public_holiday를
     is_holiday로 대체 부착. hourly는 receipts 재사용(item_id/date/hour/qty 스키마
-    호환, build_item_residual_curve가 요구하는 컬럼과 일치). Leakage 방지: fit()은
-    내부 cutoff=daily.max()-weeks로 정적 계산하므로(Task 6), 평가기간(rows) 시작일
-    이전 데이터로만 학습 — rows 기간 내 미래 실측이 곡선/배수에 섞이지 않는다.
+    호환, build_item_residual_curve가 요구하는 컬럼과 일치).
+
+    I1(fold별 재fit): rows에 our_order와 동일한 `fold` 컬럼이 있으면(_fill_our_order가
+    real 경로에서 항상 부착) fold별로 별도 재fit한다 — cutoff=그 fold 타깃 최소일.
+    고객사는 매주 월요일 새벽 trailing 3주로 재계산하는데, 옛 구현(전체 rows 기간에
+    대해 cutoff=rows["date"].min() 단일 fit)은 뒤쪽 fold일수록 아띠제baseline을 실제
+    보다 낡은 정보로 묶어 Δ를 우리 쪽으로 유리하게 편향시켰다. fold 컬럼이 없으면
+    (단일 호출·leakage 단위테스트) 기존과 동일하게 전체 rows를 한 fold로 취급 — 하위호환.
     """
     ds = _load_dataset("real", None)
     daily = _load_real_daily(store_id)
     daily = add_calendar_features(daily, ds.calendar)
     daily["is_holiday"] = daily["is_public_holiday"].astype(bool)
-    cutoff = pd.to_datetime(rows["date"]).min()
-    train_daily = daily[daily["date"] < cutoff]
-    hourly = _load_real_receipts(set(train_daily["item_id"]))
-    hourly = hourly[hourly["date"] < cutoff]
-    model = ArtiseeBaseline().fit(train_daily, hourly)
-    target = rows[["item_id", "date"]].copy()
-    target["store_id"] = store_id
-    order = model.predict(target)
-    return pd.Series(order.to_numpy(), index=rows.index, name="artisee_order")
+    hourly_all = _load_real_receipts(set(daily["item_id"]))
+    fold_groups = list(rows.groupby("fold")) if "fold" in rows.columns else [(0, rows)]
+    parts = [_artisee_fold_order(store_id, daily, hourly_all, fold_rows)
+             for _, fold_rows in fold_groups]
+    return pd.concat(parts).reindex(rows.index).rename("artisee_order")
 
 
 def _real_prospective_inputs(

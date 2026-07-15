@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 WEEKDAY_MAX_DOW = 4  # 월(0)~금(4) = weekday
+WEEKEND_REPRESENTATIVE_DOW = 5  # 토 — 명절/휴장일(주말 취급)의 요일 스케일 대표값
 
 
 def dow_group(dates: pd.Series) -> pd.Series:
@@ -123,12 +124,21 @@ class ArtiseeBaseline:
         return self
 
     def predict(self, target: pd.DataFrame) -> pd.Series:
-        """예측: target.index 정렬 제시량."""
+        """예측: target.index 정렬 제시량.
+
+        M1: target에 `is_holiday`(bool) 컬럼이 있고 True인 행은 명절/건물휴장=주말
+        취급(스펙) — dow_group=weekend, 요일 스케일 대표값=토(WEEKEND_REPRESENTATIVE_DOW).
+        컬럼이 없으면 기존과 동일(하위호환).
+        """
         if self._base is None:
             raise RuntimeError("call fit() before predict()")
         out = target.copy()
         out["dow"] = pd.to_datetime(out["date"]).dt.dayofweek
         out["dow_group"] = dow_group(out["date"])
+        if "is_holiday" in out.columns:
+            is_holiday = out["is_holiday"].fillna(False).astype(bool)
+            out.loc[is_holiday, "dow_group"] = "weekend"
+            out.loc[is_holiday, "dow"] = WEEKEND_REPRESENTATIVE_DOW
         keys = ["store_id", "item_id", "dow_group"]
         merged = (out.merge(self._base, on=keys, how="left")
                      .merge(self._mult, on=keys, how="left")

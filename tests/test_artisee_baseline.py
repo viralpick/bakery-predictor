@@ -215,6 +215,30 @@ def test_artisee_order_feeds_prospective_compare():
     assert "waste_cost_krw" in cmp.columns
 
 
+def test_predict_holiday_target_uses_weekend_treatment():
+    """M1: is_holiday=True인 target date는 dow_group=weekend + 대표요일(토=5)로 취급.
+
+    _make_history(): 주중 sold=10, 주말 sold=20, 매진시각=정오(=잔여수요 0 → 증산배수
+    1.0, 주중/주말 동일)라서 두 그룹의 차이는 순수 base_qty(10 vs 20)뿐 — 정확값 검증 가능.
+    """
+    daily, hourly = _make_history()
+    model = ArtiseeBaseline(weeks=3, curve_months=3).fit(daily, hourly)
+    target = pd.DataFrame({"store_id": ["S"], "item_id": ["A"],
+                           "date": pd.to_datetime(["2026-06-22"])})  # 월(weekday)
+    weekday_order = model.predict(target)
+    assert weekday_order.iloc[0] == pytest.approx(10.0)
+
+    holiday_target = target.copy()
+    holiday_target["is_holiday"] = [True]
+    holiday_order = model.predict(holiday_target)
+    assert holiday_order.iloc[0] == pytest.approx(20.0)
+    assert holiday_order.iloc[0] > weekday_order.iloc[0]
+
+    # is_holiday 컬럼 부재 시 기존 동작 완전 불변(하위호환 가드).
+    unchanged = model.predict(target)
+    assert unchanged.iloc[0] == weekday_order.iloc[0]
+
+
 def _calendar_stub():
     dates = pd.date_range("2026-01-01", "2026-12-31")
     return pd.DataFrame({
@@ -270,3 +294,43 @@ def test_artisee_baseline_order_cli_ignores_future_history(monkeypatch):
     leaked = _artisee_baseline_order("S", rows)
 
     assert leaked.iloc[0] == base.iloc[0]
+
+
+
+def test_artisee_baseline_order_per_fold_refit_uses_fold_recency(monkeypatch):
+    """I1: rows에 fold 컬럼이 있으면 fold별 cutoff=그 fold 타깃 최소일로 재fit한다.
+
+    2026-06-01~07-12(6주) 리짐 전환: 처음 3주(06-01~06-21) 주중 sold=10, 이후 3주
+    (06-22~07-12) 주중 sold=100. fold=1(이른 target 2026-06-22)의 cutoff 이전 3주엔
+    옛 값(10)만 존재 → base_qty=10. fold=0(늦은 target 2026-07-13, our_order 관례상
+    fold 0=최신)의 cutoff 이전 3주엔 새 값(100)이 존재 → base_qty=100. 단일 정적
+    cutoff(옛 구현)였다면 두 fold 모두 옛 base(10)에 묶여 late_fold_order도 10이
+    됐을 것 — 이 회귀를 잡는다.
+    """
+    dates = pd.date_range("2026-06-01", "2026-07-12")
+    daily_rows, hourly_rows = [], []
+    for d in dates:
+        is_weekday = d.dayofweek < 5
+        if is_weekday:
+            sold = 100 if d >= pd.Timestamp("2026-06-22") else 10
+        else:
+            sold = 20
+        daily_rows.append({"store_id": "S", "item_id": "A", "date": d,
+                           "sold_units": sold, "is_stockout": False,
+                           "stockout_time": pd.NaT, "is_holiday": False})
+        hourly_rows.append({"store_id": "S", "item_id": "A", "date": d, "hour": 7, "qty": 6.0})
+        hourly_rows.append({"store_id": "S", "item_id": "A", "date": d, "hour": 12, "qty": 4.0})
+    daily = pd.DataFrame(daily_rows)
+    daily["date"] = pd.to_datetime(daily["date"])
+    hourly = pd.DataFrame(hourly_rows)
+    hourly["date"] = pd.to_datetime(hourly["date"])
+
+    _patch_real_loaders(monkeypatch, daily, hourly)
+    rows = pd.DataFrame({
+        "item_id": ["A", "A"],
+        "date": pd.to_datetime(["2026-06-22", "2026-07-13"]),  # 둘 다 월요일
+        "fold": [1, 0],
+    })
+    order = _artisee_baseline_order("S", rows)
+    assert order.iloc[0] == pytest.approx(10.0)   # fold=1, 이른 target → 옛 레짐
+    assert order.iloc[1] == pytest.approx(100.0)  # fold=0, 늦은 target → 새 레짐
