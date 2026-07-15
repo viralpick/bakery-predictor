@@ -1,0 +1,36 @@
+"""고객사(아띠제) 현행 발주 baseline 재구현.
+
+제시량 = 적용수량(3주 주중/주말 평균) × S/O 증산배수 × 요일 스케일링 → 반올림.
+⚠️ predict()가 반환하는 값은 sold_units 예측이 아니라 **발주 제시량(order qty)**이다.
+전향 KPI 비교의 competitor. 설계: docs/superpowers/specs/2026-07-15-artisee-baseline-design.md
+"""
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+
+WEEKDAY_MAX_DOW = 4  # 월(0)~금(4) = weekday
+
+
+def dow_group(dates: pd.Series) -> pd.Series:
+    dow = pd.to_datetime(dates).dt.dayofweek
+    return np.where(dow <= WEEKDAY_MAX_DOW, "weekday", "weekend")
+
+
+def _recent(daily: pd.DataFrame, weeks: int) -> pd.DataFrame:
+    cutoff = daily["date"].max() - pd.Timedelta(weeks=weeks)
+    return daily[daily["date"] > cutoff]
+
+
+def applied_quantity(daily: pd.DataFrame, *, weeks: int = 3,
+                     spike_ratio: float = 1.3) -> pd.DataFrame:
+    recent = _recent(daily, weeks)
+    recent = recent[~recent["is_holiday"].astype(bool)].copy()
+    recent["dow_group"] = dow_group(recent["date"])
+    keys = ["store_id", "item_id", "dow_group"]
+    med = recent.groupby(keys)["sold_units"].transform("median")
+    capped = np.minimum(recent["sold_units"], med * spike_ratio)
+    recent = recent.assign(_capped=capped)
+    out = (recent.groupby(keys)["_capped"].mean()
+           .rename("base_qty").reset_index())
+    return out
