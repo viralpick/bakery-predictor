@@ -35,3 +35,24 @@ def applied_quantity(daily: pd.DataFrame, *, weeks: int = 3,
     out = (recent.groupby(keys)["_capped"].mean()
            .rename("base_qty").reset_index())
     return out
+
+
+def build_item_residual_curve(hourly: pd.DataFrame, *,
+                              months: int = 3) -> dict[str, np.ndarray]:
+    cutoff = hourly["date"].max() - pd.DateOffset(months=months)
+    recent = hourly[hourly["date"] > cutoff]
+    out: dict[str, np.ndarray] = {}
+    for item_id, g in recent.groupby("item_id"):
+        per_day = np.zeros((0, 24))
+        for _, day in g.groupby("date"):
+            hourly_qty = np.zeros(24)
+            for h, q in day.groupby("hour")["qty"].sum().items():
+                hourly_qty[int(h)] = float(q)
+            total = hourly_qty.sum()
+            if total <= 0:
+                continue
+            residual = 1.0 - np.cumsum(hourly_qty) / total
+            per_day = np.vstack([per_day, residual])
+        if per_day.shape[0] > 0:
+            out[str(item_id)] = per_day.mean(axis=0)
+    return out

@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from bakery.models.artisee_baseline import applied_quantity, dow_group
+from bakery.models.artisee_baseline import applied_quantity, build_item_residual_curve, dow_group
 
 
 def _daily(rows):
@@ -50,3 +50,21 @@ def test_applied_quantity_caps_spike():
     wk = out.set_index("dow_group").loc["weekday", "base_qty"]
     # median=10 → cap=13. 스파이크(100) 적용 시 capped sum = 14×10 + 13 = 153; mean = 153/15 = 10.2.
     assert wk == pytest.approx(10.2)
+
+
+def test_residual_curve_shape_and_values():
+    # 하루: 07시 6개, 12시 4개(누적10). 다른 날도 동일 분포.
+    rows = []
+    for d in pd.date_range("2026-06-01", "2026-06-10"):
+        rows.append({"store_id": "S", "item_id": "A", "date": d, "hour": 7, "qty": 6.0})
+        rows.append({"store_id": "S", "item_id": "A", "date": d, "hour": 12, "qty": 4.0})
+    hourly = pd.DataFrame(rows)
+    hourly["date"] = pd.to_datetime(hourly["date"])
+    curves = build_item_residual_curve(hourly, months=3)
+    curve = curves["A"]
+    assert curve.shape == (24,)
+    # 07시 직후 잔여 = 1 - 6/10 = 0.4; 12시 직후 = 1 - 10/10 = 0.0.
+    assert curve[7] == pytest.approx(0.4)
+    assert curve[12] == pytest.approx(0.0)
+    # 07시 이전(예: 06시)은 아직 아무것도 안 팔림 → 잔여 1.0.
+    assert curve[6] == pytest.approx(1.0)
