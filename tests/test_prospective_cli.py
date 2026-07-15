@@ -239,12 +239,13 @@ def test_apply_category_margin_quantile_is_base_prod():
     assert out["total_order"].to_numpy().tolist() == [130.0, 130.0, 130.0, 130.0, 260.0, 260.0]
 
 
-def test_apply_category_margin_nk_is_mult_add_on_base_prod():
+def test_apply_category_margin_nk_is_mult_add_on_base_median():
+    # nk 버퍼는 base_median(100/200) 기준(base_prod 130/260 아님) — conformal과 동일 base.
     totals = _cat_totals()
     add = _apply_category_margin(totals, "nk", nk_mult=1.0, nk_add=15.0)
-    assert add["total_order"].to_numpy().tolist() == [145.0]*4 + [275.0]*2
+    assert add["total_order"].to_numpy().tolist() == [115.0]*4 + [215.0]*2
     mult = _apply_category_margin(totals, "nk", nk_mult=1.2, nk_add=0.0)
-    assert mult["total_order"].to_numpy() == pytest.approx([156.0]*4 + [312.0]*2)
+    assert mult["total_order"].to_numpy() == pytest.approx([120.0]*4 + [240.0]*2)
 
 
 def test_apply_category_margin_conformal_uses_median_base_and_level_scale():
