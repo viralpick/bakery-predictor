@@ -2,6 +2,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from bakery.evaluation.prospective import compare_policies, simulate_item_day_kpis
+from bakery.features.potential_demand import StoreHours
 from bakery.models.artisee_baseline import (
     ArtiseeBaseline,
     applied_quantity,
@@ -191,3 +193,25 @@ def test_predict_ignores_future_data():
     with_old = ArtiseeBaseline().fit(old, hourly).predict(target)
     # 2026-01-01은 3주 창(06-01 이전) 밖 → 예측 불변.
     assert with_old.iloc[0] == base.iloc[0]
+
+
+def test_artisee_order_feeds_prospective_compare():
+    daily, hourly = _make_history()
+    model = ArtiseeBaseline().fit(daily, hourly)
+    rows = pd.DataFrame({
+        "store_id": ["S", "S"], "item_id": ["A", "A"],
+        "date": pd.to_datetime(["2026-06-22", "2026-06-23"]),
+        "potential_demand": [10.0, 11.0], "our_order": [12.0, 12.0],
+    })
+    rows["artisee_order"] = model.predict(rows).to_numpy()
+    hours = StoreHours(store_id="S", open_hour=7, close_hour=22)
+    profiles: dict[tuple, np.ndarray] = {}
+    ours = simulate_item_day_kpis(rows, profiles, order_col="our_order",
+                                  store_hours=hours, group_cols=["item_id"],
+                                  demand_col="potential_demand")
+    theirs = simulate_item_day_kpis(rows, profiles, order_col="artisee_order",
+                                    store_hours=hours, group_cols=["item_id"],
+                                    demand_col="potential_demand")
+    cmp = compare_policies(ours, theirs)
+    assert set(cmp["policy"]) == {"our", "baseline", "delta"}
+    assert "waste_cost_krw" in cmp.columns
