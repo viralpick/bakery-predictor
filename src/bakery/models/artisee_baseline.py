@@ -89,3 +89,54 @@ def dow_scaling(daily: pd.DataFrame, *, weeks: int = 3) -> pd.DataFrame:
         grp_mean.rename("gm").reset_index(), on=keys + ["dow_group"])
     df["weight"] = np.where(df["gm"] > 0, df["dm"] / df["gm"], 1.0)
     return df[keys + ["dow", "weight"]]
+
+
+def round_order(raw: pd.Series, item_ids: pd.Series, *, rounding: str = "generic",
+                multiple_map: dict[str, int] | None = None) -> pd.Series:
+    """C4 반올림: generic 또는 N배수 floor."""
+    if rounding == "generic" or not multiple_map:
+        return raw.round()
+    ns = item_ids.map(lambda i: multiple_map.get(str(i), 1)).astype(float)
+    floored = np.floor(raw / ns) * ns
+    return pd.Series(floored.to_numpy(), index=raw.index)
+
+
+class ArtiseeBaseline:
+    """제시량 = base × multiplier × weight → 반올림."""
+
+    name = "artisee_baseline"
+
+    def __init__(self, *, weeks: int = 3, curve_months: int = 3,
+                 rounding: str = "generic", multiple_map: dict[str, int] | None = None):
+        self.weeks = weeks
+        self.curve_months = curve_months
+        self.rounding = rounding
+        self.multiple_map = multiple_map
+        self._base = self._mult = self._dow = None
+
+    def fit(self, daily: pd.DataFrame, hourly: pd.DataFrame) -> "ArtiseeBaseline":
+        """학습."""
+        curves = build_item_residual_curve(hourly, months=self.curve_months)
+        self._base = applied_quantity(daily, weeks=self.weeks)
+        self._mult = soldout_multiplier(daily, curves, weeks=self.weeks)
+        self._dow = dow_scaling(daily, weeks=self.weeks)
+        return self
+
+    def predict(self, target: pd.DataFrame) -> pd.Series:
+        """예측: target.index 정렬 제시량."""
+        if self._base is None:
+            raise RuntimeError("call fit() before predict()")
+        out = target.copy()
+        out["dow"] = pd.to_datetime(out["date"]).dt.dayofweek
+        out["dow_group"] = dow_group(out["date"])
+        keys = ["store_id", "item_id", "dow_group"]
+        merged = (out.merge(self._base, on=keys, how="left")
+                     .merge(self._mult, on=keys, how="left")
+                     .merge(self._dow, on=["store_id", "item_id", "dow"], how="left"))
+        merged["base_qty"] = merged["base_qty"].fillna(0.0)
+        merged["multiplier"] = merged["multiplier"].fillna(1.0)
+        merged["weight"] = merged["weight"].fillna(1.0)
+        raw = merged["base_qty"] * merged["multiplier"] * merged["weight"]
+        order = round_order(raw, merged["item_id"], rounding=self.rounding,
+                            multiple_map=self.multiple_map)
+        return pd.Series(order.to_numpy(), index=target.index, name="artisee_order")

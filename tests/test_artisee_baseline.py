@@ -2,7 +2,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from bakery.models.artisee_baseline import applied_quantity, build_item_residual_curve, dow_group, dow_scaling, soldout_multiplier
+from bakery.models.artisee_baseline import (
+    ArtiseeBaseline,
+    applied_quantity,
+    build_item_residual_curve,
+    dow_group,
+    dow_scaling,
+    round_order,
+    soldout_multiplier,
+)
 
 
 def _daily(rows):
@@ -124,3 +132,42 @@ def test_dow_scaling_ratio_within_group():
     w = out.set_index("dow")["weight"].to_dict()
     assert w[0] == pytest.approx(20.0 / 12.0)  # 월
     assert w[1] == pytest.approx(10.0 / 12.0)  # 화
+
+
+def _make_history():
+    daily_rows, hourly_rows = [], []
+    for d in pd.date_range("2026-06-01", "2026-06-21"):
+        sold = 20 if d.dayofweek >= 5 else 10
+        so = (d.dayofweek < 5) and (d.day % 5 == 0)
+        daily_rows.append({"store_id": "S", "item_id": "A", "date": d,
+                           "sold_units": sold, "is_stockout": so, "is_holiday": False,
+                           "stockout_time": (d + pd.Timedelta(hours=12)) if so else pd.NaT})
+        hourly_rows.append({"store_id": "S", "item_id": "A", "date": d, "hour": 7, "qty": 6.0})
+        hourly_rows.append({"store_id": "S", "item_id": "A", "date": d, "hour": 12, "qty": 4.0})
+    daily = pd.DataFrame(daily_rows)
+    daily["date"] = pd.to_datetime(daily["date"])
+    hourly = pd.DataFrame(hourly_rows)
+    hourly["date"] = pd.to_datetime(hourly["date"])
+    return daily, hourly
+
+
+def test_round_order_generic_and_multiple():
+    raw = pd.Series([12.4, 12.6, 13.0])
+    items = pd.Series(["A", "A", "B"])
+    generic = round_order(raw, items, rounding="generic")
+    assert list(generic) == [12.0, 13.0, 13.0]
+    mult = round_order(raw, items, rounding="multiple", multiple_map={"A": 3, "B": 6})
+    # A=3배수 floor: 12.4→12, 12.6→12; B=6배수 floor: 13→12.
+    assert list(mult) == [12.0, 12.0, 12.0]
+
+
+def test_artisee_baseline_predict_positive_order():
+    daily, hourly = _make_history()
+    model = ArtiseeBaseline(weeks=3, curve_months=3).fit(daily, hourly)
+    target = pd.DataFrame({"store_id": ["S", "S"], "item_id": ["A", "A"],
+                           "date": pd.to_datetime(["2026-06-22", "2026-06-27"])})  # 월, 토
+    pred = model.predict(target)
+    assert (pred.to_numpy() > 0).all()
+    assert pred.index.equals(target.index)
+    # 주말(토) 제시량 > 주중(월) — weekend base 20 > weekday base 10.
+    assert pred.iloc[1] > pred.iloc[0]
