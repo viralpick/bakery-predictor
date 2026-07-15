@@ -67,6 +67,7 @@ from .ingest import (
 )
 from .ingest.inventory import load_inventory, handle_negative_waste
 from .ingest.store_mapping import load_store_mapping
+from .models.artisee_baseline import ArtiseeBaseline
 from .models.category_total import fit_category_total
 from .models.conformal_order import ConformalOrderCalibrator, DEFAULT_SERVICE_LEVEL
 from .models.item_proportion import distribute_total
@@ -2069,6 +2070,54 @@ def _fill_our_order(rows: pd.DataFrame, predictions: pd.DataFrame) -> pd.DataFra
     return merged
 
 
+def _artisee_fold_order(
+    store_id: str, daily: pd.DataFrame, hourly_all: pd.DataFrame, fold_rows: pd.DataFrame,
+) -> pd.Series:
+    """단일 fold 발주: cutoff=fold_rows 타깃 최소일 이전 데이터로만 fit → 이 fold만 예측.
+
+    Leakage 방지: train_daily/hourly 모두 cutoff 미만으로 절단 — fold_rows 기간 내
+    미래 실측이 곡선/배수에 섞이지 않는다.
+    M1: daily의 is_holiday(calendar 유래, 날짜 단위)를 target에 병합 — 명절/건물휴장
+    타깃일을 ArtiseeBaseline.predict가 주말로 취급하도록 신호 전달.
+    """
+    cutoff = pd.to_datetime(fold_rows["date"]).min()
+    train_daily = daily[daily["date"] < cutoff]
+    hourly = hourly_all[hourly_all["item_id"].isin(set(train_daily["item_id"]))]
+    hourly = hourly[hourly["date"] < cutoff]
+    model = ArtiseeBaseline().fit(train_daily, hourly)
+    holiday_by_date = daily.drop_duplicates("date").set_index("date")["is_holiday"]
+    target = fold_rows[["item_id", "date"]].copy()
+    target["store_id"] = store_id
+    target["is_holiday"] = target["date"].map(holiday_by_date).fillna(False)
+    order = model.predict(target)
+    return pd.Series(order.to_numpy(), index=fold_rows.index)
+
+
+def _artisee_baseline_order(store_id: str, rows: pd.DataFrame) -> pd.Series:
+    """ArtiseeBaseline 재구현 발주(real 소스 전용).
+
+    daily는 bonavi_daily(is_holiday 결측) + calendar의 is_public_holiday를
+    is_holiday로 대체 부착. hourly는 receipts 재사용(item_id/date/hour/qty 스키마
+    호환, build_item_residual_curve가 요구하는 컬럼과 일치).
+
+    I1(fold별 재fit): rows에 our_order와 동일한 `fold` 컬럼이 있으면(_fill_our_order가
+    real 경로에서 항상 부착) fold별로 별도 재fit한다 — cutoff=그 fold 타깃 최소일.
+    고객사는 매주 월요일 새벽 trailing 3주로 재계산하는데, 옛 구현(전체 rows 기간에
+    대해 cutoff=rows["date"].min() 단일 fit)은 뒤쪽 fold일수록 아띠제baseline을 실제
+    보다 낡은 정보로 묶어 Δ를 우리 쪽으로 유리하게 편향시켰다. fold 컬럼이 없으면
+    (단일 호출·leakage 단위테스트) 기존과 동일하게 전체 rows를 한 fold로 취급 — 하위호환.
+    """
+    ds = _load_dataset("real", None)
+    daily = _load_real_daily(store_id)
+    daily = add_calendar_features(daily, ds.calendar)
+    daily["is_holiday"] = daily["is_public_holiday"].astype(bool)
+    hourly_all = _load_real_receipts(set(daily["item_id"]))
+    fold_groups = list(rows.groupby("fold")) if "fold" in rows.columns else [(0, rows)]
+    parts = [_artisee_fold_order(store_id, daily, hourly_all, fold_rows)
+             for _, fold_rows in fold_groups]
+    return pd.concat(parts).reindex(rows.index).rename("artisee_order")
+
+
 def _real_prospective_inputs(
     store_id: str, *, production_quantile: float = 0.85, val_weeks: int = 8, n_folds: int = 1,
     order_level: str = "item", alpha: float = DEFAULT_ALPHA,
@@ -2178,20 +2227,36 @@ def cmd_prospective_eval(
     cal_fold_frac: float = typer.Option(
         0.5, help="앞쪽 folds 중 calibration 비율(나머지=test)"
     ),
+    baseline: str = typer.Option(
+        "proxy",
+        help="proxy(기존 base_order=production_qty proxy) | artisee(ArtiseeBaseline 재구현 제시량). "
+             "artisee는 real 소스만 지원 — synthetic 입력엔 daily/hourly 스키마(sold_units/"
+             "is_holiday/stockout_time)가 없음.",
+        click_type=click.Choice(["proxy", "artisee"]),
+    ),
     out_csv: str = typer.Option("reports/prospective_kpi.csv"),
 ) -> None:
     """우리 발주 추천 vs 현행 발주를 KPI(폐기/매진시각/매진률)로 비교.
 
     실 데이터(--source real)의 경우 카테고리별 ρ_DS(Decoupling Score) 진단도 출력.
     합성 데이터는 category_id가 없어 ρ_DS 미계산. --n-folds>1이면 fold별 Δ KPI +
-    95%CI 집계도 출력·저장한다.
+    95%CI 집계도 출력·저장한다. --baseline artisee면 현행 baseline 대신 ArtiseeBaseline
+    재구현 제시량을 base_order로 교체해 비교한다(real 소스 전용).
     """
+    if baseline == "artisee" and source != "real":
+        raise typer.BadParameter(
+            "--baseline artisee는 --source real 전용이다 — synthetic 입력(_synthetic_prospective_inputs)"
+            "엔 ArtiseeBaseline.fit이 요구하는 daily/hourly 스키마(store_id/sold_units/is_holiday/"
+            "stockout_time, item_id/date/hour/qty)가 없다."
+        )
     rows, receipts, unit_prices = _load_prospective_inputs(
         source, store_id,
         production_quantile=production_quantile, val_weeks=our_order_val_weeks, n_folds=n_folds,
         order_level=order_level, alpha=alpha,
         calibrate=calibrate, service_level=target_service_level, cal_fold_frac=cal_fold_frac,
     )
+    if baseline == "artisee":
+        rows = rows.assign(base_order=_artisee_baseline_order(store_id, rows))
     profiles = build_arrival_profile(
         receipts, group_cols=["item_id"],
         exclude_keys=_stockout_item_days(rows), exclude_cols=["item_id", "date"],
