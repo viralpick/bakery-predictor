@@ -75,3 +75,17 @@ def soldout_multiplier(daily: pd.DataFrame, curves: dict[str, np.ndarray], *,
            .rename("multiplier").reset_index())
     out["multiplier"] = 1.0 + out["multiplier"]
     return out
+
+
+def dow_scaling(daily: pd.DataFrame, *, weeks: int = 3) -> pd.DataFrame:
+    recent = _recent(daily, weeks)
+    recent = recent[~recent["is_holiday"].astype(bool)].copy()
+    recent["dow"] = pd.to_datetime(recent["date"]).dt.dayofweek
+    recent["dow_group"] = dow_group(recent["date"])
+    keys = ["store_id", "item_id"]
+    dow_mean = recent.groupby(keys + ["dow", "dow_group"])["sold_units"].mean()
+    grp_mean = recent.groupby(keys + ["dow_group"])["sold_units"].mean()
+    df = dow_mean.rename("dm").reset_index().merge(
+        grp_mean.rename("gm").reset_index(), on=keys + ["dow_group"])
+    df["weight"] = np.where(df["gm"] > 0, df["dm"] / df["gm"], 1.0)
+    return df[keys + ["dow", "weight"]]

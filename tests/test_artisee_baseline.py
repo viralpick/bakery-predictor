@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from bakery.models.artisee_baseline import applied_quantity, build_item_residual_curve, dow_group, soldout_multiplier
+from bakery.models.artisee_baseline import applied_quantity, build_item_residual_curve, dow_group, dow_scaling, soldout_multiplier
 
 
 def _daily(rows):
@@ -107,3 +107,20 @@ def test_soldout_multiplier_no_stockout_is_one():
     daily = pd.DataFrame(rows); daily["date"] = pd.to_datetime(daily["date"])
     out = soldout_multiplier(daily, curves, weeks=3)
     assert out.set_index("dow_group").loc["weekday", "multiplier"] == pytest.approx(1.0)
+
+
+def test_dow_scaling_ratio_within_group():
+    # 주중: 월=20, 화~금=10. 주중평균 = (20+10+10+10+10)/5 = 12.
+    rows = []
+    for d in pd.date_range("2026-06-01", "2026-06-19"):  # 3주 주중 15일
+        if d.dayofweek >= 5:
+            continue
+        sold = 20 if d.dayofweek == 0 else 10
+        rows.append({"store_id": "S", "item_id": "A", "date": d,
+                     "sold_units": sold, "is_holiday": False, "is_stockout": False,
+                     "stockout_time": pd.NaT})
+    daily = pd.DataFrame(rows); daily["date"] = pd.to_datetime(daily["date"])
+    out = dow_scaling(daily, weeks=3)
+    w = out.set_index("dow")["weight"].to_dict()
+    assert w[0] == pytest.approx(20.0 / 12.0)  # 월
+    assert w[1] == pytest.approx(10.0 / 12.0)  # 화
