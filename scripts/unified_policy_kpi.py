@@ -45,19 +45,18 @@ def _kpi(rows: pd.DataFrame, profiles, order_col: str) -> dict:
     )
     so = k["is_stockout"].astype(bool)
     # 관점①(카테고리 매진) = 총량 소진: 그날 빵 총수요 > 총발주 → 카테고리가 동남.
-    #   (전 품목 *동시* 매진은 ~44품목이라 거의 0이라 무의미 → 참고로만 병기)
-    by_date = k.groupby("date").apply(
-        lambda g: pd.Series({
-            "cat_sellout": float(g[DEMAND].sum()) > float(g[order_col].sum()),
-            "all_out": bool(g["is_stockout"].astype(bool).all()),
-        }),
-        include_groups=False,
-    )
+    #   빈도(며칠)뿐 아니라 **심각도**(그날 얼마나 부족했나)도 본다.
+    g = k.groupby("date")
+    d_sum = g[DEMAND].sum()
+    o_sum = g[order_col].sum()
+    sellout = d_sum > o_sum
+    shortfall_pct = ((d_sum - o_sum).clip(lower=0) / d_sum.clip(lower=1))  # 그날 부족 비율
     return {
         "waste_krw": float(k["waste_cost_krw"].sum()),
-        "cat_sellout_day": float(by_date["cat_sellout"].mean()),   # 관점①: 카테고리 매진(총량소진) 날 비율
+        "cat_sellout_day": float(sellout.mean()),                   # 관점①: 카테고리 매진(총량소진) 날 비율
+        "cat_shortfall_on_sellout": float(shortfall_pct[sellout].mean()) if sellout.any() else 0.0,  # 심각도: 매진일 평균 부족%
+        "cat_undersupply_rate": float((d_sum - o_sum).clip(lower=0).sum() / d_sum.sum()),  # 전체 총량 대비 부족%
         "item_stockout": float(so.mean()),                          # 관점②: item-day 매진 비율
-        "all_items_out_day": float(by_date["all_out"].mean()),      # 참고(전 품목 동시매진, ~0)
         "soldout_median_h": float(k.loc[so, "soldout_hour"].median()) if so.any() else float("nan"),
     }
 
@@ -87,8 +86,9 @@ def main() -> None:
     # 2) 카테고리 정책들(총량→배분)을 같은 키에 join. conformal은 cal/test 분할이라
     #    예측 date가 적음 → 아래 dropna가 공통 population을 conformal test창으로 자동 축소.
     cat_specs = {
-        "order_our_cat_quantile": dict(margin_method="quantile"),
-        "order_our_cat_nk": dict(margin_method="nk", nk_mult=1.0, nk_add=40.0),
+        "order_our_cat_quantile": dict(margin_method="quantile"),   # q0.85 직접
+        "order_our_cat_nk15": dict(margin_method="nk", nk_mult=1.0, nk_add=15.0),  # median+15 (버퍼 철학)
+        "order_our_cat_nk30": dict(margin_method="nk", nk_mult=1.0, nk_add=30.0),  # median+30
         "order_our_cat_conformal": dict(margin_method="conformal", service_level=0.85, cal_fold_frac=0.5),
     }
     for col, kw in cat_specs.items():
@@ -99,8 +99,8 @@ def main() -> None:
 
     # 3) 결측 제거 → 전 정책 동일 population(conformal test창으로 수렴).
     #    스코프(2번): actual_production(기준) + artisee_reimpl + our_category{quantile,nk,conformal}.
-    order_cols = ["order_actual_production", "order_artisee_reimpl",
-                  "order_our_cat_quantile", "order_our_cat_nk", "order_our_cat_conformal"]
+    order_cols = ["order_actual_production", "order_artisee_reimpl", "order_our_cat_quantile",
+                  "order_our_cat_nk15", "order_our_cat_nk30", "order_our_cat_conformal"]
     before = len(rows)
     rows = rows.dropna(subset=order_cols).reset_index(drop=True)
     print(f"공통 population: {len(rows)} / {before} item-days (conformal test창, 전 정책 발주 존재)")
@@ -112,9 +112,9 @@ def main() -> None:
 
     # 4) 정책별 KPI
     def _fmt(name: str, m: dict, wd: float) -> str:
-        return (f"{name:20s} waste={m['waste_krw']:>12,.0f} ({wd:+6.1f}%)  "
-                f"카테고리매진①={m['cat_sellout_day']:.3f}  item매진②={m['item_stockout']:.3f}  "
-                f"(전품목동시={m['all_items_out_day']:.3f})  soldout_h={m['soldout_median_h']:.2f}")
+        return (f"{name:22s} waste={m['waste_krw']:>12,.0f} ({wd:+6.1f}%)  "
+                f"카테매진①={m['cat_sellout_day']:.3f}(부족{m['cat_shortfall_on_sellout']*100:.1f}%/"
+                f"총{m['cat_undersupply_rate']*100:.1f}%)  item매진②={m['item_stockout']:.3f}")
 
     ref = _kpi(rows, profiles, "order_actual_production")
     print("\n[기준] " + _fmt("actual_production", ref, 0.0))

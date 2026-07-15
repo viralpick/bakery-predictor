@@ -1950,7 +1950,9 @@ def _apply_category_margin(
     if method == "quantile":
         return totals.assign(total_order=totals["base_prod"])[["date", "fold", "total_order"]]
     if method == "nk":
-        order = np.clip(totals["base_prod"].to_numpy() * nk_mult + nk_add, 0.0, None)
+        # 버퍼는 **median(q0.5) 기준**에 얹는다 — margin_optimize/HTML 철학(median×K+N)과
+        # 일치, conformal(median+q_s×scale)과도 동일 base라 공정 비교. (q0.85 위 버퍼는 이중마진)
+        order = np.clip(totals["base_median"].to_numpy() * nk_mult + nk_add, 0.0, None)
         return totals.assign(total_order=order)[["date", "fold", "total_order"]]
     if method == "conformal":
         return _category_conformal_total(
