@@ -68,3 +68,16 @@ def test_residual_curve_shape_and_values():
     assert curve[12] == pytest.approx(0.0)
     # 07시 이전(예: 06시)은 아직 아무것도 안 팔림 → 잔여 1.0.
     assert curve[6] == pytest.approx(1.0)
+
+
+def test_residual_curve_skips_zero_demand_day():
+    # 정상일 1개(07시 10개) + 전일 qty=0인 날 1개 → 0일은 제외되고 곡선 불변.
+    rows = [
+        {"store_id": "S", "item_id": "A", "date": pd.Timestamp("2026-06-01"), "hour": 7, "qty": 10.0},
+        {"store_id": "S", "item_id": "A", "date": pd.Timestamp("2026-06-02"), "hour": 7, "qty": 0.0},
+    ]
+    hourly = pd.DataFrame(rows)
+    curves = build_item_residual_curve(hourly, months=3)
+    # 07시 직후 잔여 = 1 - 10/10 = 0.0 (0일 미포함, 정상일만 평균).
+    assert curves["A"][7] == pytest.approx(0.0)
+    assert curves["A"][6] == pytest.approx(1.0)

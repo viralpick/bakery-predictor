@@ -43,16 +43,14 @@ def build_item_residual_curve(hourly: pd.DataFrame, *,
     recent = hourly[hourly["date"] > cutoff]
     out: dict[str, np.ndarray] = {}
     for item_id, g in recent.groupby("item_id"):
-        per_day = np.zeros((0, 24))
+        residuals: list[np.ndarray] = []
         for _, day in g.groupby("date"):
-            hourly_qty = np.zeros(24)
-            for h, q in day.groupby("hour")["qty"].sum().items():
-                hourly_qty[int(h)] = float(q)
+            hourly_qty = (day.groupby("hour")["qty"].sum()
+                          .reindex(range(24), fill_value=0.0).to_numpy(dtype=float))
             total = hourly_qty.sum()
             if total <= 0:
                 continue
-            residual = 1.0 - np.cumsum(hourly_qty) / total
-            per_day = np.vstack([per_day, residual])
-        if per_day.shape[0] > 0:
-            out[str(item_id)] = per_day.mean(axis=0)
+            residuals.append(1.0 - np.cumsum(hourly_qty) / total)
+        if residuals:
+            out[str(item_id)] = np.vstack(residuals).mean(axis=0)
     return out
