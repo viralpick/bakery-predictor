@@ -1,7 +1,10 @@
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
 
+from bakery.cli import _artisee_baseline_order
 from bakery.evaluation.prospective import compare_policies, simulate_item_day_kpis
 from bakery.features.potential_demand import StoreHours
 from bakery.models.artisee_baseline import (
@@ -175,17 +178,12 @@ def test_artisee_baseline_predict_positive_order():
     assert pred.iloc[1] > pred.iloc[0]
 
 
-def test_predict_ignores_future_data():
+def test_predict_ignores_out_of_window_history():
     daily, hourly = _make_history()
     target = pd.DataFrame({"store_id": ["S"], "item_id": ["A"],
                            "date": pd.to_datetime(["2026-06-22"])})
     base = ArtiseeBaseline().fit(daily, hourly).predict(target)
-    # cutoff 이후(미래) 폭발적 수요를 history에 추가해도 fit은 max(date) 기준 3주만 봄.
-    future = daily.copy()
-    extra = daily.tail(1).copy()
-    extra["date"] = pd.to_datetime(["2026-07-15"]); extra["sold_units"] = 9999
-    future = pd.concat([future, extra], ignore_index=True)
-    # 미래를 넣으면 window 기준이 옮겨가므로, 이 테스트는 "window 밖 과거"를 검증:
+    # window 밖 과거를 검증: fit은 max(date) 기준 3주(weeks=3)만 봄.
     old = daily.copy()
     old_extra = daily.head(1).copy()
     old_extra["date"] = pd.to_datetime(["2026-01-01"]); old_extra["sold_units"] = 9999
@@ -215,3 +213,60 @@ def test_artisee_order_feeds_prospective_compare():
     cmp = compare_policies(ours, theirs)
     assert set(cmp["policy"]) == {"our", "baseline", "delta"}
     assert "waste_cost_krw" in cmp.columns
+
+
+def _calendar_stub():
+    dates = pd.date_range("2026-01-01", "2026-12-31")
+    return pd.DataFrame({
+        "date": dates, "is_public_holiday": False,
+        "off_streak_length": 0, "off_position_in_streak": 0,
+        "is_white_day": False,
+    })
+
+
+def _patch_real_loaders(monkeypatch, daily, hourly):
+    """_artisee_baseline_order가 부르는 3개 real 로더를 고정 프레임으로 대체."""
+    monkeypatch.setattr("bakery.cli._load_dataset",
+                        lambda source, data_dir: SimpleNamespace(calendar=_calendar_stub()))
+    monkeypatch.setattr("bakery.cli._load_real_daily", lambda store_id: daily.copy())
+    monkeypatch.setattr("bakery.cli._load_real_receipts", lambda item_ids: hourly.copy())
+
+
+def test_artisee_baseline_order_cli_ignores_future_history(monkeypatch):
+    """_artisee_baseline_order의 cutoff=rows['date'].min() 트렁케이션 가드.
+
+    모델 자체(ArtiseeBaseline.fit)는 받은 daily의 max(date) 기준으로 창을 잡으므로,
+    leakage 방지는 전적으로 CLI 헬퍼가 rows 평가기간 이전으로 daily/hourly를
+    잘라내는 데 달려 있다(cli.py의 `daily[daily["date"] < cutoff]` /
+    `hourly[hourly["date"] < cutoff]`). 이 테스트는 그 트렁케이션이 없으면
+    실패해야 한다: cutoff 당일·이후에 극단값 행을 추가해도 잘려나가 예측이
+    바뀌지 않아야 정상이다.
+    """
+    daily, hourly = _make_history()  # 2026-06-01 ~ 2026-06-21, store S / item A
+    rows = pd.DataFrame({"item_id": ["A"], "date": pd.to_datetime(["2026-06-22"])})
+
+    _patch_real_loaders(monkeypatch, daily, hourly)
+    base = _artisee_baseline_order("S", rows)
+
+    future_daily = daily.tail(1).copy()
+    future_daily["date"] = pd.to_datetime(["2026-06-22"])  # == cutoff
+    future_daily["sold_units"] = 9999
+    future_daily["is_stockout"] = False
+    future_daily["stockout_time"] = pd.NaT
+    leaked_daily_row = daily.tail(1).copy()
+    leaked_daily_row["date"] = pd.to_datetime(["2026-06-25"])  # cutoff 이후
+    leaked_daily_row["sold_units"] = 9999
+    leaked_daily = pd.concat([daily, future_daily, leaked_daily_row], ignore_index=True)
+
+    future_hourly = hourly.tail(1).copy()
+    future_hourly["date"] = pd.to_datetime(["2026-06-22"])
+    future_hourly["qty"] = 9999.0
+    leaked_hourly_row = hourly.tail(1).copy()
+    leaked_hourly_row["date"] = pd.to_datetime(["2026-06-25"])
+    leaked_hourly_row["qty"] = 9999.0
+    leaked_hourly = pd.concat([hourly, future_hourly, leaked_hourly_row], ignore_index=True)
+
+    _patch_real_loaders(monkeypatch, leaked_daily, leaked_hourly)
+    leaked = _artisee_baseline_order("S", rows)
+
+    assert leaked.iloc[0] == base.iloc[0]
