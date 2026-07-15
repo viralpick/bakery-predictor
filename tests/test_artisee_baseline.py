@@ -48,5 +48,5 @@ def test_applied_quantity_caps_spike():
                      "stockout_time": pd.NaT, "is_holiday": False})
     out = applied_quantity(_daily(rows), weeks=3, spike_ratio=1.3)
     wk = out.set_index("dow_group").loc["weekday", "base_qty"]
-    # median≈10 → 캡 13. 100이 13으로 눌려 평균이 10 근처(spike 미적용 시 훨씬 큼).
-    assert wk < 15.0
+    # median=10 → cap=13. 스파이크(100) 적용 시 capped sum = 14×10 + 13 = 153; mean = 153/15 = 10.2.
+    assert wk == pytest.approx(10.2)

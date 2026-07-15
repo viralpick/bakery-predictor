@@ -13,8 +13,9 @@ WEEKDAY_MAX_DOW = 4  # 월(0)~금(4) = weekday
 
 
 def dow_group(dates: pd.Series) -> pd.Series:
-    dow = pd.to_datetime(dates).dt.dayofweek
-    return np.where(dow <= WEEKDAY_MAX_DOW, "weekday", "weekend")
+    dts = pd.to_datetime(dates)
+    dow = dts.dt.dayofweek
+    return pd.Series(np.where(dow <= WEEKDAY_MAX_DOW, "weekday", "weekend"), index=dts.index)
 
 
 def _recent(daily: pd.DataFrame, weeks: int) -> pd.DataFrame:
