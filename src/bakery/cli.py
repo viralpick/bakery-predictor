@@ -1823,14 +1823,22 @@ def select_base_order(merged: pd.DataFrame, *, source: str = "production") -> pd
     raise ValueError(f"unsupported base_order source: {source!r} (only 'production' until 실발주 수령)")
 
 
-def _assemble_real_rows(daily: pd.DataFrame, inventory: pd.DataFrame) -> pd.DataFrame:
+def _assemble_real_rows(
+    daily: pd.DataFrame, inventory: pd.DataFrame, bulk_qty: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     """bonavi_daily(store/category 필터됨) + load_inventory(A) 결과를 (date,item_id) 조인.
 
     daily["date"]는 datetime64(receipts와 동일 표현 유지 — build_arrival_profile의
     str-cast 키 비교 계약 때문에 여기서 별도 문자열로 바꾸지 않는다). inventory["date"]는
     load_inventory 계약상 YYYYMMDD 문자열이므로 조인 전에만 datetime으로 정규화한다.
     재고정보에 매칭이 없는 item-day는 base_order가 없어 평가셋에서 제외한다(inner join).
-    """
+
+    bulk_qty(item_id/date/bulk_qty, `_real_bulk_qty` 출력)가 주어지면 생산량(QT_MADE)에서
+    해당 item-day 예약(bulk) 판매량을 차감한다(측정 헌장 §1: 생산=판매+폐기 정합 —
+    sold_units는 bulk 제외본인데 QT_MADE는 미제외라 base_order가 부풀려짐).
+    receipts 소스가 정확한 build-time 소스와 광교에서 완전 일치함을 확인
+    (scripts/check_production_bulk_consistency.py, regression guard). 차감 후 <1% item-day는
+    생산<판매+폐기가 되나(예약이 생산과 다른 날 잡힌 소수 케이스) 편향이 보수적이라 clip만."""
     inv = inventory.copy()
     inv["date"] = pd.to_datetime(inv["date"], format="%Y%m%d")
     inv["item_id"] = inv["item_id"].astype(str)
@@ -1840,8 +1848,38 @@ def _assemble_real_rows(daily: pd.DataFrame, inventory: pd.DataFrame) -> pd.Data
         inv[["date", "item_id", "production_qty", "waste_qty"]],
         on=["date", "item_id"], how="inner",
     )
+    if bulk_qty is not None and not bulk_qty.empty:
+        b = bulk_qty.copy()
+        b["item_id"] = b["item_id"].astype(str)
+        b["date"] = pd.to_datetime(b["date"])
+        merged = merged.merge(b[["item_id", "date", "bulk_qty"]], on=["item_id", "date"], how="left")
+        removed = merged["bulk_qty"].fillna(0.0)
+        net = (merged["production_qty"].astype(float) - removed)
+        n_clipped = int((net < 0).sum())
+        merged["production_qty"] = net.clip(lower=0)
+        merged = merged.drop(columns=["bulk_qty"])
+        console.print(f"[cyan]생산 bulk 제외[/] {int((removed > 0).sum())} item-day에서 "
+                      f"{removed.sum():.0f}개 차감 (음수→0 clip {n_clipped}개, 보수적)")
     merged["base_order"] = select_base_order(merged, source="production")
     return merged[REAL_ROWS_COLUMNS].reset_index(drop=True)
+
+
+def _real_bulk_qty() -> pd.DataFrame:
+    """bonavi_receipts → item-day별 예약(bulk) 판매량. 생산량 bulk 제외용(헌장 §1).
+
+    receipts의 is_bulk(flag_bulk_lines) 라인 qty를 (item_id,date)로 합산. 이 값이
+    build-time load_sales의 정확한 bulk 제거량과 광교에서 완전 일치함을 검증
+    (scripts/check_production_bulk_consistency.py). is_bulk 컬럼 없는 legacy parquet은 빈 프레임."""
+    rec = pd.read_parquet(REAL_RECEIPTS_PARQUET_PATH)
+    if "is_bulk" not in rec.columns:
+        return pd.DataFrame({"item_id": [], "date": [], "bulk_qty": []})
+    rec = rec[rec["is_bulk"].astype(bool)].copy()
+    rec["item_id"] = rec["item_id"].astype(str)
+    rec["date"] = pd.to_datetime(rec["date"]).dt.normalize()
+    rec["qty"] = pd.to_numeric(rec["qty"], errors="coerce").fillna(0.0)
+    return rec.groupby(["item_id", "date"], as_index=False)["qty"].sum().rename(
+        columns={"qty": "bulk_qty"}
+    )
 
 
 def _load_real_daily(store_id: str) -> pd.DataFrame:
@@ -2231,7 +2269,7 @@ def _real_prospective_inputs(
     inventory = load_inventory(REAL_INVENTORY_XLSX_PATH, store_id)
     inventory, waste_report = handle_negative_waste(inventory, policy="clip")
     console.print(f"[cyan]negative waste[/] clipped: {waste_report}")
-    rows = _assemble_real_rows(daily, inventory)
+    rows = _assemble_real_rows(daily, inventory, bulk_qty=_real_bulk_qty())
     if order_level == "category":
         predictions = _category_order_predictions(
             store_id, production_quantile=production_quantile, val_weeks=val_weeks,
