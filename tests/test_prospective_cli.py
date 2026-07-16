@@ -168,6 +168,35 @@ def test_assemble_real_rows_drops_item_days_without_inventory_match():
     assert len(result) == 3
 
 
+def test_assemble_real_rows_subtracts_bulk_from_production():
+    """헌장 §1: base_order(=생산량)에서 해당 item-day 예약(bulk) 판매량을 차감한다."""
+    bulk_qty = pd.DataFrame({
+        "item_id": ["101", "102"],
+        "date": pd.to_datetime(["2021-01-02", "2021-01-01"]),
+        "bulk_qty": [5.0, 100.0],  # 101: 정상 차감 / 102: 생산(6) 초과 → clip(0)
+    })
+    result = _assemble_real_rows(
+        _real_shaped_daily(), _real_shaped_inventory(), bulk_qty=bulk_qty
+    )
+
+    # 101 2021-01-02: 생산 18 − bulk 5 = 13
+    row = result[
+        (result["item_id"] == "101") & (result["date"] == pd.Timestamp("2021-01-02"))
+    ].iloc[0]
+    assert row["base_order"] == 13
+    assert row["waste_qty"] == 2  # 폐기 불변
+
+    # 102 2021-01-01: 생산 6 − bulk 100 = -94 → clip 0
+    row2 = result[result["item_id"] == "102"].iloc[0]
+    assert row2["base_order"] == 0
+
+    # bulk 없는 item-day(101 2021-01-01)는 생산 15 그대로
+    row3 = result[
+        (result["item_id"] == "101") & (result["date"] == pd.Timestamp("2021-01-01"))
+    ].iloc[0]
+    assert row3["base_order"] == 15
+
+
 def test_decoupling_by_category_with_two_categories():
     """ρ_DS 카테고리별 산출 — category='bread'는 강한 양의 상관,
     category='pastry'는 constant stockout(분산 0) → 결과 0.0."""
