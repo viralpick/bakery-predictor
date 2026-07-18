@@ -19,10 +19,14 @@ DEFAULT_K = 1.5
 class EventLevelPrior:
     def __init__(self, events: dict[str, tuple[int, int]] | None = None,
                  k: float = DEFAULT_K, min_events: int = 2,
-                 lunar_events: dict[str, dict[int, str]] | None = None):
+                 lunar_events: dict[str, dict[int, str]] | None = None,
+                 recency: int | None = None):
         self.events = dict(events) if events is not None else dict(DEFAULT_EVENTS)
         self.k = k
         self.min_events = min_events
+        # recency=N: anchor를 최근 N회 이벤트 median으로 제한(레벨 추종). None=전체 history(기본).
+        # 수요 추세(예: -26% 하락)가 있을 때 absolute median 앵커가 과대예측하는 것을 완화.
+        self.recency = recency
         self.lunar_events = dict(lunar_events) if lunar_events else {}
         # 음력 날짜(normalized) → 이벤트명. per-event 분리 및 날짜→이벤트 판별용.
         self._lunar_date_to_name: dict[pd.Timestamp, str] = {}
@@ -70,7 +74,9 @@ class EventLevelPrior:
         past = [a for (ed, a) in self._event_actuals.get(name, []) if ed < date]
         if not past:
             return None, 0
-        return float(np.median(past)), len(past)
+        n_past = len(past)  # shrink용 신뢰도(min_events 판정)는 전체 표본 기준
+        anchor = past[-self.recency:] if self.recency is not None else past
+        return float(np.median(anchor)), n_past
 
     def blend(self, dates, base_expected, base_production):
         dates = [pd.Timestamp(d) for d in dates]

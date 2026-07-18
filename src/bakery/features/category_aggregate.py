@@ -19,7 +19,7 @@ import pandas as pd
 
 from bakery.analysis.discount import load_sales_with_discount
 from bakery.analysis.seasonal import filter_seasonal
-from bakery.data.calendar import LUNAR_EVENT_DATES
+from bakery.data.calendar import LUNAR_EVENT_DATES, build_calendar_daily
 
 
 TARGET_CATEGORIES = ("bread", "pastry", "sandwich")   # cake 제외 (사전 예약 + 시즌 특수)
@@ -225,40 +225,29 @@ def add_cyclic_calendar(df: pd.DataFrame, date_col: str = "date") -> pd.DataFram
     return d
 
 
-def add_holiday_features(
-    df: pd.DataFrame,
-    calendar_path: str = "data/external/calendar_raw.parquet",
-) -> pd.DataFrame:
-    """
-    is_public_holiday : 공휴일 (대체공휴일 포함)
-    is_before_holiday : 좁은 정의 — 오늘 영업일(평일+비공휴일) AND 내일 휴일(공휴일 OR 주말)
-                        예: 금/토/일/월 연휴 시 목요일만 True (금/토/일 모두 False)
-                        직관: 연휴 직전 마지막 영업일 (손님이 미리 구매하는 효과)
+def add_holiday_features(df: pd.DataFrame) -> pd.DataFrame:
+    """공휴일·연휴 구조 feature (data/calendar.build_calendar_daily = holidays.KR 완전 소스).
+
+    is_public_holiday      : 공휴일 (대체공휴일 포함)
+    is_before_holiday      : 연휴 직전 마지막 영업일 (오늘 영업일 AND 내일 휴일). 사전구매 효과.
+                             = build_calendar_daily.is_day_before_off (동일 정의: next_off & ~is_off).
+    off_position_in_streak : 연속 off일 내 위치(1=시작). 명절 다음날 등 후위일이 급락하는 구조 신호
+                             (추석다음날 0.97·설날다음날 0.81·둘째날 0.74, 광교 실측).
+
+    ※ 이전 구현은 data/external/calendar_raw.parquet를 읽었으나 2024-26만 커버(2021-23 공휴일
+      전부 누락)라 헤드라인 모델이 3년치 공휴일에 blind → 공휴일 -18.5% 과소예측의 원인이었다.
+      build_calendar_daily로 교체(docs/holiday_premium_decomposition.md). 요일(is_weekend)은
+      add_cyclic_calendar에서 이미 추가 → 트리가 공휴일×요일 상호작용 학습(평일공휴일 +35% /
+      주말공휴일 ~0). 모두 사전 확정 캘린더라 leakage 아님(미래 sales/weather 관측값 아님).
     """
     d = df.copy()
     d["date"] = pd.to_datetime(d["date"])
-    dow_series = d["date"].dt.dayofweek  # 내부 변수만 (df에 추가 X — add_cyclic_calendar에서 처리)
-
-    if not Path(calendar_path).exists():
-        d["is_public_holiday"] = 0
-        d["is_before_holiday"] = 0
-        return d
-
-    cal = pd.read_parquet(calendar_path)
-    cal["date"] = pd.to_datetime(cal["date"])
-    holiday_dates = set(cal.loc[cal["is_holiday"] == True, "date"])
-
-    d["is_public_holiday"] = d["date"].isin(holiday_dates).astype(int)
-
-    # 좁은 정의: 오늘 영업일(평일 비공휴일) + 내일 휴일(공휴일 OR 주말)
-    is_off_today    = (d["is_public_holiday"] == 1) | (dow_series >= 5)
-    next_date       = d["date"] + pd.Timedelta(days=1)
-    next_dow        = (dow_series + 1) % 7
-    is_next_holiday = next_date.isin(holiday_dates)
-    is_next_weekend = (next_dow >= 5)
-    is_off_next     = is_next_holiday | is_next_weekend
-
-    d["is_before_holiday"] = (~is_off_today & is_off_next).astype(int)
+    cal = build_calendar_daily(d["date"].min(), d["date"].max())
+    merge_cols = ["date", "is_public_holiday", "is_day_before_off", "off_position_in_streak"]
+    d = d.merge(cal[merge_cols], on="date", how="left")
+    d = d.rename(columns={"is_day_before_off": "is_before_holiday"})
+    for col in ("is_public_holiday", "is_before_holiday", "off_position_in_streak"):
+        d[col] = d[col].fillna(0).astype(int)
     return d
 
 
