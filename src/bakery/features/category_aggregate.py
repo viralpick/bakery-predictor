@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -401,13 +402,38 @@ def add_lag_rolling_ewma(df: pd.DataFrame, target_col: str) -> pd.DataFrame:
     return d
 
 
-def build_features(cd: CategoryDaily, target_col: str = "adjusted_demand_unit") -> pd.DataFrame:
-    """전체 features pipeline."""
+# 실험용 toggle 대상 그룹 (name → df-only add 함수). 조립 순서는 dict 순서 = 기존 순서.
+# add_lag_rolling_ewma는 target 기반 autoregressive 코어라 여기서 제외(항상 on)하고
+# 별도 시그니처(target_col 필요)이므로 build_features가 마지막에 직접 호출한다.
+FEATURE_GROUPS: dict[str, Callable[[pd.DataFrame], pd.DataFrame]] = {
+    "cyclic_calendar": add_cyclic_calendar,
+    "holiday": add_holiday_features,
+    "event": add_event_features,
+    "weather": add_weather_features,
+    "competitor": add_competitor_features,
+}
+
+
+def build_features(
+    cd: CategoryDaily,
+    target_col: str = "adjusted_demand_unit",
+    *,
+    drop_groups: Collection[str] = (),
+) -> pd.DataFrame:
+    """전체 features pipeline.
+
+    `drop_groups`로 FEATURE_GROUPS 중 일부를 실험적으로 뺄 수 있다(기본=아무것도 안 뺌 →
+    현 동작과 동일). lag/rolling 코어는 항상 유지된다.
+    """
+    unknown = set(drop_groups) - FEATURE_GROUPS.keys()
+    if unknown:
+        raise ValueError(
+            f"unknown feature groups: {sorted(unknown)}. "
+            f"choose from {sorted(FEATURE_GROUPS)}"
+        )
     df = cd.df.copy()
-    df = add_cyclic_calendar(df)
-    df = add_holiday_features(df)
-    df = add_event_features(df)
-    df = add_weather_features(df)
-    df = add_competitor_features(df)
+    for name, add_group in FEATURE_GROUPS.items():
+        if name not in drop_groups:
+            df = add_group(df)
     df = add_lag_rolling_ewma(df, target_col)
     return df
