@@ -10,6 +10,7 @@ merged onto the daily frame upstream.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass, field
 
 import lightgbm as lgb
@@ -49,7 +50,21 @@ _POTENTIAL_DEMAND_FEATURE_SETS = {"v2", "v3"}
 _CALENDAR_WEATHER_FEATURE_SETS = {"v1", "v2", "v3"}
 
 
-def build_numeric_columns(feature_set: str) -> list[str]:
+# 실험용 toggle 대상 feature 그룹 (name → 컬럼 상수). base(date/lag/rolling)는 코어라
+# 제외 = 항상 on. drop_groups는 모델 입력 선택만 끄고 enrichment는 건드리지 않으므로
+# _check_feature_set_columns(프레임 컬럼 존재 요구)와 충돌하지 않는다(ablation).
+FEATURE_GROUPS: dict[str, list[str]] = {
+    "calendar": CALENDAR_FEATURE_COLUMNS,
+    "weather": WEATHER_FEATURE_COLUMNS,
+    "cannibalization": CANNIBALIZATION_FEATURE_COLUMNS,
+    "competitor": COMPETITOR_FEATURE_COLUMNS,
+    "living_pop": LIVING_POP_FEATURE_COLUMNS,
+    "population": POPULATION_FEATURE_COLUMNS,
+    "consumption": CONSUMPTION_FEATURE_COLUMNS,
+}
+
+
+def _feature_set_numeric_columns(feature_set: str) -> list[str]:
     if feature_set == "v0":
         return list(_BASE_NUMERIC_COLUMNS)
     if feature_set == "v1":
@@ -73,6 +88,24 @@ def build_numeric_columns(feature_set: str) -> list[str]:
             *CONSUMPTION_FEATURE_COLUMNS,
         ]
     raise ValueError(f"unknown feature_set: {feature_set!r}. Use one of {VALID_FEATURE_SETS}")
+
+
+def build_numeric_columns(
+    feature_set: str, *, drop_groups: Collection[str] = ()
+) -> list[str]:
+    """feature_set의 numeric 컬럼 목록. drop_groups로 FEATURE_GROUPS 중 일부를 실험적으로
+    뺀다(기본=아무것도 안 뺌 → 현 동작과 동일). 해당 feature_set에 없는 그룹을 드롭하면
+    no-op(그룹명 자체는 유효해야 함). 컬럼 순서는 보존된다."""
+    unknown = set(drop_groups) - FEATURE_GROUPS.keys()
+    if unknown:
+        raise ValueError(
+            f"unknown feature groups: {sorted(unknown)}. choose from {sorted(FEATURE_GROUPS)}"
+        )
+    cols = _feature_set_numeric_columns(feature_set)
+    if not drop_groups:
+        return cols
+    drop_cols = set().union(*(set(FEATURE_GROUPS[g]) for g in drop_groups))
+    return [c for c in cols if c not in drop_cols]
 
 
 def _default_target(feature_set: str) -> str:
@@ -125,14 +158,16 @@ class GlobalLGBM(Forecaster):
         params: LGBMParams | None = None,
         y_col: str | None = None,
         feature_set: str = "v0",
+        drop_groups: Collection[str] = (),
     ):
         if feature_set not in VALID_FEATURE_SETS:
             raise ValueError(f"feature_set must be one of {VALID_FEATURE_SETS}; got {feature_set!r}")
         self.params = params or LGBMParams()
         self.y_col = y_col if y_col is not None else _default_target(feature_set)
         self.feature_set = feature_set
-        self.name = self._build_name(feature_set, self.params)
-        self.numeric_columns = build_numeric_columns(feature_set)
+        self.drop_groups = frozenset(drop_groups)
+        self.name = self._build_name(feature_set, self.params, self.drop_groups)
+        self.numeric_columns = build_numeric_columns(feature_set, drop_groups=self.drop_groups)
         self.feature_columns = CATEGORICAL_COLUMNS + self.numeric_columns
         self.model: lgb.Booster | None = None
         self._train_history: pd.DataFrame | None = None
@@ -157,10 +192,14 @@ class GlobalLGBM(Forecaster):
             self._extra_history_cols.extend(CONSUMPTION_FEATURE_COLUMNS)
 
     @staticmethod
-    def _build_name(feature_set: str, params: LGBMParams) -> str:
+    def _build_name(
+        feature_set: str, params: LGBMParams, drop_groups: frozenset[str] = frozenset()
+    ) -> str:
         base = "lightgbm" if feature_set == "v0" else f"lightgbm_{feature_set}"
         if params.objective == "quantile":
-            return f"{base}_q{int(params.alpha * 100):02d}"
+            base = f"{base}_q{int(params.alpha * 100):02d}"
+        if drop_groups:
+            base = f"{base}_drop-{'-'.join(sorted(drop_groups))}"
         return base
 
     def fit(self, train: pd.DataFrame) -> GlobalLGBM:

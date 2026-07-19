@@ -83,12 +83,16 @@ LABEL_BY_SID = {sid: label for _, sid, label, _ in STORES}
 SID_BY_LABEL = {label: sid for _, sid, label, _ in STORES}
 
 XMAS = {"xmas": (12, 25)}
+CHILDRENS = {"childrens": (5, 5)}   # 어린이날 (양력 고정)
 SEOLLAL = {"seollal": LUNAR_EVENT_DATES["days_to_seollal"]}
 CHUSEOK = {"chuseok": LUNAR_EVENT_DATES["days_to_chuseok"]}
 # 매장×이벤트 opt-in. 배포 코드(median+min_events=2) OOS 순개선 확인된 것만 등록:
-#   광교 추석 0.214→0.145, 메세나 설 0.179→0.101. (광화문 설·메세나 추석=악화라 미등록)
+#   광교 추석 0.214→0.145, 메세나 설 0.179→0.101, 광교 어린이날 0.210→0.179.
+#   (광화문 설·메세나 추석=악화라 미등록. 광교 명절 스캔서 광복절·신정·설날·삼일절·부처님은
+#    수요 -26% 하락으로 historical-median 앵커가 prospective 과대(2025 err +19~26%)라 미등록 —
+#    docs/holiday_prior_scan_result.md.)
 STORE_EVENT_PRIORS: dict[str, dict[str, dict]] = {
-    "광교":       {"events": dict(XMAS), "lunar_events": dict(CHUSEOK)},
+    "광교":       {"events": {**XMAS, **CHILDRENS}, "lunar_events": dict(CHUSEOK)},
     "삼성타운":   {"events": dict(XMAS), "lunar_events": {}},
     "메세나폴리스": {"events": dict(XMAS), "lunar_events": dict(SEOLLAL)},
     "광화문":     {"events": dict(XMAS), "lunar_events": {}},

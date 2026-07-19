@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from datetime import date as Date
 from pathlib import Path
 
@@ -71,7 +72,12 @@ from .models.artisee_baseline import ArtiseeBaseline
 from .models.category_total import fit_category_total
 from .models.conformal_order import ConformalOrderCalibrator, DEFAULT_SERVICE_LEVEL
 from .models.item_proportion import distribute_total
-from .models.lightgbm_regressor import VALID_FEATURE_SETS, GlobalLGBM, LGBMParams
+from .models.lightgbm_regressor import (
+    FEATURE_GROUPS as LGBM_FEATURE_GROUPS,
+    VALID_FEATURE_SETS,
+    GlobalLGBM,
+    LGBMParams,
+)
 from .models.moving_average import MovingAverage
 from .models.seasonal_naive import SeasonalNaive
 from .models.stockout_classifier import StockoutClassifier
@@ -119,9 +125,15 @@ def cmd_backtest(
     include_production: bool = False,
     out_dir: Path = REPORTS_DIR,
     closing_alpha: float = DEFAULT_ALPHA,
+    drop: str = "",
 ) -> None:
-    """Compare baselines + LightGBM variants on the same rolling folds."""
+    """Compare baselines + LightGBM variants on the same rolling folds.
+
+    --drop weather,competitor: LightGBM에서 뺄 feature 그룹(실험/ablation용).
+    선택: calendar,weather,cannibalization,competitor,living_pop,population,consumption.
+    """
     variant_list = _parse_variants(variants)
+    drop_groups = _parse_drop_groups(drop)
     ds = _load_dataset(source, data_dir)
     daily = _enrich_if_needed(ds, variant_list)
     daily, demand_col = _resolve_demand_col(daily, source, closing_alpha)
@@ -129,7 +141,7 @@ def cmd_backtest(
         daily["date"], n_splits=n_splits, val_horizon_days=horizon_days, step_days=step_days
     )
     forecasters = _build_forecasters(variant_list, include_production=include_production,
-                                     v23_target=demand_col)
+                                     v23_target=demand_col, drop_groups=drop_groups)
     console.print(
         f"[cyan]backtest[/] folds={len(windows)} horizon={horizon_days}d "
         f"variants={variant_list} models={[f.name for f in forecasters]}"
@@ -304,6 +316,17 @@ def _parse_variants(variants: str) -> list[str]:
     return parts
 
 
+def _parse_drop_groups(drop: str) -> frozenset[str]:
+    """--drop weather,competitor → frozenset. LightGBM feature 그룹 실험적 제거."""
+    parts = frozenset(g.strip() for g in drop.split(",") if g.strip())
+    bad = parts - LGBM_FEATURE_GROUPS.keys()
+    if bad:
+        raise typer.BadParameter(
+            f"unknown feature groups {sorted(bad)}. choose from {sorted(LGBM_FEATURE_GROUPS)}"
+        )
+    return parts
+
+
 def _resolve_demand_col(
     daily: pd.DataFrame,
     source: str,
@@ -407,20 +430,24 @@ def _load_forecast_weather(horizon: pd.DatetimeIndex) -> pd.DataFrame | None:
 
 def _build_forecasters(variants: list[str], *, include_production: bool = False,
                        production_quantile: float = 0.85,
-                       v23_target: str | None = None):
+                       v23_target: str | None = None,
+                       drop_groups: Collection[str] = ()):
     """Build baseline + LightGBM-per-variant list, optionally adding quantile
     production models for v2/v3 (lightgbm_v2_q85 etc.).
 
     v23_target: v2/v3의 학습 target을 명시(예: real→'adjusted_demand'). None이면
     모델 기본값(_default_target=potential_demand). v0/v1은 항상 sold_units.
+    drop_groups: 실험용 feature 그룹 제거(LightGBM만; baseline엔 영향 없음).
     """
     forecasters = [SeasonalNaive(n_weeks=4), MovingAverage(window=28)]
     for v in variants:
         y = v23_target if (v23_target and v in {"v2", "v3"}) else None
-        forecasters.append(GlobalLGBM(feature_set=v, y_col=y))  # demand (median) model
+        forecasters.append(GlobalLGBM(feature_set=v, y_col=y, drop_groups=drop_groups))
         if include_production and v in {"v2", "v3"}:
             prod_params = LGBMParams(objective="quantile", alpha=production_quantile)
-            forecasters.append(GlobalLGBM(feature_set=v, params=prod_params, y_col=y))
+            forecasters.append(
+                GlobalLGBM(feature_set=v, params=prod_params, y_col=y, drop_groups=drop_groups)
+            )
     return forecasters
 
 
@@ -2033,13 +2060,19 @@ def _category_order_predictions(
     alpha: float = DEFAULT_ALPHA, margin_method: str = "quantile",
     nk_mult: float = 1.0, nk_add: float = 0.0,
     service_level: float = 0.85, cal_fold_frac: float = 0.5,
+    drop_features: Collection[str] = (),
 ) -> pd.DataFrame:
     """v4 카테고리 스택: build_category_daily → fold별 총합 base(Task1) → 마진 적용
     (quantile/nk/conformal) → distribute_total 배분 → item별 our_order.
-    item 경로(_our_order_predictions)와 동일 [item_id,date,fold,our_order]."""
+    item 경로(_our_order_predictions)와 동일 [item_id,date,fold,our_order].
+
+    drop_features: build_features에서 뺄 feature 그룹(실험용, 기본=아무것도 안 뺌)."""
     # build_category_daily()는 store-agnostic(parquet 전체 읽음) — 단일매장 데이터셋 +
     # _load_real_daily의 단일매장 가드 덕에 안전. 다매장 확장 시 store_id 필터링 재검토 필요.
-    features = build_features(build_category_daily(alpha=alpha), target_col="adjusted_demand_unit")
+    features = build_features(
+        build_category_daily(alpha=alpha),
+        target_col="adjusted_demand_unit", drop_groups=drop_features,
+    )
     base = _category_total_fold_predictions(
         features, production_quantile=production_quantile,
         horizon_days=val_weeks * 7, n_folds=n_folds,

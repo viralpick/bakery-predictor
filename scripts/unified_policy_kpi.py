@@ -20,6 +20,8 @@
 """
 from __future__ import annotations
 
+import argparse
+
 import numpy as np
 import pandas as pd
 
@@ -27,6 +29,7 @@ from bakery.cli import (
     _real_prospective_inputs, _stockout_item_days,
     _category_order_predictions, _artisee_baseline_order,
 )
+from bakery.features.category_aggregate import FEATURE_GROUPS
 from bakery.features.potential_demand import StoreHours
 from bakery.evaluation.prospective import build_arrival_profile, simulate_item_day_kpis
 
@@ -106,7 +109,7 @@ def _join_order(rows: pd.DataFrame, preds: pd.DataFrame, col: str) -> np.ndarray
     return m[col].to_numpy()
 
 
-def _assemble_rows() -> tuple[pd.DataFrame, pd.DataFrame, dict, list[str]]:
+def _assemble_rows(drop_features: frozenset[str] = frozenset()) -> tuple[pd.DataFrame, pd.DataFrame, dict, list[str]]:
     """공통 population(전 정책 발주 존재) + arrival profile 조립."""
     rows, receipts, unit_prices = _real_prospective_inputs(
         STORE, production_quantile=Q, val_weeks=VAL_WEEKS, n_folds=N_FOLDS,
@@ -126,7 +129,8 @@ def _assemble_rows() -> tuple[pd.DataFrame, pd.DataFrame, dict, list[str]]:
     }
     for col, kw in cat_specs.items():
         preds = _category_order_predictions(
-            STORE, production_quantile=Q, val_weeks=VAL_WEEKS, n_folds=N_FOLDS, alpha=ALPHA, **kw
+            STORE, production_quantile=Q, val_weeks=VAL_WEEKS, n_folds=N_FOLDS, alpha=ALPHA,
+            drop_features=drop_features, **kw
         )
         rows[col] = _join_order(rows, preds, col)
 
@@ -154,8 +158,29 @@ def _delta(w: float, ref_w: float) -> float:
     return (w - ref_w) / max(ref_w, 1) * 100
 
 
+def _parse_drop_features(argv: list[str] | None = None) -> frozenset[str]:
+    """--drop weather,competitor → frozenset. 실험용 feature 그룹 제거(카테고리 스택).
+
+    선택지는 build_features의 FEATURE_GROUPS에서 유도(레지스트리와 drift 방지)."""
+    choices = list(FEATURE_GROUPS)
+    parser = argparse.ArgumentParser(description="통합 발주정책 KPI (측정 헌장 기준)")
+    parser.add_argument(
+        "--drop", default="",
+        help=f"뺄 feature 그룹 콤마구분 (선택: {','.join(choices)})",
+    )
+    args = parser.parse_args(argv)
+    dropped = frozenset(g.strip() for g in args.drop.split(",") if g.strip())
+    unknown = dropped - FEATURE_GROUPS.keys()
+    if unknown:
+        parser.error(f"unknown feature groups: {sorted(unknown)}. choose from {choices}")
+    return dropped
+
+
 def main() -> None:
-    rows, profiles, unit_prices, order_cols = _assemble_rows()
+    drop_features = _parse_drop_features()
+    if drop_features:
+        print(f"※ 실험: feature 그룹 제거 = {sorted(drop_features)}")
+    rows, profiles, unit_prices, order_cols = _assemble_rows(drop_features)
 
     # A: 아띠제 실측(현행, QT_OUT). B: 아띠제 발주(QT_MADE)를 시뮬 → A와의 간극 = censoring.
     ref_a = _kpi_actual(rows, unit_prices)                                       # 폐기 delta 기준(헌장: 현행=실측)
