@@ -39,9 +39,11 @@ warnings.filterwarnings("ignore", message=".*SettingWithCopy.*")
 import lightgbm as lgb
 from ngboost import NGBRegressor
 from ngboost.distns import LogNormal
+from scipy.stats import norm
 
 from bakery.data.calendar import LUNAR_EVENT_DATES
 from bakery.models.category_total import fit_category_total, select_feature_cols
+from bakery.models.conformal_order import ConformalOrderCalibrator
 from bakery.models.event_prior import EventLevelPrior
 from store_predictive_power import build_store_data
 
@@ -68,6 +70,10 @@ LUNAR = {"seollal": LUNAR_EVENT_DATES["days_to_seollal"],
 
 OUT_DOC = Path("docs/distributional_boosting_poc_result.md")
 OUT_JSON = Path("reports/dist_boost_poc.json")
+OUT_PREDS = Path("reports/dist_boost_poc_preds.parquet")   # per-day OOS 예측 (conformal refit-free 튜닝)
+
+# conformal 서비스레벨 스윕. 0.74=cost-optimal Cu/(Cu+Co), 0.85=현 발주 target.
+SERVICE_LEVELS = (0.74, 0.80, 0.85, 0.90)
 
 
 # --- prediction (walk-forward expanding) ----------------------------------
@@ -200,6 +206,83 @@ def spread_diagnostic(p: pd.DataFrame, median_col: str, q85_col: str) -> dict:
             "margin_high_demand": high_margin}
 
 
+# --- conformal calibration (매장별, 연대순 half-split) ---------------------
+
+def _cov_waste_stockout(order: np.ndarray, actual: np.ndarray) -> dict:
+    surplus = np.clip(order - actual, 0, None)
+    return {"cov": float((actual <= order).mean()),
+            "surplus_rate": float(surplus.sum() / max(actual.sum(), 1)),
+            "stockout_rate": float((actual > order).mean())}
+
+
+def _qsweep_order(median: np.ndarray, sigma: np.ndarray, a: float) -> np.ndarray:
+    """LogNormal 폐형식 분위수: q_a = median·exp(σ·z_a) (median=scale이므로)."""
+    return median * np.exp(sigma * norm.ppf(a))
+
+
+def _qsweep_calibrate(median, sigma, actual, target: float) -> float:
+    """cal에서 realized cov = target 되게 분포 분위수 레벨 a* 탐색(shape 내 재보정)."""
+    grid = np.round(np.arange(0.50, 0.999, 0.005), 3)
+    best = min(grid, key=lambda a: abs((actual <= _qsweep_order(median, sigma, a)).mean() - target))
+    return float(best)
+
+
+def conformal_frontier(p: pd.DataFrame, service_levels=SERVICE_LEVELS) -> dict:
+    """매장별 연대순 half-split(앞=cal/뒤=test)로 3방식 비교.
+
+    base=NGBoost median(prior 전, 직교), scale=모델마진(q85-median, 레벨비례).
+    - q_nominal: 원 분포 분위수 그대로(raw miscalibration 노출)
+    - qsweep:    cal서 cov=target 되게 분포 분위수 레벨 재선택(shape 내)
+    - conformal: E=(y-base)/scale의 s-분위로 오프셋(shape-free, 유한표본 보장)
+    성공지표 = test half의 |realized cov − target|.
+    """
+    p = p.sort_values("date").reset_index(drop=True)
+    n = len(p); mid = n // 2
+    cal, test = p.iloc[:mid], p.iloc[mid:]
+    b_cal, b_te = cal["ng_median"].to_numpy(), test["ng_median"].to_numpy()
+    sc_cal = (cal["ng_q85"] - cal["ng_median"]).to_numpy()
+    sc_te = (test["ng_q85"] - test["ng_median"]).to_numpy()
+    sig_cal, sig_te = cal["ng_sigma"].to_numpy(), test["ng_sigma"].to_numpy()
+    y_cal, y_te = cal["actual"].to_numpy(), test["actual"].to_numpy()
+    with np.errstate(invalid="ignore", divide="ignore"):
+        scores = (y_cal - b_cal) / np.where(sc_cal > 0, sc_cal, np.nan)
+    rows = []
+    for s in service_levels:
+        cal_obj = ConformalOrderCalibrator().fit(scores, s)
+        conf = _cov_waste_stockout(cal_obj.apply(b_te, sc_te), y_te)
+        a_star = _qsweep_calibrate(b_cal, sig_cal, y_cal, s)
+        qsw = _cov_waste_stockout(_qsweep_order(b_te, sig_te, a_star), y_te)
+        nom = _cov_waste_stockout(_qsweep_order(b_te, sig_te, s), y_te)
+        rows.append({"target": s, "q_nominal": nom, "qsweep": {**qsw, "a_star": a_star},
+                     "conformal": {**conf, "q_s": cal_obj.q_s}})
+    drift = _drift_check(p, target=0.85)
+    return {"n_cal": int(mid), "n_test": int(n - mid), "rows": rows, "drift": drift}
+
+
+def _drift_check(p: pd.DataFrame, target: float = 0.85) -> dict:
+    """cal→test 드리프트 진단 + cal window별 conformal cov(0.85).
+
+    raw(무보정)·cal=전체과거·최근90·최근45 의 test realized cov. stale cal 과보정 vs
+    recent cal gentle 교정을 드러냄(walk-forward 배포형이 옳음을 실측).
+    """
+    p = p.sort_values("date").reset_index(drop=True)
+    n = len(p); mid = n // 2
+    test = p.iloc[mid:]
+    b_te = test["ng_median"].to_numpy()
+    sc_te = (test["ng_q85"] - test["ng_median"]).to_numpy()
+    y_te = test["actual"].to_numpy()
+    cal_cov = float((p.iloc[:mid]["actual"] <= p.iloc[:mid]["ng_q85"]).mean())
+    out = {"cal_cov_raw": cal_cov, "test_cov_raw": float((y_te <= test["ng_q85"]).mean())}
+    for w, key in ((mid, "cal_full"), (90, "cal_recent90"), (45, "cal_recent45")):
+        cal = p.iloc[mid - w:mid]
+        b = cal["ng_median"].to_numpy(); sc = (cal["ng_q85"] - cal["ng_median"]).to_numpy()
+        with np.errstate(invalid="ignore", divide="ignore"):
+            e = (cal["actual"].to_numpy() - b) / np.where(sc > 0, sc, np.nan)
+        order = ConformalOrderCalibrator().fit(e, target).apply(b_te, sc_te)
+        out[key] = float((y_te <= order).mean())
+    return out
+
+
 # --- report assembly ------------------------------------------------------
 
 @dataclass
@@ -226,14 +309,18 @@ def _subset_masks(p: pd.DataFrame, prior: EventLevelPrior) -> dict:
             "평일(비이벤트)": (is_weekday & ~is_event).to_numpy()}
 
 
-def compute_all(results: list[StoreResult]) -> dict:
+def compute_all(preds_by_store: dict[str, pd.DataFrame]) -> dict:
+    """모든 지표를 per-day 예측에서 계산 (fitting과 분리 → parquet서 refit-free 재계산)."""
     prior = EventLevelPrior(events=EVENTS, lunar_events=LUNAR)
     out = {"per_store": {}, "pooled": {}}
-    pooled = pd.concat([r.preds for r in results], ignore_index=True)
-    for r in results:
-        out["per_store"][r.label] = _store_block(r.preds, prior)
-    out["pooled"] = _store_block(pooled, prior)
-    out["pooled"]["n_events"] = sum(r.n_events for r in results)
+    pooled = pd.concat(preds_by_store.values(), ignore_index=True)
+    for label, p in preds_by_store.items():
+        block = _store_block(p, prior)
+        block["conformal"] = conformal_frontier(p)   # 매장별 Q_s (pooled 금지)
+        out["per_store"][label] = block
+    out["pooled"] = _store_block(pooled, prior)   # 진단·표는 pooled, conformal은 제외
+    out["pooled"]["n_events"] = int(
+        pooled["date"].apply(lambda d: prior.is_event_day(pd.Timestamp(d))).sum())
     return out
 
 
@@ -295,6 +382,28 @@ def _fmt_spread_table(spread: dict) -> str:
     for m, s in spread.items():
         lines.append(f"| {m} | {s['corr_margin_level']:+.2f} | "
                      f"{s['margin_low_demand']:.1f} | {s['margin_high_demand']:.1f} |")
+    return "\n".join(lines)
+
+
+def _fmt_conformal_table(conf: dict) -> str:
+    """3방식 × target: test half realized cov (|Δtarget|)·폐기율·매진율."""
+    lines = [f"cal {conf['n_cal']}일 / test {conf['n_test']}일 (연대순 half-split). "
+             "각 칸 = test realized cov (Δ=cov−target) · 폐기율 · 매진율",
+             "", "| target | q_nominal | q_sweep | conformal |", "|--:|---|---|---|"]
+    for r in conf["rows"]:
+        cells = []
+        for key in ("q_nominal", "qsweep", "conformal"):
+            m = r[key]
+            cells.append(f"{m['cov']:.2f} (Δ{m['cov']-r['target']:+.2f}) · "
+                         f"{m['surplus_rate']:.3f} · {m['stockout_rate']:.2f}")
+        lines.append(f"| {r['target']:.2f} | {cells[0]} | {cells[1]} | {cells[2]} |")
+    d = conf["drift"]
+    lines += ["", "**드리프트 진단** (raw q0.85 cov cal→test, +cal window별 conformal@0.85 test cov):",
+              f"- raw q0.85: cal {d['cal_cov_raw']:.2f} → test {d['test_cov_raw']:.2f} "
+              "(expanding window라 최근일수록 calibrated)",
+              f"- conformal@0.85 test cov: cal=전체과거 {d['cal_full']:.2f} / 최근90 "
+              f"{d['cal_recent90']:.2f} / 최근45 {d['cal_recent45']:.2f} "
+              "(stale=과보정, recent=gentle → **walk-forward 배포형이 옳음**)"]
     return "\n".join(lines)
 
 
@@ -400,15 +509,35 @@ def render_verdict(out: dict) -> str:
         f"{ev_ngp['stockout_rate']:.2f}(14일 중 1일) vs 베이스라인 0.00. 헌장 KPI(폐기=1차, "
         "매진=부차)상 옳은 방향이나 '지배'가 아니라 폐기↔매진 trade임을 명시.",
         "",
-        "### 4) ablation·calibration 노트",
+        "### 4) ablation 노트",
         "- σ(x)/곱셈구조와 prior는 **보완**: 곱셈=일반 저수요일 과대마진 해소, prior=rare-event 레벨앵커.",
-        f"- 전체 cov@.85가 모델 공통 ~{all_ng['coverage_q85']:.2f}로 nominal 0.85 미달 = 전역 "
-        "under-calibration(본 작업 무관, 기존 finding). 이벤트일 cov 0.93~1.00은 prior가 레벨을 "
-        "밀어올린 것이지 base q0.85가 calibrated된 게 아님 → **conformal 보정이 올바른 후속**.",
-        "", "### 다음",
+        "", _conformal_verdict(out), "",
+        "### 다음",
         "① 분포회귀(NGBoost LogNormal)+event_prior를 표준 발주 스택으로 src 승격 검토 "
-        "(log-변환 shortcut은 판별 실험서 반증됨) ② scale-정규화 conformal로 전역 under-calibration "
-        "(cov 0.77) 보정 ③ 4매장 전체·타 분포족(NegBin count) 확장 시 LightGBMLSS 풀버전 A/B.", "",
+        "(log-변환 shortcut은 판별 실험서 반증됨). conformal은 **walk-forward recent-window로만** "
+        "선택 적용(under-cover 매장 gentle 교정, 이미 calibrated 매장엔 미적용). "
+        "② 4매장 전체·타 분포족(NegBin count) 확장 시 LightGBMLSS 풀버전 A/B.", "",
+    ])
+
+
+def _conformal_verdict(out: dict) -> str:
+    """conformal 실측 요약(매장별 drift + recent-window)."""
+    gw = out["per_store"]["광교"]["conformal"]["drift"]
+    gh = out["per_store"]["광화문"]["conformal"]["drift"]
+    return "\n".join([
+        "### 5) conformal 보정 결과 — **분포모델은 이미 거의 calibrated, conformal은 경량 옵션**",
+        f"- q_sweep ≈ conformal 거의 동일(모든 target) → LogNormal shape가 옳아 **shape-free 보정 불필요**. "
+        "conformal 기계장치보다 분포족 선택이 본질.",
+        f"- 분포모델 raw q0.85 test cov: 광교 {gw['test_cov_raw']:.2f}(거의 nominal) / "
+        f"광화문 {gh['test_cov_raw']:.2f}(약간 under). expanding window라 cal→test로 개선"
+        f"(광교 {gw['cal_cov_raw']:.2f}→{gw['test_cov_raw']:.2f}, 광화문 "
+        f"{gh['cal_cov_raw']:.2f}→{gh['test_cov_raw']:.2f}) = **드리프트**.",
+        f"- ★naive half-split conformal은 **과보정**(광교 raw {gw['test_cov_raw']:.2f}→"
+        f"{gw['cal_full']:.2f}, 광화문 {gh['test_cov_raw']:.2f}→{gh['cal_full']:.2f}): stale cal의 "
+        "옛 under-cal을 학습해 개선된 현재에 과적용. → half-split conformal은 쓰면 안 됨.",
+        f"- **recent-window(walk-forward)이 정답**: 최근90일 cal conformal은 광화문을 gently 교정"
+        f"({gh['test_cov_raw']:.2f}→{gh['cal_recent90']:.2f}, nominal 근접) / 이미 calibrated인 광교는 "
+        f"여전히 과보정({gw['cal_recent90']:.2f}) → **conformal은 under-cover 매장에만 recent-window로 선택 적용**.",
     ])
 
 
@@ -436,36 +565,53 @@ def render_doc(out: dict) -> str:
         md.append(_fmt_spread_table(block["spread"]))
         md.append("\n### 결합 진단 (수요 tertile별 σ·마진 — 메커니즘)\n")
         md.append(_fmt_coupling_table(block["coupling"]))
+        md.append("\n### conformal 보정 (매장별, test half realized coverage)\n")
+        md.append(_fmt_conformal_table(block["conformal"]))
     md.append("")
     return "\n".join(md)
 
 
 def render_only() -> None:
-    """저장된 JSON에서 doc만 재생성 (NGBoost refit 없이 판정/표 갱신)."""
+    """저장된 JSON에서 doc만 재생성 (재계산 없이 프로즈/포맷만 갱신)."""
     out = json.loads(OUT_JSON.read_text())
     OUT_DOC.write_text(render_doc(out))
     print(f"rendered {OUT_DOC} from {OUT_JSON}")
 
 
-def main() -> None:
-    if "--render-only" in sys.argv:
-        render_only()
-        return
-    prior = EventLevelPrior(events=EVENTS, lunar_events=LUNAR)
-    results = []
-    for cd, sid, label in STORES:
-        print(f"[{label}] building data ...")
-        sd = build_store_data(cd, sid, label)
-        preds = build_fold_predictions(sd.feat, label)
-        n_ev = int(preds["date"].apply(lambda d: prior.is_event_day(pd.Timestamp(d))).sum())
-        results.append(StoreResult(label, preds, n_ev))
-    out = compute_all(results)
+def _load_preds_by_store() -> dict[str, pd.DataFrame]:
+    df = pd.read_parquet(OUT_PREDS)
+    return {s: g.drop(columns="store").reset_index(drop=True)
+            for s, g in df.groupby("store")}
+
+
+def _finalize(preds_by_store: dict[str, pd.DataFrame]) -> None:
+    out = compute_all(preds_by_store)
     OUT_JSON.parent.mkdir(parents=True, exist_ok=True)
     OUT_JSON.write_text(json.dumps(out, ensure_ascii=False, indent=2, default=float))
     OUT_DOC.write_text(render_doc(out))
     print(f"\n=== 산출 ===\n{OUT_DOC}\n{OUT_JSON}")
     print("\n" + _fmt_subset_table(out["pooled"]["subsets"]))
-    print("\n[pooled spread]\n" + _fmt_spread_table(out["pooled"]["spread"]))
+    for label in preds_by_store:
+        print(f"\n[{label} conformal]\n" + _fmt_conformal_table(out["per_store"][label]["conformal"]))
+
+
+def main() -> None:
+    if "--render-only" in sys.argv:      # JSON→doc (재계산 없음)
+        render_only()
+        return
+    if "--from-preds" in sys.argv:       # parquet→모든 지표 재계산 (NGBoost refit 없음)
+        _finalize(_load_preds_by_store())
+        return
+    prior = EventLevelPrior(events=EVENTS, lunar_events=LUNAR)
+    preds_by_store = {}
+    for cd, sid, label in STORES:
+        print(f"[{label}] building data ...")
+        sd = build_store_data(cd, sid, label)
+        preds_by_store[label] = build_fold_predictions(sd.feat, label)
+    OUT_PREDS.parent.mkdir(parents=True, exist_ok=True)
+    pd.concat([df.assign(store=label) for label, df in preds_by_store.items()],
+              ignore_index=True).to_parquet(OUT_PREDS)
+    _finalize(preds_by_store)
 
 
 if __name__ == "__main__":
