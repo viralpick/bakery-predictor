@@ -27,14 +27,17 @@ prior 결합 이벤트 폐기율: NGBoost+prior 0.164 / LightGBM-log+prior 0.223
 ### 4) ablation 노트
 - σ(x)/곱셈구조와 prior는 **보완**: 곱셈=일반 저수요일 과대마진 해소, prior=rare-event 레벨앵커.
 
-### 5) conformal 보정 결과 — **분포모델은 이미 거의 calibrated, conformal은 경량 옵션**
-- q_sweep ≈ conformal 거의 동일(모든 target) → LogNormal shape가 옳아 **shape-free 보정 불필요**. conformal 기계장치보다 분포족 선택이 본질.
-- 분포모델 raw q0.85 test cov: 광교 0.85(거의 nominal) / 광화문 0.79(약간 under). expanding window라 cal→test로 개선(광교 0.77→0.85, 광화문 0.68→0.79) = **드리프트**.
-- ★naive half-split conformal은 **과보정**(광교 raw 0.85→0.90, 광화문 0.79→0.92): stale cal의 옛 under-cal을 학습해 개선된 현재에 과적용. → half-split conformal은 쓰면 안 됨.
-- **recent-window(walk-forward)이 정답**: 최근90일 cal conformal은 광화문을 gently 교정(0.79→0.83, nominal 근접) / 이미 calibrated인 광교는 여전히 과보정(0.90) → **conformal은 under-cover 매장에만 recent-window로 선택 적용**.
+### 5) conformal 보정 결과 — **raw 분포 분위수 그대로 발주 권장 (conformal 이득 미검증)**
+> ⚠️ 판독 기준: test 224일/매장 → 커버리지 SE≈0.024(iid, 자기상관 시 더 큼). ±0.05 미만 차이는 노이즈로 취급.
+- q_sweep ≈ conformal 완전 동일(모든 target) → LogNormal **shape가 옳아 shape-free 보정 불필요**. conformal 기계장치보다 분포족 선택이 본질.
+- 분포모델 raw q0.85 최근 OOS cov: 광교 0.85(nominal 일치) / 광화문 0.79(~1SE under, 노이즈 범위). ⇒ **최근 OOS에선 분포모델이 이미 near-calibrated**(단 half-split 1회 기준, walk-forward 측정에서 확인 필요).
+- cal→test cov 개선(광교 0.77→0.85, 광화문 0.68→0.79): 더 많은 데이터 or 더 예측가능한 최근 구간 — **본 분할로 분리 불가**. PoC 헤드라인의 cov 0.77은 이 옛 저조 구간이 지배한 값.
+- ★**통계적으로 확실한 유일한 결과 = stale half-split conformal은 과보정(해로움)**: 광교 0.85→0.90, 광화문 0.79→0.92 (0.05~0.13=수 SE). stale cal의 옛 under-cal 학습→과적용. **쓰면 안 됨**.
+- recent-window(최근90 cal)은 과보정을 줄이나(광화문 0.83, 광교 0.90) raw 대비 개선은 노이즈 내(≈1.5SE) → **미검증**. 어떤 conformal도 raw를 유의하게 못 이김.
+- **결론**: raw 분포 분위수 그대로 발주. conformal은 walk-forward 측정서 지속적 under-cover 확인될 때만 재검토(경량 recent-window). half-split conformal은 배제.
 
 ### 다음
-① 분포회귀(NGBoost LogNormal)+event_prior를 표준 발주 스택으로 src 승격 검토 (log-변환 shortcut은 판별 실험서 반증됨). conformal은 **walk-forward recent-window로만** 선택 적용(under-cover 매장 gentle 교정, 이미 calibrated 매장엔 미적용). ② 4매장 전체·타 분포족(NegBin count) 확장 시 LightGBMLSS 풀버전 A/B.
+① 분포회귀(NGBoost LogNormal)+event_prior를 표준 발주 스택으로 src 승격 검토 (log-변환 shortcut 반증됨). **raw 분포 분위수 그대로 발주**; conformal은 기본 미적용 (walk-forward 측정서 지속적 under-cover 확인 시에만 경량 recent-window 재검토). ② src에서 walk-forward 커버리지 실측(half-split보다 신뢰) ③ 4매장 전체·타 분포족(NegBin count) 확장 시 LightGBMLSS 풀버전 A/B.
 
 ## 성공 판정 요약
 
@@ -135,7 +138,7 @@ cal 224일 / test 224일 (연대순 half-split). 각 칸 = test realized cov (Δ
 
 **드리프트 진단** (raw q0.85 cov cal→test, +cal window별 conformal@0.85 test cov):
 - raw q0.85: cal 0.77 → test 0.85 (expanding window라 최근일수록 calibrated)
-- conformal@0.85 test cov: cal=전체과거 0.90 / 최근90 0.90 / 최근45 0.90 (stale=과보정, recent=gentle → **walk-forward 배포형이 옳음**)
+- conformal@0.85 test cov: cal=전체과거 0.90 / 최근90 0.90 / 최근45 0.90 (★stale=과보정=수 SE 해로움 확실 / recent=raw 대비 개선은 노이즈 내 미검증; SE≈0.024)
 
 ## 광화문
 
@@ -194,4 +197,4 @@ cal 224일 / test 224일 (연대순 half-split). 각 칸 = test realized cov (Δ
 
 **드리프트 진단** (raw q0.85 cov cal→test, +cal window별 conformal@0.85 test cov):
 - raw q0.85: cal 0.68 → test 0.79 (expanding window라 최근일수록 calibrated)
-- conformal@0.85 test cov: cal=전체과거 0.92 / 최근90 0.83 / 최근45 0.83 (stale=과보정, recent=gentle → **walk-forward 배포형이 옳음**)
+- conformal@0.85 test cov: cal=전체과거 0.92 / 최근90 0.83 / 최근45 0.83 (★stale=과보정=수 SE 해로움 확실 / recent=raw 대비 개선은 노이즈 내 미검증; SE≈0.024)
