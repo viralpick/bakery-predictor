@@ -30,13 +30,14 @@ def fit_distributional_total(
 
     LogNormal은 양수 전용 → train target에 y≤0 있으면 ValueError.
     휴무/0 수요일 처리는 호출자 책임(category-total은 구조적 양수).
+    Feature는 numeric만 지원(NGBoost는 범주형/object 미허용; LightGBM과 달리).
     """
     feat_cols = select_feature_cols(train, target_col)
     y = train[target_col].to_numpy()
-    n_bad = int((y <= 0).sum())
+    n_bad = int((~(y > 0)).sum())
     if n_bad:
         raise ValueError(
-            f"LogNormal requires positive target; found {n_bad} non-positive rows in '{target_col}'"
+            f"LogNormal requires positive target; found {n_bad} non-positive/NaN rows in '{target_col}'"
         )
     model = NGBRegressor(
         Dist=LogNormal,
@@ -78,4 +79,5 @@ class DistributionalTotalModel:
         return self.predict_median(df)
 
     def predict_production(self, df: pd.DataFrame, production_q: float = 0.85) -> np.ndarray:
+        """production_q는 call마다 지정되는 인자(기본값 0.85). CategoryTotalModel과 달리 fit 시 고정되지 않음."""
         return self.predict_quantile(df, production_q)

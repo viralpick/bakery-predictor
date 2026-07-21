@@ -42,9 +42,12 @@ def test_quantile_monotonic():
     assert np.all(q85 <= q95)
 
 
-def test_median_matches_dist():
+def test_median_below_mean_lognormal():
+    """LogNormal(우측 스큐 분포)의 독립적 성질 검증: median < mean."""
     m, df = _fit(), _synth()
-    assert np.allclose(m.predict_median(df), np.ravel(m.predict_dist(df).ppf(0.5)))
+    median = m.predict_median(df)
+    mean = m.predict_dist(df).mean()
+    assert np.all(median < np.ravel(mean))
 
 
 def test_predictions_positive():
@@ -77,6 +80,14 @@ def test_predict_without_target_column():
 def test_nonpositive_target_raises():
     df = _synth()
     df.loc[0, TARGET] = 0.0
+    with pytest.raises(ValueError):
+        fit_distributional_total(df, target_col=TARGET, n_estimators=50)
+
+
+def test_nan_target_raises():
+    """NaN target은 LogNormal 적합 불가 → ValueError."""
+    df = _synth()
+    df.loc[0, TARGET] = np.nan
     with pytest.raises(ValueError):
         fit_distributional_total(df, target_col=TARGET, n_estimators=50)
 
