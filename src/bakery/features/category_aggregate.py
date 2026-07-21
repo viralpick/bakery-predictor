@@ -290,6 +290,12 @@ def add_event_features(df: pd.DataFrame, events: dict = EVENTS, lunar_events: di
     return d
 
 
+WEATHER_FEATURE_COLS = [
+    "avgTa", "maxTa", "minTa", "sumRn", "avgRhm", "avgTca", "avgWs",
+    "rain_level", "heavy_rain_in_biz_hours", "apparent_temp",
+]
+
+
 def add_weather_features(
     df: pd.DataFrame,
     weather_path: str = "data/external/weather_observed.parquet",
@@ -341,6 +347,27 @@ def add_weather_features(
 
     d = d.merge(weather_basic, on="date", how="left")
     return d
+
+
+def fill_forecast_weather(d: pd.DataFrame, forecast_weather: pd.DataFrame) -> pd.DataFrame:
+    """관측이 결측인 날짜의 weather feature 컬럼을 forecast_weather(date-keyed)로 보충.
+
+    build_features 이후 호출한다(weather는 lag 입력이 아닌 말단 feature라 사후 fill 안전).
+    observed 우선(combine_first) — 이미 채워진 history 값은 절대 덮어쓰지 않는다.
+    forecast에 없는 컬럼(구름/풍속 등)은 건드리지 않아 NaN이 유지된다(모델이 NaN 관용).
+    """
+    fw = forecast_weather.copy()
+    fw["date"] = pd.to_datetime(fw["date"])
+    fill_cols = [c for c in WEATHER_FEATURE_COLS if c in fw.columns]
+    if not fill_cols:
+        return d
+    d = d.set_index("date")
+    fw = fw.drop_duplicates("date").set_index("date")[fill_cols]
+    for col in fill_cols:
+        if col not in d.columns:
+            d[col] = np.nan
+        d[col] = d[col].combine_first(fw[col].reindex(d.index))
+    return d.reset_index()
 
 
 def _haversine_km(lat1, lon1, lat2, lon2):
