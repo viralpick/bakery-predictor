@@ -86,3 +86,15 @@ def test_deterministic():
     m1 = fit_distributional_total(df, target_col=TARGET, n_estimators=50)
     m2 = fit_distributional_total(df, target_col=TARGET, n_estimators=50)
     assert np.allclose(m1.predict_quantile(df, 0.85), m2.predict_quantile(df, 0.85))
+
+
+def test_alias_expected_is_median():
+    m, df = _fit(), _synth()
+    assert np.array_equal(m.predict_expected(df), m.predict_median(df))
+
+
+def test_alias_production_is_quantile():
+    m, df = _fit(), _synth()
+    assert np.array_equal(m.predict_production(df, 0.85), m.predict_quantile(df, 0.85))
+    # 기본 production_q=0.85 확인
+    assert np.array_equal(m.predict_production(df), m.predict_quantile(df, 0.85))

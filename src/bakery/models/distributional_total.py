@@ -70,3 +70,12 @@ class DistributionalTotalModel:
     def predict_sigma(self, df: pd.DataFrame) -> np.ndarray:
         """σ(x) log-space (LogNormal shape). 진단·coupling용."""
         return np.ravel(self._pred_dist(df).params["s"])
+
+    # --- CategoryTotalModel drop-in 호환 alias ---
+    # predict_expected = median(점추정), LogNormal 통계적 기댓값(mean)이 아님 —
+    # 기존 CategoryTotalModel(L1=median) 계약과 일치시켜 무손상 swap.
+    def predict_expected(self, df: pd.DataFrame) -> np.ndarray:
+        return self.predict_median(df)
+
+    def predict_production(self, df: pd.DataFrame, production_q: float = 0.85) -> np.ndarray:
+        return self.predict_quantile(df, production_q)
