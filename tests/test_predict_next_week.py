@@ -43,3 +43,50 @@ def test_predict_v0_synthetic_writes_sold_units_col(patch_v0_dataset, tmp_path):
     assert result.exit_code == 0, result.output
     out = pd.read_csv(tmp_path / "next_week_predictions.csv")
     assert "yhat_sold_units" in out.columns
+
+
+def test_predict_category_rejects_synthetic_source(tmp_path):
+    """order_level=category는 real 전용 — synthetic이면 BadParameter로 종료(비-0)."""
+    runner = CliRunner()
+    result = runner.invoke(app, [
+        "predict-next-week", "--source", "synthetic",
+        "--order-level", "category", "--out-dir", str(tmp_path),
+    ])
+    assert result.exit_code != 0
+    assert not (tmp_path / "next_week_predictions.csv").exists()
+
+
+def _stub_future_orders():
+    """_category_future_order_predictions 반환 스키마(6 cols)의 최소 2행."""
+    return pd.DataFrame({
+        "store_id": ["store_gw01", "store_gw01"],
+        "item_id": ["A", "B"],
+        "category_id": ["bread", "pastry"],
+        "date": pd.to_datetime(["2026-01-01", "2026-01-01"]),
+        "demand_point": [8.7, 14.2],
+        "our_order": [9.7, 14.9],
+    })
+
+
+def test_predict_category_handler_schema(monkeypatch, tmp_path):
+    """category 모드 출력이 item 경로와 동일 8-col 스키마 + 규약을 지키는지 pin.
+
+    real 데이터 없이 c-1 함수를 스텁 — category 분기는 _load_dataset 전에 반환한다."""
+    monkeypatch.setattr(
+        "bakery.cli._category_future_order_predictions",
+        lambda *a, **k: _stub_future_orders(),
+    )
+    result = CliRunner().invoke(app, [
+        "predict-next-week", "--source", "real", "--order-level", "category",
+        "--total-model", "lightgbm", "--out-dir", str(tmp_path),
+    ])
+    assert result.exit_code == 0, result.output
+    out = pd.read_csv(tmp_path / "next_week_predictions.csv")
+    assert list(out.columns) == [
+        "store_id", "item_id", "category_id", "date",
+        "yhat_adjusted_demand_unit", "stockout_prob", "recommended_production", "model",
+    ]
+    assert out["recommended_production"].tolist() == [10.0, 15.0]   # our_order.round(0)
+    assert out["yhat_adjusted_demand_unit"].tolist() == [8.7, 14.2]  # demand_point
+    assert out["stockout_prob"].isna().all()
+    assert out["model"].unique().tolist() == ["category_total:lightgbm"]
