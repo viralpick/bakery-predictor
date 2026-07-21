@@ -34,7 +34,7 @@ from .evaluation.prospective import (
 from .evaluation.split import SplitWindow, apply_split, generate_time_splits
 from .features.calendar_features import add_calendar_features
 from .features.category_aggregate import (
-    DEFAULT_ALPHA, TARGET_CATEGORIES, build_category_daily,
+    DEFAULT_ALPHA, EVENTS, LUNAR_EVENTS, TARGET_CATEGORIES, build_category_daily,
     build_features, build_item_adjusted_demand,
 )
 from .features.competitor_features import (
@@ -71,6 +71,7 @@ from .ingest.store_mapping import load_store_mapping
 from .models.artisee_baseline import ArtiseeBaseline
 from .models.category_total import fit_category_total
 from .models.distributional_total import fit_distributional_total
+from .models.event_prior import EventLevelPrior
 from .models.conformal_order import ConformalOrderCalibrator, DEFAULT_SERVICE_LEVEL
 from .models.item_proportion import distribute_total
 from .models.lightgbm_regressor import (
@@ -1967,7 +1968,7 @@ def _load_unit_prices(xlsx_path: str) -> dict[str, float]:
 def _category_total_fold_predictions(
     features: pd.DataFrame, *, production_quantile: float, horizon_days: int,
     n_folds: int, target_col: str = "adjusted_demand_unit", min_train_days: int = 365,
-    total_model: str = "lightgbm",
+    total_model: str = "lightgbm", event_prior: bool = True,
 ) -> pd.DataFrame:
     """expanding-window fold별 q{production_quantile} 카테고리 총합 발주.
 
@@ -1977,6 +1978,11 @@ def _category_total_fold_predictions(
     total_model: "lightgbm"(CategoryTotalModel, production_q를 fit 시 고정) |
     "distributional"(DistributionalTotalModel/NGBoost, production_q를 predict 시 지정).
     둘 다 predict_expected(median)/predict_production 계약을 공유해 drop-in swap.
+
+    event_prior=True: sharp 캘린더 이벤트(xmas/설/추석 등)에 EventLevelPrior 레벨-앵커
+    블렌드를 post-model로 적용(모델 무관). prior는 fold마다 pre-test history로만 fit
+    (leakage-safe) 후 base_median/base_prod를 이벤트일에서만 보정한다. margin(quantile/
+    nk/conformal) 적용 전이라 3방식 모두에 반영된다.
     """
     import numpy as np
 
@@ -2003,6 +2009,14 @@ def _category_total_fold_predictions(
         else:
             raise ValueError(f"unknown total_model: {total_model!r} (expected 'lightgbm' or 'distributional')")
         base_median = np.clip(model.predict_expected(test_df), 0.0, None)
+        if event_prior:
+            # 레벨-앵커 prior는 pre-test history로만 fit(모델 fit과 동일 창) → leakage-safe.
+            prior = EventLevelPrior(events=EVENTS, lunar_events=LUNAR_EVENTS).fit(
+                df.iloc[:test_start], target_col=target_col,
+            )
+            base_median, base_prod = prior.blend(test_df["date"], base_median, base_prod)
+            base_median = np.clip(base_median, 0.0, None)
+            base_prod = np.clip(base_prod, 0.0, None)
         chunks.append(pd.DataFrame({
             "date": test_df["date"].to_numpy(), "fold": k,
             "base_median": base_median, "base_prod": base_prod,
@@ -2076,6 +2090,7 @@ def _category_order_predictions(
     nk_mult: float = 1.0, nk_add: float = 0.0,
     service_level: float = 0.85, cal_fold_frac: float = 0.5,
     drop_features: Collection[str] = (), total_model: str = "lightgbm",
+    event_prior: bool = True,
 ) -> pd.DataFrame:
     """v4 카테고리 스택: build_category_daily → fold별 총합 base(Task1) → 마진 적용
     (quantile/nk/conformal) → distribute_total 배분 → item별 our_order.
@@ -2083,7 +2098,8 @@ def _category_order_predictions(
 
     drop_features: build_features에서 뺄 feature 그룹(실험용, 기본=아무것도 안 뺌).
     total_model: 총량 base 학습 모델(lightgbm | distributional). distributional의
-    σ(x) 이득은 margin_method=quantile에서만 흐른다(nk/conformal은 median 기반)."""
+    σ(x) 이득은 margin_method=quantile에서만 흐른다(nk/conformal은 median 기반).
+    event_prior: sharp 캘린더 이벤트 레벨-앵커 블렌드(post-model, 모델 무관)."""
     # build_category_daily()는 store-agnostic(parquet 전체 읽음) — 단일매장 데이터셋 +
     # _load_real_daily의 단일매장 가드 덕에 안전. 다매장 확장 시 store_id 필터링 재검토 필요.
     features = build_features(
@@ -2093,6 +2109,7 @@ def _category_order_predictions(
     base = _category_total_fold_predictions(
         features, production_quantile=production_quantile,
         horizon_days=val_weeks * 7, n_folds=n_folds, total_model=total_model,
+        event_prior=event_prior,
     )
     totals = _apply_category_margin(
         base, margin_method, nk_mult=nk_mult, nk_add=nk_add,
@@ -2114,7 +2131,7 @@ def _category_order_predictions(
     }.get(margin_method, margin_method)
     console.print(
         f"[cyan]category our_order[/] {n_folds} fold(s) × {val_weeks}주, model={total_model}, "
-        f"margin={margin_desc}, "
+        f"margin={margin_desc}, event_prior={'on' if event_prior else 'off'}, "
         f"{preds['date'].nunique()} dates × {preds['item_id'].nunique()} items"
     )
     return preds
@@ -2309,7 +2326,7 @@ def _real_prospective_inputs(
     calibrate: bool = False, service_level: float = DEFAULT_SERVICE_LEVEL,
     cal_fold_frac: float = 0.5,
     category_margin: str = "quantile", nk_mult: float = 1.0, nk_add: float = 0.0,
-    total_model: str = "lightgbm",
+    total_model: str = "lightgbm", event_prior: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
     """실데이터 조립: bonavi_daily + 재고정보(생산량/폐기량) join +
     our_order=production-quantile backtest 예측(최근 n_folds×val_weeks만 채움, Task C).
@@ -2328,7 +2345,7 @@ def _real_prospective_inputs(
             n_folds=n_folds, alpha=alpha, margin_method=category_margin,
             nk_mult=nk_mult, nk_add=nk_add,
             service_level=service_level, cal_fold_frac=cal_fold_frac,
-            total_model=total_model,
+            total_model=total_model, event_prior=event_prior,
         )
     elif calibrate:
         predictions = _conformal_order_predictions(
@@ -2353,10 +2370,10 @@ def _load_prospective_inputs(
     calibrate: bool = False, service_level: float = DEFAULT_SERVICE_LEVEL,
     cal_fold_frac: float = 0.5,
     category_margin: str = "quantile", nk_mult: float = 1.0, nk_add: float = 0.0,
-    total_model: str = "lightgbm",
+    total_model: str = "lightgbm", event_prior: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
     """(rows, receipts, unit_prices) 반환. production_quantile/val_weeks/n_folds/order_level/alpha/
-    calibrate/service_level/cal_fold_frac/category_margin/nk_*/total_model은 real 소스만 사용."""
+    calibrate/service_level/cal_fold_frac/category_margin/nk_*/total_model/event_prior은 real 소스만 사용."""
     if source == "synthetic":
         return _synthetic_prospective_inputs()
     if source == "real":
@@ -2365,7 +2382,7 @@ def _load_prospective_inputs(
             n_folds=n_folds, order_level=order_level, alpha=alpha,
             calibrate=calibrate, service_level=service_level, cal_fold_frac=cal_fold_frac,
             category_margin=category_margin, nk_mult=nk_mult, nk_add=nk_add,
-            total_model=total_model,
+            total_model=total_model, event_prior=event_prior,
         )
     raise ValueError(f"unknown source: {source!r} (expected 'synthetic' or 'real')")
 
@@ -2437,6 +2454,11 @@ def cmd_prospective_eval(
              "category-margin=quantile에서만 흐른다(nk/conformal은 median 기반). order_level=category 전용.",
         click_type=click.Choice(["lightgbm", "distributional"]),
     ),
+    event_prior: bool = typer.Option(
+        True, "--event-prior/--no-event-prior",
+        help="order_level=category에서 sharp 캘린더 이벤트(xmas/설/추석 등) 레벨-앵커 블렌드 적용. "
+             "모델 무관(lightgbm·distributional 공통) post-model 레이어. 기본 on. item 경로는 미적용.",
+    ),
     baseline: str = typer.Option(
         "proxy",
         help="proxy(기존 base_order=production_qty proxy) | artisee(ArtiseeBaseline 재구현 제시량). "
@@ -2471,7 +2493,7 @@ def cmd_prospective_eval(
         order_level=order_level, alpha=alpha,
         calibrate=calibrate, service_level=target_service_level, cal_fold_frac=cal_fold_frac,
         category_margin=category_margin, nk_mult=nk_mult, nk_add=nk_add,
-        total_model=total_model,
+        total_model=total_model, event_prior=event_prior,
     )
     if baseline == "artisee":
         rows = rows.assign(base_order=_artisee_baseline_order(store_id, rows))
