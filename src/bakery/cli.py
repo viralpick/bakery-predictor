@@ -70,6 +70,7 @@ from .ingest.inventory import load_inventory, handle_negative_waste
 from .ingest.store_mapping import load_store_mapping
 from .models.artisee_baseline import ArtiseeBaseline
 from .models.category_total import fit_category_total
+from .models.distributional_total import fit_distributional_total
 from .models.conformal_order import ConformalOrderCalibrator, DEFAULT_SERVICE_LEVEL
 from .models.item_proportion import distribute_total
 from .models.lightgbm_regressor import (
@@ -1966,11 +1967,16 @@ def _load_unit_prices(xlsx_path: str) -> dict[str, float]:
 def _category_total_fold_predictions(
     features: pd.DataFrame, *, production_quantile: float, horizon_days: int,
     n_folds: int, target_col: str = "adjusted_demand_unit", min_train_days: int = 365,
+    total_model: str = "lightgbm",
 ) -> pd.DataFrame:
     """expanding-window fold별 q{production_quantile} 카테고리 총합 발주.
 
     category_total.expanding_window_backtest의 leakage-safe 패턴(train=이전/test=이후
     iloc 분할, sorted date 1행/1일)을 따르되 production 예측을 test date별로 반환한다.
+
+    total_model: "lightgbm"(CategoryTotalModel, production_q를 fit 시 고정) |
+    "distributional"(DistributionalTotalModel/NGBoost, production_q를 predict 시 지정).
+    둘 다 predict_expected(median)/predict_production 계약을 공유해 drop-in swap.
     """
     import numpy as np
 
@@ -1982,11 +1988,20 @@ def _category_total_fold_predictions(
     for k in range(n_folds):
         test_end = total - k * horizon_days
         test_start = test_end - horizon_days
-        model = fit_category_total(
-            df.iloc[:test_start], target_col=target_col, production_q=production_quantile,
-        )
         test_df = df.iloc[test_start:test_end]
-        base_prod = np.clip(model.predict_production(test_df), 0.0, None)
+        if total_model == "distributional":
+            # NGBoost: production_q는 fit이 아닌 predict 시 지정 (LogNormal 분위수).
+            model = fit_distributional_total(df.iloc[:test_start], target_col=target_col)
+            base_prod = np.clip(
+                model.predict_production(test_df, production_q=production_quantile), 0.0, None
+            )
+        elif total_model == "lightgbm":
+            model = fit_category_total(
+                df.iloc[:test_start], target_col=target_col, production_q=production_quantile,
+            )
+            base_prod = np.clip(model.predict_production(test_df), 0.0, None)
+        else:
+            raise ValueError(f"unknown total_model: {total_model!r} (expected 'lightgbm' or 'distributional')")
         base_median = np.clip(model.predict_expected(test_df), 0.0, None)
         chunks.append(pd.DataFrame({
             "date": test_df["date"].to_numpy(), "fold": k,
@@ -2060,13 +2075,15 @@ def _category_order_predictions(
     alpha: float = DEFAULT_ALPHA, margin_method: str = "quantile",
     nk_mult: float = 1.0, nk_add: float = 0.0,
     service_level: float = 0.85, cal_fold_frac: float = 0.5,
-    drop_features: Collection[str] = (),
+    drop_features: Collection[str] = (), total_model: str = "lightgbm",
 ) -> pd.DataFrame:
     """v4 카테고리 스택: build_category_daily → fold별 총합 base(Task1) → 마진 적용
     (quantile/nk/conformal) → distribute_total 배분 → item별 our_order.
     item 경로(_our_order_predictions)와 동일 [item_id,date,fold,our_order].
 
-    drop_features: build_features에서 뺄 feature 그룹(실험용, 기본=아무것도 안 뺌)."""
+    drop_features: build_features에서 뺄 feature 그룹(실험용, 기본=아무것도 안 뺌).
+    total_model: 총량 base 학습 모델(lightgbm | distributional). distributional의
+    σ(x) 이득은 margin_method=quantile에서만 흐른다(nk/conformal은 median 기반)."""
     # build_category_daily()는 store-agnostic(parquet 전체 읽음) — 단일매장 데이터셋 +
     # _load_real_daily의 단일매장 가드 덕에 안전. 다매장 확장 시 store_id 필터링 재검토 필요.
     features = build_features(
@@ -2075,7 +2092,7 @@ def _category_order_predictions(
     )
     base = _category_total_fold_predictions(
         features, production_quantile=production_quantile,
-        horizon_days=val_weeks * 7, n_folds=n_folds,
+        horizon_days=val_weeks * 7, n_folds=n_folds, total_model=total_model,
     )
     totals = _apply_category_margin(
         base, margin_method, nk_mult=nk_mult, nk_add=nk_add,
@@ -2096,7 +2113,8 @@ def _category_order_predictions(
         "conformal": f"conformal(s={service_level}, cal_frac={cal_fold_frac})",
     }.get(margin_method, margin_method)
     console.print(
-        f"[cyan]category our_order[/] {n_folds} fold(s) × {val_weeks}주, margin={margin_desc}, "
+        f"[cyan]category our_order[/] {n_folds} fold(s) × {val_weeks}주, model={total_model}, "
+        f"margin={margin_desc}, "
         f"{preds['date'].nunique()} dates × {preds['item_id'].nunique()} items"
     )
     return preds
@@ -2291,6 +2309,7 @@ def _real_prospective_inputs(
     calibrate: bool = False, service_level: float = DEFAULT_SERVICE_LEVEL,
     cal_fold_frac: float = 0.5,
     category_margin: str = "quantile", nk_mult: float = 1.0, nk_add: float = 0.0,
+    total_model: str = "lightgbm",
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
     """실데이터 조립: bonavi_daily + 재고정보(생산량/폐기량) join +
     our_order=production-quantile backtest 예측(최근 n_folds×val_weeks만 채움, Task C).
@@ -2309,6 +2328,7 @@ def _real_prospective_inputs(
             n_folds=n_folds, alpha=alpha, margin_method=category_margin,
             nk_mult=nk_mult, nk_add=nk_add,
             service_level=service_level, cal_fold_frac=cal_fold_frac,
+            total_model=total_model,
         )
     elif calibrate:
         predictions = _conformal_order_predictions(
@@ -2333,9 +2353,10 @@ def _load_prospective_inputs(
     calibrate: bool = False, service_level: float = DEFAULT_SERVICE_LEVEL,
     cal_fold_frac: float = 0.5,
     category_margin: str = "quantile", nk_mult: float = 1.0, nk_add: float = 0.0,
+    total_model: str = "lightgbm",
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
     """(rows, receipts, unit_prices) 반환. production_quantile/val_weeks/n_folds/order_level/alpha/
-    calibrate/service_level/cal_fold_frac/category_margin/nk_*은 real 소스만 사용."""
+    calibrate/service_level/cal_fold_frac/category_margin/nk_*/total_model은 real 소스만 사용."""
     if source == "synthetic":
         return _synthetic_prospective_inputs()
     if source == "real":
@@ -2344,6 +2365,7 @@ def _load_prospective_inputs(
             n_folds=n_folds, order_level=order_level, alpha=alpha,
             calibrate=calibrate, service_level=service_level, cal_fold_frac=cal_fold_frac,
             category_margin=category_margin, nk_mult=nk_mult, nk_add=nk_add,
+            total_model=total_model,
         )
     raise ValueError(f"unknown source: {source!r} (expected 'synthetic' or 'real')")
 
@@ -2408,6 +2430,13 @@ def cmd_prospective_eval(
     ),
     nk_mult: float = typer.Option(1.0, help="category-margin=nk의 곱셈 계수 K (order=base_prod×K+N)"),
     nk_add: float = typer.Option(0.0, help="category-margin=nk의 덧셈 버퍼 N (order=base_prod×K+N)"),
+    total_model: str = typer.Option(
+        "lightgbm",
+        help="order_level=category 총량 base 학습 모델: lightgbm(CategoryTotalModel, 기존) | "
+             "distributional(NGBoost LogNormal, σ(x) 학습). distributional의 spread 이득은 "
+             "category-margin=quantile에서만 흐른다(nk/conformal은 median 기반). order_level=category 전용.",
+        click_type=click.Choice(["lightgbm", "distributional"]),
+    ),
     baseline: str = typer.Option(
         "proxy",
         help="proxy(기존 base_order=production_qty proxy) | artisee(ArtiseeBaseline 재구현 제시량). "
@@ -2430,12 +2459,19 @@ def cmd_prospective_eval(
             "엔 ArtiseeBaseline.fit이 요구하는 daily/hourly 스키마(store_id/sold_units/is_holiday/"
             "stockout_time, item_id/date/hour/qty)가 없다."
         )
+    if total_model == "distributional" and order_level != "category":
+        raise typer.BadParameter(
+            "--total-model distributional은 --order-level category 전용이다 — "
+            "DistributionalTotalModel은 카테고리 총량 base(CategoryTotalModel drop-in)로만 배선돼 있다. "
+            "item 경로(v2 LGBM)는 미지원."
+        )
     rows, receipts, unit_prices = _load_prospective_inputs(
         source, store_id,
         production_quantile=production_quantile, val_weeks=our_order_val_weeks, n_folds=n_folds,
         order_level=order_level, alpha=alpha,
         calibrate=calibrate, service_level=target_service_level, cal_fold_frac=cal_fold_frac,
         category_margin=category_margin, nk_mult=nk_mult, nk_add=nk_add,
+        total_model=total_model,
     )
     if baseline == "artisee":
         rows = rows.assign(base_order=_artisee_baseline_order(store_id, rows))
