@@ -156,6 +156,42 @@ def cmd_backtest(
     console.print(f"[green]wrote[/] {out_dir}/fold_results.csv, predictions.csv")
 
 
+def _predict_next_week_category(
+    store_id: str, *, production_quantile: float, total_model: str, event_prior: bool,
+    alpha: float, use_forecast: bool, out_dir: Path, horizon_days: int = 7,
+) -> None:
+    """predict-next-week category 모드: 미래 카테고리 발주 → next_week_predictions.csv.
+
+    _category_future_order_predictions(c-1)를 소비해 item 경로와 동일 스키마로 출력한다.
+    recommended_production=our_order(q{production_quantile}+prior), demand_col=demand_point(median).
+    stockout_prob은 item v2 경로와 동일하게 NaN(σ(x)→item-risk 매핑은 c-2b)."""
+    preds = _category_future_order_predictions(
+        store_id, horizon_days=horizon_days, production_quantile=production_quantile,
+        total_model=total_model, event_prior=event_prior, alpha=alpha, use_forecast=use_forecast,
+    )
+    demand_col = "yhat_adjusted_demand_unit"
+    model_name = f"category_total:{total_model}"
+    out = preds.rename(columns={"demand_point": demand_col}).assign(
+        stockout_prob=float("nan"),
+        recommended_production=preds["our_order"].round(0).to_numpy(),
+        model=model_name,
+    )
+    out[demand_col] = out[demand_col].round(2)
+    cols = [
+        "store_id", "item_id", "category_id", "date",
+        demand_col, "stockout_prob", "recommended_production", "model",
+    ]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out[cols].to_csv(out_dir / "next_week_predictions.csv", index=False)
+    horizon = sorted(out["date"].unique())
+    console.print(
+        f"[green]wrote[/] {len(out):,} predictions "
+        f"({pd.Timestamp(horizon[0]).date()} ~ {pd.Timestamp(horizon[-1]).date()}, model={model_name}) → "
+        f"{out_dir}/next_week_predictions.csv"
+    )
+    _print_next_week_preview(out, demand_col=demand_col)
+
+
 @app.command("predict-next-week")
 def cmd_predict_next_week(
     source: str = "synthetic",
@@ -167,6 +203,22 @@ def cmd_predict_next_week(
     use_forecast: bool = False,
     out_dir: Path = REPORTS_DIR,
     closing_alpha: float = DEFAULT_ALPHA,
+    order_level: str = typer.Option(
+        "item", help="item(기존 v0~v3 LGBM) | category(v4 카테고리 총합→배분, real 전용)",
+        click_type=click.Choice(["item", "category"]),
+    ),
+    store_id: str = typer.Option(
+        "store_gw01", help="order_level=category의 대상 매장(단일). item 모드는 무시(store-agnostic)."
+    ),
+    total_model: str = typer.Option(
+        "lightgbm", help="order_level=category 총량 모델: lightgbm | distributional(NGBoost). "
+                         "prospective-eval과 동일.",
+        click_type=click.Choice(["lightgbm", "distributional"]),
+    ),
+    event_prior: bool = typer.Option(
+        True, "--event-prior/--no-event-prior",
+        help="order_level=category에서 sharp 이벤트 레벨-앵커 블렌드(기본 on).",
+    ),
 ) -> None:
     """Train on all history; emit demand prediction + recommended production.
 
@@ -176,7 +228,22 @@ def cmd_predict_next_week(
 
     v1/v0 (legacy): fall back to the demand-times-margin heuristic with
     `recommended_production = yhat * (1 + base_safety_margin + risk_bonus * stockout_prob)`.
+
+    order_level=category: v4 카테고리 총합→배분 경로(real 전용). 미래 horizon 카테고리
+    총량을 total_model로 예측(event_prior 블렌드) 후 item 비율로 배분한다.
     """
+    if order_level == "category":
+        if source != "real":
+            raise typer.BadParameter(
+                "--order-level category는 --source real 전용이다 — 카테고리 총합 경로는 "
+                "실 bonavi_daily/재고 스키마를 요구한다(synthetic 미지원)."
+            )
+        _predict_next_week_category(
+            store_id, production_quantile=production_quantile, total_model=total_model,
+            event_prior=event_prior, alpha=closing_alpha, use_forecast=use_forecast,
+            out_dir=out_dir,
+        )
+        return
     feature_set = _model_to_feature_set(model)
     ds = _load_dataset(source, data_dir)
     daily = _enrich_if_needed(ds, [feature_set]) if feature_set else ds.daily
@@ -2205,7 +2272,11 @@ def _category_future_order_predictions(
     total_model: str = "lightgbm", event_prior: bool = True,
     alpha: float = DEFAULT_ALPHA, use_forecast: bool = True,
 ) -> pd.DataFrame:
-    """미래 horizon_days일 카테고리 총량 예측 → item 배분. [item_id, date, our_order] 반환.
+    """미래 horizon_days일 카테고리 총량 예측 → item 배분.
+
+    [store_id, item_id, category_id, date, demand_point, our_order] 반환.
+    demand_point=median 배분(점추정), our_order=production 분위수 배분(발주). 동일 비율로
+    배분해 두 컬럼이 정합한다(demand_point는 c-2b decision·미리보기가 소비).
 
     leakage-safe: 미래 카테고리 행을 target=NaN으로 append하면 build_features의 lag가 seam
     너머 계산돼 미래-reaching lag는 NaN이 된다(미래 실측 원천 차단, item _join_history와 동일
@@ -2236,17 +2307,25 @@ def _category_future_order_predictions(
         base_median, base_prod = _blend_event_prior(
             train, test["date"], base_median, base_prod, target_col=target_col,
         )
-    totals = pd.Series(base_prod, index=test["date"].to_numpy())
-    res = distribute_total(_load_real_daily(store_id), totals)   # 배분 비율은 history(<date)만
-    preds = res.quantities.rename(columns={"qty": "our_order"})
+    dates = test["date"].to_numpy()
+    daily = _load_real_daily(store_id)          # 배분 비율 history (compute_proportions가 <date만)
+    order = distribute_total(daily, pd.Series(base_prod, index=dates)).quantities.rename(
+        columns={"qty": "our_order"})
+    point = distribute_total(daily, pd.Series(base_median, index=dates)).quantities.rename(
+        columns={"qty": "demand_point"})
+    preds = order.merge(point, on=["item_id", "date"], how="left")
     preds["item_id"] = preds["item_id"].astype(str)
+    cat_src = daily.drop_duplicates("item_id").assign(item_id=lambda d: d["item_id"].astype(str))
+    cat_map = cat_src.set_index("item_id")["category_id"]
+    preds["store_id"] = store_id
+    preds["category_id"] = preds["item_id"].map(cat_map)
     console.print(
         f"[cyan]category future order[/] {horizon[0].date()}~{horizon[-1].date()}, "
         f"model={total_model}, event_prior={'on' if event_prior else 'off'}, "
         f"forecast={'on' if use_forecast else 'off'}, "
         f"{preds['date'].nunique()} dates × {preds['item_id'].nunique()} items"
     )
-    return preds[["item_id", "date", "our_order"]]
+    return preds[["store_id", "item_id", "category_id", "date", "demand_point", "our_order"]]
 
 
 def _quantile_backtest_predictions(
