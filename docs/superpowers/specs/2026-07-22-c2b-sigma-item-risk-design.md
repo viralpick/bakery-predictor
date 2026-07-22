@@ -82,6 +82,7 @@ def simulate_item_risk(
 - **결정론적 비율 가정** 하에서 item order = p × category order, item point = p × category median이면 order/point 비율이 그날 모든 item 동일 → item p_stockout ≈ category exceedance(≈1−q0.85=0.15)로 수렴. **round(0)·배수생산(3/6/9) 정책·event_prior 블렌드**가 order를 분위수에서 밀어낼 때만 item별로 유의미하게 갈린다.
 - 이는 공유-μ 커플링의 정직한 귀결이다 — 풀링은 item-level 위험 해상도를 만들지 않는다. **item soldout은 부차 KPI**(`project_kpi_priority_framing`: 폐기율=1차, item 매진=고객경험 서브KPI)이므로 수용 범위. p_stockout의 1차 가치는 "magic 상수 0.30 대신 모델-grounded σ"로 decision 파이프라인 비용추정을 정직하게 만드는 것.
 - item-level σ 미검증 → broadcast는 overclaim 회피 선택(`feedback_verified_vs_inferred`).
+- **sub-unit 불일치(defer)**: predict-next-week에서 `stockout_prob`은 `our_order`(원값 q0.85 배분)에 대해 계산되고, CSV의 `recommended_production`은 `our_order.round(0)`이다. 즉 보고 위험이 보고 생산량과 sub-unit만큼 다른 양에 대한 값(미세하게 보수적). v6 pipeline은 post-policy order에 위험을 계산하므로 두 경로가 sub-unit 불일치. 영향 <1 unit·저해상도 framing 내라 defer(백로그: risk를 round된 order에 계산해 정합).
 
 ## 테스트
 
