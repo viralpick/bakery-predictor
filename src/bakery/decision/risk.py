@@ -48,15 +48,32 @@ def _sample_demand(point: float, cv: float, n: int, rng: np.random.Generator) ->
     return np.clip(rng.normal(point, sigma, n), 0.0, None)
 
 
+def _sample_demand_lognormal(
+    point: float, sigma_log: float, n: int, rng: np.random.Generator
+) -> np.ndarray:
+    # median=point → mu=log(point). 비율 스케일 하에서 σ 불변(store-total LogNormal 상속).
+    return np.exp(rng.normal(np.log(point), sigma_log, n))
+
+
 def simulate_item_risk(
     demand_point: float,
     order_qty: float,
     params: RiskParams = RiskParams(),
     rng: np.random.Generator | None = None,
+    *,
+    demand_sigma_log: float | None = None,
 ) -> RiskResult:
-    """Monte-Carlo P(stockout)/P(waste)/expected cost for one item's order."""
+    """Monte-Carlo P(stockout)/P(waste)/expected cost for one item's order.
+
+    demand_sigma_log가 주어지면(>0, demand_point>0) demand~LogNormal(median=demand_point,
+    shape=demand_sigma_log)로 샘플(분포모델 category σ 상속). 그 외에는 기존
+    Normal(point, cv·point) placeholder 경로(backward-compat).
+    """
     rng = rng if rng is not None else np.random.default_rng(params.seed)
-    demand = _sample_demand(demand_point, params.demand_cv, params.n_samples, rng)
+    if demand_sigma_log is not None and demand_sigma_log > 0 and demand_point > 0:
+        demand = _sample_demand_lognormal(demand_point, demand_sigma_log, params.n_samples, rng)
+    else:
+        demand = _sample_demand(demand_point, params.demand_cv, params.n_samples, rng)
     short = np.clip(demand - order_qty, 0.0, None)
     leftover = np.clip(order_qty - demand, 0.0, None)
     cost = params.unit_margin * short + params.unit_cost * leftover
