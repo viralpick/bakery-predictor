@@ -2036,8 +2036,9 @@ def _category_base_predict(
     train: pd.DataFrame, test: pd.DataFrame, *,
     target_col: str, total_model: str, production_quantile: float,
 ) -> tuple:
-    """train으로 카테고리 총량 모델 fit → test의 (base_median, base_prod) 반환(clip≥0).
+    """train으로 카테고리 총량 모델 fit → test의 (base_median, base_prod, base_sigma) 반환(clip≥0).
 
+    base_sigma는 distributional일 때 날짜별 σ(log-space) ndarray, lightgbm이면 None.
     total_model 분기: lightgbm(production_q fit 고정) | distributional(production_q predict 시).
     fold backtest·future 예측 공용(중복 제거)."""
     import numpy as np
@@ -2045,13 +2046,15 @@ def _category_base_predict(
     if total_model == "distributional":
         model = fit_distributional_total(train, target_col=target_col)
         base_prod = np.clip(model.predict_production(test, production_q=production_quantile), 0.0, None)
+        base_sigma = np.asarray(model.predict_sigma(test), dtype=float)
     elif total_model == "lightgbm":
         model = fit_category_total(train, target_col=target_col, production_q=production_quantile)
         base_prod = np.clip(model.predict_production(test), 0.0, None)
+        base_sigma = None
     else:
         raise ValueError(f"unknown total_model: {total_model!r} (expected 'lightgbm' or 'distributional')")
     base_median = np.clip(model.predict_expected(test), 0.0, None)
-    return base_median, base_prod
+    return base_median, base_prod, base_sigma
 
 
 def _blend_event_prior(
@@ -2098,7 +2101,7 @@ def _category_total_fold_predictions(
         test_start = test_end - horizon_days
         test_df = df.iloc[test_start:test_end]
         train_df = df.iloc[:test_start]
-        base_median, base_prod = _category_base_predict(
+        base_median, base_prod, _ = _category_base_predict(
             train_df, test_df, target_col=target_col,
             total_model=total_model, production_quantile=production_quantile,
         )
@@ -2299,7 +2302,7 @@ def _category_future_order_predictions(
     is_future = feats["date"].isin(horizon)
     train = feats[~is_future].dropna(subset=[target_col])
     test = feats[is_future]
-    base_median, base_prod = _category_base_predict(
+    base_median, base_prod, base_sigma = _category_base_predict(
         train, test, target_col=target_col,
         total_model=total_model, production_quantile=production_quantile,
     )
@@ -2319,13 +2322,19 @@ def _category_future_order_predictions(
     cat_map = cat_src.set_index("item_id")["category_id"]
     preds["store_id"] = store_id
     preds["category_id"] = preds["item_id"].map(cat_map)
+    if base_sigma is not None:
+        sigma_by_date = dict(zip(pd.to_datetime(dates), base_sigma))
+        preds["demand_sigma_log"] = pd.to_datetime(preds["date"]).map(sigma_by_date).astype(float)
+    else:
+        preds["demand_sigma_log"] = float("nan")
     console.print(
         f"[cyan]category future order[/] {horizon[0].date()}~{horizon[-1].date()}, "
         f"model={total_model}, event_prior={'on' if event_prior else 'off'}, "
         f"forecast={'on' if use_forecast else 'off'}, "
         f"{preds['date'].nunique()} dates × {preds['item_id'].nunique()} items"
     )
-    return preds[["store_id", "item_id", "category_id", "date", "demand_point", "our_order"]]
+    return preds[["store_id", "item_id", "category_id", "date",
+                  "demand_point", "our_order", "demand_sigma_log"]]
 
 
 def _quantile_backtest_predictions(

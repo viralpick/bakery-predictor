@@ -90,3 +90,26 @@ def test_predict_category_handler_schema(monkeypatch, tmp_path):
     assert out["yhat_adjusted_demand_unit"].tolist() == [8.7, 14.2]  # demand_point
     assert out["stockout_prob"].isna().all()
     assert out["model"].unique().tolist() == ["category_total:lightgbm"]
+
+
+def test_category_base_predict_returns_none_sigma_for_lightgbm():
+    """_category_base_predict는 (median, prod, sigma) 3-tuple. lightgbm은 sigma=None."""
+    import numpy as np
+    from bakery.cli import _category_base_predict
+
+    rng = np.random.default_rng(0)
+    n = 60
+    df = pd.DataFrame({
+        "date": pd.date_range("2025-01-01", periods=n, freq="D"),
+        "adjusted_demand_unit": rng.uniform(100, 300, n),
+        "dow": rng.integers(0, 7, n).astype(float),
+        "is_holiday": rng.integers(0, 2, n).astype(float),
+    })
+    train, test = df.iloc[:50], df.iloc[50:]
+    median, prod, sigma = _category_base_predict(
+        train, test, target_col="adjusted_demand_unit",
+        total_model="lightgbm", production_quantile=0.85,
+    )
+    assert len(median) == len(test)
+    assert len(prod) == len(test)
+    assert sigma is None
