@@ -178,18 +178,26 @@ def _predict_next_week_category(
     model_name = f"category_total:{total_model}"
     risk_params = RiskParams()
 
-    def _row_stockout(row) -> float:
-        sigma = row["demand_sigma_log"]
+    def _row_stockout(record, rng: np.random.Generator) -> float:
+        sigma = record.demand_sigma_log
         if pd.isna(sigma):
             return float("nan")
-        rng = np.random.default_rng(risk_params.seed)
         return simulate_item_risk(
-            float(row["demand_point"]), float(row["our_order"]),
+            float(record.demand_point), float(record.our_order),
             risk_params, rng, demand_sigma_log=float(sigma),
         ).p_stockout
 
+    # 행별 독립 RNG 스트림 (pipeline.build_recommendation과 동일 패턴):
+    # 같은 seed를 모든 행이 공유하면 안 되므로 SeedSequence.spawn으로 행마다
+    # 분리한다. 결정론은 유지된다(SeedSequence.spawn은 seed+인덱스로 결정론적).
+    seeds = np.random.SeedSequence(risk_params.seed).spawn(len(preds))
+    stockout_probs = [
+        _row_stockout(record, np.random.default_rng(seed))
+        for seed, record in zip(seeds, preds.itertuples(index=False))
+    ]
+
     out = preds.rename(columns={"demand_point": demand_col}).assign(
-        stockout_prob=preds.apply(_row_stockout, axis=1).to_numpy(),
+        stockout_prob=np.array(stockout_probs),
         recommended_production=preds["our_order"].round(0).to_numpy(),
         model=model_name,
     )
