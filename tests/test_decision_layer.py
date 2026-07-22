@@ -165,3 +165,22 @@ def test_pipeline_rejects_nan_demand():
     df = pd.DataFrame({"item_id": ["a"], "demand_point": [float("nan")]})
     with pytest.raises(ValueError, match="NaN"):
         build_recommendation(df)
+
+
+def test_pipeline_threads_demand_sigma_log():
+    # 정책상 order>demand_point(안전마진) → σ 클수록 p_stockout 커야 함.
+    base = _items()
+    risk = RiskParams(n_samples=30000, seed=3)
+    r_lo = build_recommendation(base.assign(demand_sigma_log=[0.1, 0.1]), PolicyParams(), risk)
+    r_hi = build_recommendation(base.assign(demand_sigma_log=[0.6, 0.6]), PolicyParams(), risk)
+    assert (r_hi.table["p_stockout"].to_numpy() > r_lo.table["p_stockout"].to_numpy()).all()
+
+
+def test_pipeline_nan_sigma_falls_back_to_cv():
+    # demand_sigma_log 컬럼이 NaN이면 None 취급 → 기존 cv 경로와 동일 결과.
+    base = _items()
+    risk = RiskParams(n_samples=4000, seed=9)
+    with_nan = base.assign(demand_sigma_log=[float("nan"), float("nan")])
+    a = build_recommendation(base, PolicyParams(), risk)
+    b = build_recommendation(with_nan, PolicyParams(), risk)
+    assert a.table["p_stockout"].tolist() == b.table["p_stockout"].tolist()

@@ -45,9 +45,10 @@ def _validate(items: pd.DataFrame) -> None:
 
 
 def _recommend_one(item_id: str, demand_point: float, policy: PolicyParams,
-                   risk: RiskParams, rng: np.random.Generator) -> tuple[dict, DecisionLineage]:
+                   risk: RiskParams, rng: np.random.Generator,
+                   demand_sigma_log: float | None = None) -> tuple[dict, DecisionLineage]:
     order, lineage = apply_policy(item_id, demand_point, policy)
-    res = simulate_item_risk(demand_point, order, risk, rng)
+    res = simulate_item_risk(demand_point, order, risk, rng, demand_sigma_log=demand_sigma_log)
     row = dict(
         item_id=item_id, demand_point=float(demand_point), order_qty=order,
         p_stockout=res.p_stockout, p_waste=res.p_waste,
@@ -74,10 +75,15 @@ def build_recommendation(
     _validate(items)
     seeds = np.random.SeedSequence(risk.seed).spawn(len(items))
     carry = [c for c in CARRY_COLS if c in items.columns]
+    has_sigma = "demand_sigma_log" in items.columns
     rows, lineages = [], []
     for seed, record in zip(seeds, items.itertuples(index=False)):
         item_rng = np.random.default_rng(seed)
-        row, lineage = _recommend_one(record.item_id, record.demand_point, policy, risk, item_rng)
+        sigma = getattr(record, "demand_sigma_log", None) if has_sigma else None
+        if sigma is not None and pd.isna(sigma):
+            sigma = None
+        row, lineage = _recommend_one(
+            record.item_id, record.demand_point, policy, risk, item_rng, sigma)
         for col in carry:
             row[col] = getattr(record, col)
         rows.append(row)
