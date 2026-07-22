@@ -164,19 +164,37 @@ def _predict_next_week_category(
 
     _category_future_order_predictions(c-1)를 소비해 item 경로와 동일 스키마로 출력한다.
     recommended_production=our_order(q{production_quantile}+prior), demand_col=demand_point(median).
-    stockout_prob은 item v2 경로와 동일하게 NaN(σ(x)→item-risk 매핑은 c-2b)."""
+    stockout_prob은 demand_sigma_log(c-1)를 simulate_item_risk에 넣어 계산한 p_stockout.
+    σ가 NaN인 행(lightgbm 등 분포 미제공 total_model)은 NaN 유지."""
+    import numpy as np
+
+    from bakery.decision.risk import RiskParams, simulate_item_risk
+
     preds = _category_future_order_predictions(
         store_id, horizon_days=horizon_days, production_quantile=production_quantile,
         total_model=total_model, event_prior=event_prior, alpha=alpha, use_forecast=use_forecast,
     )
     demand_col = "yhat_adjusted_demand_unit"
     model_name = f"category_total:{total_model}"
+    risk_params = RiskParams()
+
+    def _row_stockout(row) -> float:
+        sigma = row["demand_sigma_log"]
+        if pd.isna(sigma):
+            return float("nan")
+        rng = np.random.default_rng(risk_params.seed)
+        return simulate_item_risk(
+            float(row["demand_point"]), float(row["our_order"]),
+            risk_params, rng, demand_sigma_log=float(sigma),
+        ).p_stockout
+
     out = preds.rename(columns={"demand_point": demand_col}).assign(
-        stockout_prob=float("nan"),
+        stockout_prob=preds.apply(_row_stockout, axis=1).to_numpy(),
         recommended_production=preds["our_order"].round(0).to_numpy(),
         model=model_name,
     )
     out[demand_col] = out[demand_col].round(2)
+    out["stockout_prob"] = out["stockout_prob"].round(4)
     cols = [
         "store_id", "item_id", "category_id", "date",
         demand_col, "stockout_prob", "recommended_production", "model",

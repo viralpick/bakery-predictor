@@ -56,8 +56,8 @@ def test_predict_category_rejects_synthetic_source(tmp_path):
     assert not (tmp_path / "next_week_predictions.csv").exists()
 
 
-def _stub_future_orders():
-    """_category_future_order_predictions 반환 스키마(6 cols)의 최소 2행."""
+def _stub_future_orders(sigma=(0.25, 0.25)):
+    """_category_future_order_predictions 반환 스키마(7 cols)의 최소 2행."""
     return pd.DataFrame({
         "store_id": ["store_gw01", "store_gw01"],
         "item_id": ["A", "B"],
@@ -65,16 +65,17 @@ def _stub_future_orders():
         "date": pd.to_datetime(["2026-01-01", "2026-01-01"]),
         "demand_point": [8.7, 14.2],
         "our_order": [9.7, 14.9],
+        "demand_sigma_log": list(sigma),
     })
 
 
 def test_predict_category_handler_schema(monkeypatch, tmp_path):
     """category 모드 출력이 item 경로와 동일 8-col 스키마 + 규약을 지키는지 pin.
 
-    real 데이터 없이 c-1 함수를 스텁 — category 분기는 _load_dataset 전에 반환한다."""
+    lightgbm(σ 없음) → stockout_prob NaN. real 데이터 없이 c-1 함수를 스텁."""
     monkeypatch.setattr(
         "bakery.cli._category_future_order_predictions",
-        lambda *a, **k: _stub_future_orders(),
+        lambda *a, **k: _stub_future_orders(sigma=(float("nan"), float("nan"))),
     )
     result = CliRunner().invoke(app, [
         "predict-next-week", "--source", "real", "--order-level", "category",
@@ -90,6 +91,27 @@ def test_predict_category_handler_schema(monkeypatch, tmp_path):
     assert out["yhat_adjusted_demand_unit"].tolist() == [8.7, 14.2]  # demand_point
     assert out["stockout_prob"].isna().all()
     assert out["model"].unique().tolist() == ["category_total:lightgbm"]
+
+
+def test_predict_category_fills_stockout_prob_from_sigma(monkeypatch, tmp_path):
+    """distributional σ 있는 행 → stockout_prob 유한(0<p<1), 8-col 스키마 유지."""
+    monkeypatch.setattr(
+        "bakery.cli._category_future_order_predictions",
+        lambda *a, **k: _stub_future_orders(sigma=(0.3, 0.3)),
+    )
+    result = CliRunner().invoke(app, [
+        "predict-next-week", "--source", "real", "--order-level", "category",
+        "--total-model", "distributional", "--out-dir", str(tmp_path),
+    ])
+    assert result.exit_code == 0, result.output
+    out = pd.read_csv(tmp_path / "next_week_predictions.csv")
+    assert list(out.columns) == [
+        "store_id", "item_id", "category_id", "date",
+        "yhat_adjusted_demand_unit", "stockout_prob", "recommended_production", "model",
+    ]
+    assert out["stockout_prob"].notna().all()
+    assert ((out["stockout_prob"] > 0.0) & (out["stockout_prob"] < 1.0)).all()
+    assert out["model"].unique().tolist() == ["category_total:distributional"]
 
 
 def test_category_base_predict_returns_none_sigma_for_lightgbm():
