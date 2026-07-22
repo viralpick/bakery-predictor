@@ -164,19 +164,45 @@ def _predict_next_week_category(
 
     _category_future_order_predictions(c-1)를 소비해 item 경로와 동일 스키마로 출력한다.
     recommended_production=our_order(q{production_quantile}+prior), demand_col=demand_point(median).
-    stockout_prob은 item v2 경로와 동일하게 NaN(σ(x)→item-risk 매핑은 c-2b)."""
+    stockout_prob은 demand_sigma_log(c-1)를 simulate_item_risk에 넣어 계산한 p_stockout.
+    σ가 NaN인 행(lightgbm 등 분포 미제공 total_model)은 NaN 유지."""
+    import numpy as np
+
+    from bakery.decision.risk import RiskParams, simulate_item_risk
+
     preds = _category_future_order_predictions(
         store_id, horizon_days=horizon_days, production_quantile=production_quantile,
         total_model=total_model, event_prior=event_prior, alpha=alpha, use_forecast=use_forecast,
     )
     demand_col = "yhat_adjusted_demand_unit"
     model_name = f"category_total:{total_model}"
+    risk_params = RiskParams()
+
+    def _row_stockout(record, rng: np.random.Generator) -> float:
+        sigma = record.demand_sigma_log
+        if pd.isna(sigma):
+            return float("nan")
+        return simulate_item_risk(
+            float(record.demand_point), float(record.our_order),
+            risk_params, rng, demand_sigma_log=float(sigma),
+        ).p_stockout
+
+    # 행별 독립 RNG 스트림 (pipeline.build_recommendation과 동일 패턴):
+    # 같은 seed를 모든 행이 공유하면 안 되므로 SeedSequence.spawn으로 행마다
+    # 분리한다. 결정론은 유지된다(SeedSequence.spawn은 seed+인덱스로 결정론적).
+    seeds = np.random.SeedSequence(risk_params.seed).spawn(len(preds))
+    stockout_probs = [
+        _row_stockout(record, np.random.default_rng(seed))
+        for seed, record in zip(seeds, preds.itertuples(index=False))
+    ]
+
     out = preds.rename(columns={"demand_point": demand_col}).assign(
-        stockout_prob=float("nan"),
+        stockout_prob=np.array(stockout_probs),
         recommended_production=preds["our_order"].round(0).to_numpy(),
         model=model_name,
     )
     out[demand_col] = out[demand_col].round(2)
+    out["stockout_prob"] = out["stockout_prob"].round(4)
     cols = [
         "store_id", "item_id", "category_id", "date",
         demand_col, "stockout_prob", "recommended_production", "model",
@@ -2036,8 +2062,9 @@ def _category_base_predict(
     train: pd.DataFrame, test: pd.DataFrame, *,
     target_col: str, total_model: str, production_quantile: float,
 ) -> tuple:
-    """train으로 카테고리 총량 모델 fit → test의 (base_median, base_prod) 반환(clip≥0).
+    """train으로 카테고리 총량 모델 fit → test의 (base_median, base_prod, base_sigma) 반환(clip≥0).
 
+    base_sigma는 distributional일 때 날짜별 σ(log-space) ndarray, lightgbm이면 None.
     total_model 분기: lightgbm(production_q fit 고정) | distributional(production_q predict 시).
     fold backtest·future 예측 공용(중복 제거)."""
     import numpy as np
@@ -2045,13 +2072,15 @@ def _category_base_predict(
     if total_model == "distributional":
         model = fit_distributional_total(train, target_col=target_col)
         base_prod = np.clip(model.predict_production(test, production_q=production_quantile), 0.0, None)
+        base_sigma = np.asarray(model.predict_sigma(test), dtype=float)
     elif total_model == "lightgbm":
         model = fit_category_total(train, target_col=target_col, production_q=production_quantile)
         base_prod = np.clip(model.predict_production(test), 0.0, None)
+        base_sigma = None
     else:
         raise ValueError(f"unknown total_model: {total_model!r} (expected 'lightgbm' or 'distributional')")
     base_median = np.clip(model.predict_expected(test), 0.0, None)
-    return base_median, base_prod
+    return base_median, base_prod, base_sigma
 
 
 def _blend_event_prior(
@@ -2098,7 +2127,7 @@ def _category_total_fold_predictions(
         test_start = test_end - horizon_days
         test_df = df.iloc[test_start:test_end]
         train_df = df.iloc[:test_start]
-        base_median, base_prod = _category_base_predict(
+        base_median, base_prod, _ = _category_base_predict(
             train_df, test_df, target_col=target_col,
             total_model=total_model, production_quantile=production_quantile,
         )
@@ -2299,7 +2328,7 @@ def _category_future_order_predictions(
     is_future = feats["date"].isin(horizon)
     train = feats[~is_future].dropna(subset=[target_col])
     test = feats[is_future]
-    base_median, base_prod = _category_base_predict(
+    base_median, base_prod, base_sigma = _category_base_predict(
         train, test, target_col=target_col,
         total_model=total_model, production_quantile=production_quantile,
     )
@@ -2319,13 +2348,19 @@ def _category_future_order_predictions(
     cat_map = cat_src.set_index("item_id")["category_id"]
     preds["store_id"] = store_id
     preds["category_id"] = preds["item_id"].map(cat_map)
+    if base_sigma is not None:
+        sigma_by_date = dict(zip(pd.to_datetime(dates), base_sigma))
+        preds["demand_sigma_log"] = pd.to_datetime(preds["date"]).map(sigma_by_date).astype(float)
+    else:
+        preds["demand_sigma_log"] = float("nan")
     console.print(
         f"[cyan]category future order[/] {horizon[0].date()}~{horizon[-1].date()}, "
         f"model={total_model}, event_prior={'on' if event_prior else 'off'}, "
         f"forecast={'on' if use_forecast else 'off'}, "
         f"{preds['date'].nunique()} dates × {preds['item_id'].nunique()} items"
     )
-    return preds[["store_id", "item_id", "category_id", "date", "demand_point", "our_order"]]
+    return preds[["store_id", "item_id", "category_id", "date",
+                  "demand_point", "our_order", "demand_sigma_log"]]
 
 
 def _quantile_backtest_predictions(

@@ -76,6 +76,36 @@ def test_expected_cost_combines_margin_and_waste():
     assert res.expected_cost == pytest.approx(3.0 * res.expected_short + 1.0 * res.expected_waste, rel=1e-9)
 
 
+def test_lognormal_median_gives_half_stockout_at_order_equals_point():
+    # LogNormal: P(X > median) = 0.5 exactly. order=point=median → p_stockout≈0.5.
+    p = RiskParams(n_samples=60000, seed=4)
+    res = simulate_item_risk(20.0, 20.0, p, demand_sigma_log=0.4)
+    assert abs(res.p_stockout - 0.5) < 0.02
+
+
+def test_higher_sigma_raises_stockout_when_order_above_point():
+    # order(25) > point(20): 분산 클수록 상단 tail이 order를 더 자주 넘음.
+    p = RiskParams(n_samples=60000, seed=8)
+    lo = simulate_item_risk(20.0, 25.0, p, demand_sigma_log=0.15)
+    hi = simulate_item_risk(20.0, 25.0, p, demand_sigma_log=0.55)
+    assert hi.p_stockout > lo.p_stockout
+
+
+def test_sigma_none_matches_normal_default_exactly():
+    # backward-compat: None 전달 == 미전달 (기존 Normal cv 경로, 동일 seed).
+    p = RiskParams(n_samples=5000, seed=7)
+    a = simulate_item_risk(20.0, 23.0, p)
+    b = simulate_item_risk(20.0, 23.0, p, demand_sigma_log=None)
+    assert a == b
+
+
+def test_nonpositive_point_with_sigma_falls_back_to_normal():
+    # demand_point<=0 → LogNormal 불가 → Normal fallback(예외 없이 all-waste).
+    res = simulate_item_risk(0.0, 5.0, RiskParams(n_samples=5000, seed=10), demand_sigma_log=0.3)
+    assert res.p_stockout == 0.0
+    assert res.p_waste == 1.0
+
+
 # --- pipeline ---------------------------------------------------------------
 
 def _items():
@@ -135,3 +165,22 @@ def test_pipeline_rejects_nan_demand():
     df = pd.DataFrame({"item_id": ["a"], "demand_point": [float("nan")]})
     with pytest.raises(ValueError, match="NaN"):
         build_recommendation(df)
+
+
+def test_pipeline_threads_demand_sigma_log():
+    # 정책상 order>demand_point(안전마진) → σ 클수록 p_stockout 커야 함.
+    base = _items()
+    risk = RiskParams(n_samples=30000, seed=3)
+    r_lo = build_recommendation(base.assign(demand_sigma_log=[0.1, 0.1]), PolicyParams(), risk)
+    r_hi = build_recommendation(base.assign(demand_sigma_log=[0.6, 0.6]), PolicyParams(), risk)
+    assert (r_hi.table["p_stockout"].to_numpy() > r_lo.table["p_stockout"].to_numpy()).all()
+
+
+def test_pipeline_nan_sigma_falls_back_to_cv():
+    # demand_sigma_log 컬럼이 NaN이면 None 취급 → 기존 cv 경로와 동일 결과.
+    base = _items()
+    risk = RiskParams(n_samples=4000, seed=9)
+    with_nan = base.assign(demand_sigma_log=[float("nan"), float("nan")])
+    a = build_recommendation(base, PolicyParams(), risk)
+    b = build_recommendation(with_nan, PolicyParams(), risk)
+    assert a.table["p_stockout"].tolist() == b.table["p_stockout"].tolist()
