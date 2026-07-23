@@ -118,6 +118,22 @@ Phase 3  온톨로지/액션 편입 + 종합
 2. **KPI 비교불가**: 기존 문서·메모리의 모든 KPI(naive WAPE 8.19, 폐기 −33~40%, 분포스택 full-window 등)는 **옛 146 canonical 기준**. 새 166 canonical(+14% 품목·믹스 변화)로 **백테스트 미재실행** → shift 크기 미상. "소폭 이동" 아님, **직접 비교 불가·재측정 필요**.
 3. **2026 H1 covariate**: `data/internal/bonavi_daily_2026h1_covariate.parquet`(7,107행/65품목/48,597개, sales-only, 라벨없음) 별도 생성. 학습 타깃 아님.
 
+## 사용자 결정 후속 (2026-07-23)
+
+**Q1 — adjusted_demand 재배선 완료**: closing_qty 소스를 신규 클린 parquet(CD_USERDEF1)로 이동. 마감할인 반영 품목 130→157(신규 27품목 포함), 166 canonical과 소스 완전 정합. `discount.py` v2 로더 + `build_item_adjusted_demand` 클린 parquet 우선(옛 파일 CI 폴백). 536 통과. → 배선 갭 #1 해소.
+
+**Q2 — 새 166 canonical KPI 재측정 (item-level daily WAPE, adjusted_demand, 4 folds real)**:
+| 모델 | wape_all | wape_no_stockout | pct_under | pct_over |
+|---|---|---|---|---|
+| lightgbm_v1 | 0.2216 | 0.2478 | 21.4% | 33.8% |
+| lightgbm(v0) | 0.2225 | 0.2597 | 21.9% | 36.1% |
+| lightgbm_v2 | 0.2276 | 0.2567 | 23.9% | 34.2% |
+| seasonal_naive | 0.2255 | 0.2943 | 13.2% | 43.9% |
+| moving_average | 0.2498 | 0.3215 | 19.4% | 46.1% |
+- ⚠️ **이 지표는 item-level daily WAPE로, 기존 헤드라인 "naive 8.19 vs 우리 8.03"(광교 총량 WAPE)과 다른 지표 — 직접 대체 아님.** 총량 WAPE·폐기(−33~40%)·매진 KPI는 별도 경로(business-report/order-sim)로 미재측정(후속).
+- 정합 확인: item-level에서 LightGBM≈naive(과거 총량 결론과 일치), no-stockout·sandwich(v2 0.284 vs naive 0.339)는 v2 우위. pct_under 21-24%=과거 "v2 23%"와 일치. 리포트 `reports/new166/`.
+- 배선 갭 #2(비교불가) 부분 해소: item-level baseline은 166 기준 확보. 총량·폐기 KPI 재측정은 후속 결정.
+
 ## 성공 기준 (게이트 B)
 
 - Phase 0 산출로 타깃/비타깃 분리 규모와 proxy 타당성이 수치로 확정됨.
