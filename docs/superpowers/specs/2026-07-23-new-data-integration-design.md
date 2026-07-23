@@ -51,6 +51,7 @@ Phase 3  온톨로지/액션 편입 + 종합
 ### Phase 1 — canonical 재빌드 + 정합성 (게이트 B, 사용자 승인)
 
 - 신규 0721 → `loader.py` schema로 재빌드. 기존 로직 재적용: 반품 제거, stockout 재정의, bulk 필터(T1/T2), α=0.8.
+- **⚠️ 게이트 A 발견 (2026-07-23)**: 0721 파일 `판매정보2` 시트만 `판매구분`(SALES_FG)/`판매시간`(SALES_TIME) 컬럼 순서가 나머지와 뒤바뀜(벤더 quirk). 어댑터는 반드시 **시트별 자체 헤더(English placeholder 행)로 컬럼 매핑** — 위치/전역 헤더 금지. 컬럼 의미: CD_USERDEF1=할인코드, CD_USERDEF2=셋트(SS/ST), SALES_FG=판매구분(0/1), SALES_TIME=판매시간(YYYYMMDDHHMMSS). 상세=메모리 `project_new_data_ingestion_pitfall`.
 - 타깃 분리: `당일폐기여부=Y` 베이커리만 타깃, 나머지 covariate 테이블 분리 저장.
 - **정합성 대조 필수**: 재빌드 후 광교 베이커리 총량 vs 기존 parquet. 불일치 시 원인 규명 전 게이트 통과 금지.
 - 기존 leakage 테스트 전부 통과.
