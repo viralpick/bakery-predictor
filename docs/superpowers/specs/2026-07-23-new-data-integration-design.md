@@ -93,6 +93,31 @@ Phase 3  온톨로지/액션 편입 + 종합
 - 테스트: `test_map_category_new_items`(17), `test_bonavi_loader_v2`(3, swap 유닛 + 타깃 정의).
 - **⚠️ 미배선(게이트 B 대기)**: `build_v2`는 임시 경로로만 검증. 기존 canonical(`bonavi_daily.parquet`)·loader·CLI에 **아직 배선 안 함** — 승인 후 진행.
 
+## Phase 2 팬아웃 결과 (2026-07-23, 각 트랙 메인스레드 검증 후 채택)
+
+리포트: `<scratchpad>/phase2_t2_report.md`(마감α), `phase2_t4_report.md`+`phase2_t4_rate_table.csv`(진열시간), `phase2_t6_report.md`(매장간, 상관값 SUPERSEDED 주석).
+
+**T1 — 반품 순수요 감사 (검증필: 메인)**: v2 net-out 정확 적용. 광교 타깃 정상 540,610 − 소매반품 9,868(1.83%, 161품목/7,648건) = canonical 530,748. 순수요 정제 정상.
+
+**T2 — 할인코드 → 마감할인 (검증필: 독립 재계산)**:
+- [검증사실] 광교 마감할인 코드 0069(20%)·0077(30%) **둘 다 20시대 집중**(평균 20.3/20.2시, 20시+ 98.5%/90.8%). 마감할인 일 비중 평균 15.5%·중앙 14.0%, 발생일 99.9%(상시). ★**정정**: 오염 캐시 시절 "0077=오후2시=마감아님"은 아티팩트 — 실제 오후2시대는 PAYCO(0121, 평균 13.5시)였고 혼동. 
+- [추론+미해결] α 0.8+ **방향** 지지(마감 후 정가판매 대부분 소멸). 단 서브가 플래그한 "직전 2시간 정가 1.4배" 모순 미해소 → **0.8 확정 아님**. `project_closing_discount_alpha`의 저-α(미끼상품 잠식) 우려를 반증한 게 아니라 시간위치만 규명.
+
+**T4 — 진열시간 → 수요율 정규화 (검증: rate table 교차확인, pre-display는 서브산출)**:
+- [검증사실] 진열파일 37품목(매장생산26+완제품11), 코드 직접보유(이름매칭 불필요), daily 매칭 31/37(미매칭6=2026신제품/무판매). rate table item_id가 실제 광교 코드와 일치.
+- [서브산출] pre-display 판매 0.27% → 진열시각=계획상수 leakage-safe 가정 지지. 완제품 전부 개점전 진열이라 rate 정규화 순위변동은 09:30~10:10 소수품목만(늦은진열 3종 평균 rank +3.0). ⚠️ uniform-traffic confound로 상승 ~11% 과대(서브 자기플래그). display_time=Item 정적속성 후보(`source=planned(assumed)`).
+
+**T6 — 매장간·타입별 (검증: 독립 재계산으로 상관 정정)**:
+- [검증사실] 4매장 pastry 최대(66~72%), 광교 bread 25.7%·주말 34.5%(오피스 14~24%). 광교 월별 카테고리 비율 std: bread 4.43·pastry 3.90(변동큼) vs cake/sandwich/salad ≤1.2(안정). ★상관 정정: 광교~메세나 r=**0.627**, 오피스 2매장 **−0.41(역상관)**. → 메세나만 카테고리별 선별 pooling 후보, 오피스 부적합(역상관). 매장생산/완제품 구분=마스터에 컬럼 없음(skip).
+
+**T5 — 음료 트래픽: BLOCKED** — 음료 품목 무명(마스터 미커버) → 식별 불가. 갱신 품목 마스터 수령 시 unblock.
+
+## ⚠️ 알려진 배선 갭 / 비교 주의 (durable 기록)
+
+1. **정합성 "100%"의 정확한 범위**: sold_units·is_stockout만 (item,date) 완전일치. **adjusted_demand(헌장 TARGET)는 sold_units의 순수함수가 아님** — closing_qty를 `load_sales_with_discount(보나비 데이터_20260520.xlsx)` = **옛 파일**에서 읽음. 겹치는 139품목·구간은 근사보존, 신규 27품목·확장구간은 closing_qty=0으로 빠짐(adjusted_demand=sold_units로 과대). **결정 필요**: adjusted_demand 할인소스를 신규 클린 parquet(CD_USERDEF1)로 재배선. `potential_demand`는 substitution 2차패스 생략으로 옛것과 상이하나 real 경로 미사용(#3 감사, 폐기 확정컬럼).
+2. **KPI 비교불가**: 기존 문서·메모리의 모든 KPI(naive WAPE 8.19, 폐기 −33~40%, 분포스택 full-window 등)는 **옛 146 canonical 기준**. 새 166 canonical(+14% 품목·믹스 변화)로 **백테스트 미재실행** → shift 크기 미상. "소폭 이동" 아님, **직접 비교 불가·재측정 필요**.
+3. **2026 H1 covariate**: `data/internal/bonavi_daily_2026h1_covariate.parquet`(7,107행/65품목/48,597개, sales-only, 라벨없음) 별도 생성. 학습 타깃 아님.
+
 ## 성공 기준 (게이트 B)
 
 - Phase 0 산출로 타깃/비타깃 분리 규모와 proxy 타당성이 수치로 확정됨.
