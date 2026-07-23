@@ -161,6 +161,81 @@ def load_closing_returns(xlsx_path: Path | str = DEFAULT_XLSX) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# v2 loaders — 신규 라인레벨 클린 parquet (English 컬럼) 기반
+# ---------------------------------------------------------------------------
+
+CLEAN_PARQUET_DEFAULT = Path("data/internal/sales_lines_clean.parquet")
+_GW_STORE_CODE = "1000000047"
+
+
+def load_sales_with_discount_v2(
+    parquet_path: Path | str = CLEAN_PARQUET_DEFAULT,
+    store_code: str = _GW_STORE_CODE,
+) -> DiscountSales:
+    """신규 클린 parquet → DiscountSales (load_sales_with_discount와 동일 스키마·라벨).
+
+    클린 parquet은 시트2 헤더스왑이 이미 교정됨. English 컬럼:
+    CD_ITEM/DT_SALE/QT_SALE/UM/AM_PAYMENT/AM_DC/CD_USERDEF1(할인코드)/
+    CD_USERDEF2(셋트)/SALES_FG(판매구분)/SALES_TIME(YYYYMMDDHHMMSS). 정상매출만.
+    """
+    cols = ["CD_PARTNER", "DT_SALE", "CD_ITEM", "QT_SALE", "UM", "AM_PAYMENT",
+            "AM_DC", "CD_USERDEF1", "CD_USERDEF2", "SALES_FG", "SALES_TIME", "SLIP_NO"]
+    raw = pd.read_parquet(parquet_path, columns=cols)
+    for c in ("CD_PARTNER", "CD_ITEM", "CD_USERDEF1", "CD_USERDEF2", "SALES_FG",
+              "SALES_TIME", "DT_SALE", "SLIP_NO"):
+        raw[c] = raw[c].astype("string").str.strip()
+    raw = raw[(raw["CD_PARTNER"] == store_code) & (raw["SALES_FG"] == "0")].copy()
+    tstr = raw["SALES_TIME"].str.zfill(14)
+    code = raw["CD_USERDEF1"].fillna("").astype(str).str.strip()
+    amt = pd.to_numeric(raw["AM_DC"], errors="coerce").fillna(0.0)
+    rows = pd.DataFrame({
+        "receipt_id":    (raw["DT_SALE"] + "_" + raw["SLIP_NO"]).astype(str),
+        "date":          pd.to_datetime(raw["DT_SALE"], format="%Y%m%d"),
+        "hour":          pd.to_numeric(tstr.str[8:10], errors="coerce").fillna(0).astype(int),
+        "minute":        pd.to_numeric(tstr.str[10:12], errors="coerce").fillna(0).astype(int),
+        "item_id":       raw["CD_ITEM"].astype(str),
+        "qty":           pd.to_numeric(raw["QT_SALE"], errors="coerce").fillna(0).astype(int),
+        "unit_price":    pd.to_numeric(raw["UM"], errors="coerce").fillna(0.0),
+        "paid":          pd.to_numeric(raw["AM_PAYMENT"], errors="coerce").fillna(0.0),
+        "discount_amt":  amt,
+        "discount_code": code,
+        "label":         code.map(classify_code).where(amt > 0, "none"),
+        "is_set":        raw["CD_USERDEF2"].astype(str).str.startswith("ST"),
+    })
+    return DiscountSales(rows=rows.reset_index(drop=True))
+
+
+def load_closing_returns_v2(
+    parquet_path: Path | str = CLEAN_PARQUET_DEFAULT,
+    store_code: str = _GW_STORE_CODE,
+) -> pd.DataFrame:
+    """신규 클린 parquet → 마감할인 반품(판매구분=1 + closing) (item_id, date, ret_qty)."""
+    from bakery.data.bonavi_loader import _aggregate_returns
+
+    cols = ["CD_PARTNER", "DT_SALE", "CD_ITEM", "QT_SALE", "AM_DC",
+            "CD_USERDEF1", "CD_USERDEF2", "SALES_FG"]
+    raw = pd.read_parquet(parquet_path, columns=cols)
+    for c in ("CD_PARTNER", "CD_ITEM", "CD_USERDEF1", "CD_USERDEF2", "SALES_FG", "DT_SALE"):
+        raw[c] = raw[c].astype("string").str.strip()
+    ret = raw[(raw["CD_PARTNER"] == store_code) & (raw["SALES_FG"] == "1")
+              & (raw["CD_USERDEF2"] == "SS")].copy()
+    if ret.empty:
+        return pd.DataFrame({"item_id": [], "date": [], "ret_qty": []})
+    code = ret["CD_USERDEF1"].fillna("").astype(str).str.strip()
+    amt = pd.to_numeric(ret["AM_DC"], errors="coerce").fillna(0.0)
+    label = code.map(classify_code).where(amt > 0, "none")
+    closing = ret[label == "closing"]
+    if closing.empty:
+        return pd.DataFrame({"item_id": [], "date": [], "ret_qty": []})
+    lines = pd.DataFrame({
+        "item_id": closing["CD_ITEM"].astype(str),
+        "date": pd.to_datetime(closing["DT_SALE"], format="%Y%m%d"),
+        "qty": pd.to_numeric(closing["QT_SALE"], errors="coerce").fillna(0),
+    })
+    return _aggregate_returns(lines)
+
+
+# ---------------------------------------------------------------------------
 # Aggregations
 # ---------------------------------------------------------------------------
 
