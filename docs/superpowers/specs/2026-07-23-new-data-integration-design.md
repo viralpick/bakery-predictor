@@ -84,6 +84,15 @@ Phase 3  온톨로지/액션 편입 + 종합
 - **전향 4주 비교** → 컷오프 2026-06-30로 불가, 실시간 피드 필요 (이번 범위 밖).
 - **proxy 타당성** → Phase 0 게이트 A에서 실측 판정. 약하면 T5 축소.
 
+## Phase 1 실행 결과 (2026-07-23)
+
+- 신규 모듈 `src/bakery/data/bonavi_loader_v2.py`: `convert_sales_to_parquet`(per-sheet 값판별 스왑 교정) + `load_items_v2`(0526 한글 마스터, 타깃=Y−salad) + `load_sales_v2`/`load_returns_v2`/`load_receipts_v2` + `build_v2`. 집계·stockout·potential_demand는 `bonavi_loader` 재사용.
+- 클린 캐시 `data/internal/sales_lines_clean.parquet`(77M) 생성. converter 원본 xlsx에서 재현 검증 완료.
+- **정합성 대조 (v2 daily vs 기존 canonical, 광교 2021-2025)**: 공통 139품목 sold_units **(item,date) 100.00% 정확 일치, |diff|=0**, is_stockout rate 0.605=0.605. → ingestion·집계·반품·stockout 재정의 정확 재현.
+- 타깃 재정의 차이(의도): v2 166품목(라벨구간) = 공통 139 + 신규포함 27(옛 분류기 누락 Y 베이커리) − old-only 7(당일폐기=N 크리스마스특별/머핀, 335개, 올바른 제외). 2026 신제품 21개는 라벨구간 밖.
+- 테스트: `test_map_category_new_items`(17), `test_bonavi_loader_v2`(3, swap 유닛 + 타깃 정의).
+- **⚠️ 미배선(게이트 B 대기)**: `build_v2`는 임시 경로로만 검증. 기존 canonical(`bonavi_daily.parquet`)·loader·CLI에 **아직 배선 안 함** — 승인 후 진행.
+
 ## 성공 기준 (게이트 B)
 
 - Phase 0 산출로 타깃/비타깃 분리 규모와 proxy 타당성이 수치로 확정됨.
