@@ -100,10 +100,13 @@ def cmd_harness_run(
     spec = load_spec(config)
     console.print(f"[cyan]harness[/] {spec.name} forecaster={spec.forecaster} target={spec.target}")
     result = run_experiment(spec, out_dir=out, cache_dir=cache)
-    console.print(
-        f"[green]wrote[/] {out}/{result.name}/ "
-        f"(WAPE={result.metrics['wape']:.4f}, n={result.metrics['n_test']})"
-    )
+    console.print(f"[green]wrote[/] {out}/{result.name}/  (forecaster={list(result.runs)})")
+    table = Table(title=f"{result.name} — forecaster 비교")
+    for col in result.comparison.columns:
+        table.add_column(col)
+    for _, row in result.comparison.iterrows():
+        table.add_row(*[f"{v:.4f}" if isinstance(v, float) else str(v) for v in row])
+    console.print(table)
 
 
 @app.command("generate-data")
