@@ -83,10 +83,27 @@ from .models.lightgbm_regressor import (
 from .models.moving_average import MovingAverage
 from .models.seasonal_naive import SeasonalNaive
 from .models.stockout_classifier import StockoutClassifier
+from .harness import load_spec, run_experiment
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 console = Console()
 REPORTS_DIR = Path("reports")
+
+
+@app.command("harness-run")
+def cmd_harness_run(
+    config: Path,
+    out: Path = REPORTS_DIR,
+    cache: Path | None = None,
+) -> None:
+    """YAML 실험 config 1개를 실행한다 (harness 단일 표면)."""
+    spec = load_spec(config)
+    console.print(f"[cyan]harness[/] {spec.name} forecaster={spec.forecaster} target={spec.target}")
+    result = run_experiment(spec, out_dir=out, cache_dir=cache)
+    console.print(
+        f"[green]wrote[/] {out}/{result.name}/ "
+        f"(WAPE={result.metrics['wape']:.4f}, n={result.metrics['n_test']})"
+    )
 
 
 @app.command("generate-data")
