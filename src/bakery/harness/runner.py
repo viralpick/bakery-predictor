@@ -13,7 +13,7 @@ from bakery.features.category_aggregate import build_category_daily, build_featu
 from bakery.harness.backtest_core import metrics_from_preds, windowed_backtest
 from bakery.harness.config import ExperimentSpec
 from bakery.harness.event_priors import resolve_event_priors
-from bakery.harness.registry import is_runnable
+from bakery.harness.registry import is_runnable, build_forecaster
 
 STAGES: tuple[str, ...] = ("features", "backtest", "evaluate")
 
@@ -25,6 +25,13 @@ class RunResult:
     fold_metrics: pd.DataFrame
     metrics: dict
     resolved: dict
+
+
+@dataclass
+class ExperimentResult:
+    name: str
+    runs: dict[str, RunResult]
+    comparison: pd.DataFrame
 
 
 def _stage_key(fields: dict) -> str:
@@ -49,12 +56,12 @@ def _load_or_compute(stage, key, cache_dir, compute, trace):
 def run_experiment(
     spec: ExperimentSpec, *, out_dir: Path, cache_dir: Path | None = None,
     _trace: list | None = None,
-) -> RunResult:
+) -> ExperimentResult:
     trace = _trace if _trace is not None else []
     runnable = [f for f in spec.forecaster if is_runnable(f)]
     for f in spec.forecaster:
         if not is_runnable(f):
-            warnings.warn(f"forecaster '{f}'는 Phase 2+ 대상 — 이번 실행에서 스킵.", UserWarning)
+            warnings.warn(f"forecaster '{f}'는 실행 미지원(point/composite) — 스킵.", UserWarning)
     if not runnable:
         raise ValueError("실행 가능한 forecaster 없음(category_total/distributional_total 필요).")
 
@@ -66,25 +73,35 @@ def run_experiment(
         return build_features(cd, target_col=spec.target)
 
     feat = _load_or_compute("features", feat_key, cache_dir, _feat, trace)
-
     events, lunar = resolve_event_priors(spec.event_priors) if "event_prior" in spec.layers else (None, None)
-    trace.append(("backtest", "run"))
-    bt = windowed_backtest(
-        feat, window_days=spec.window.window_days, target_col=spec.target,
-        n_folds=spec.window.n_folds, horizon_days=spec.window.horizon_days,
-        production_q=spec.production_q, alpha=spec.alpha,
-        events=events, lunar_events=lunar,
-    )
-    trace.append(("evaluate", "run"))
-    metrics = metrics_from_preds(bt.predictions)
 
     out = out_dir / spec.name
     out.mkdir(parents=True, exist_ok=True)
     resolved = spec.model_dump()
-    (out / "config_resolved.yaml").write_text(yaml.safe_dump(resolved, allow_unicode=True), encoding="utf-8")
-    bt.predictions.to_csv(out / "predictions.csv", index=False)
-    bt.folds.to_csv(out / "fold_results.csv", index=False)
-    (out / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    (out / "config_resolved.yaml").write_text(
+        yaml.safe_dump(resolved, allow_unicode=True), encoding="utf-8")
 
-    return RunResult(name=spec.name, predictions=bt.predictions, fold_metrics=bt.folds,
-                     metrics=metrics, resolved=resolved)
+    runs: dict[str, RunResult] = {}
+    rows = []
+    for fname in runnable:
+        fc = build_forecaster(fname)
+        trace.append((f"backtest:{fname}", "run"))
+        bt = windowed_backtest(
+            feat, window_days=spec.window.window_days, target_col=spec.target,
+            n_folds=spec.window.n_folds, horizon_days=spec.window.horizon_days,
+            production_q=spec.production_q, alpha=spec.alpha,
+            events=events, lunar_events=lunar, forecaster=fc,
+        )
+        metrics = metrics_from_preds(bt.predictions)
+        fout = out / fname
+        fout.mkdir(parents=True, exist_ok=True)
+        bt.predictions.to_csv(fout / "predictions.csv", index=False)
+        bt.folds.to_csv(fout / "fold_results.csv", index=False)
+        (fout / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+        runs[fname] = RunResult(name=fname, predictions=bt.predictions,
+                                fold_metrics=bt.folds, metrics=metrics, resolved=resolved)
+        rows.append({"forecaster": fname, **metrics})
+
+    comparison = pd.DataFrame(rows)
+    comparison.to_csv(out / "comparison.csv", index=False)
+    return ExperimentResult(name=spec.name, runs=runs, comparison=comparison)

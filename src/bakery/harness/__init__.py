@@ -5,7 +5,7 @@ from bakery.harness.config import (
 from bakery.harness.event_priors import STORE_EVENT_PRIORS, resolve_event_priors
 from bakery.harness.backtest_core import windowed_backtest, metrics_from_preds
 from bakery.harness.registry import ForecasterKind, kind_of, LAYER_NAMES, is_runnable, build_forecaster
-from bakery.harness.runner import RunResult, run_experiment, STAGES
+from bakery.harness.runner import RunResult, ExperimentResult, run_experiment, STAGES
 from bakery.harness.forecasters import (
     Forecaster, FittedForecaster, CategoryTotalForecaster, DistributionalTotalForecaster,
 )
@@ -16,6 +16,6 @@ __all__ = [
     "STORE_EVENT_PRIORS", "resolve_event_priors",
     "windowed_backtest", "metrics_from_preds",
     "ForecasterKind", "kind_of", "LAYER_NAMES", "is_runnable", "build_forecaster",
-    "RunResult", "run_experiment", "STAGES",
+    "RunResult", "ExperimentResult", "run_experiment", "STAGES",
     "Forecaster", "FittedForecaster", "CategoryTotalForecaster", "DistributionalTotalForecaster",
 ]
