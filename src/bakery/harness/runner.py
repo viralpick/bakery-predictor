@@ -13,7 +13,7 @@ from bakery.features.category_aggregate import build_category_daily, build_featu
 from bakery.harness.backtest_core import metrics_from_preds, windowed_backtest
 from bakery.harness.config import ExperimentSpec
 from bakery.harness.event_priors import resolve_event_priors
-from bakery.harness.registry import is_supported_phase1
+from bakery.harness.registry import is_runnable
 
 STAGES: tuple[str, ...] = ("features", "backtest", "evaluate")
 
@@ -51,12 +51,12 @@ def run_experiment(
     _trace: list | None = None,
 ) -> RunResult:
     trace = _trace if _trace is not None else []
-    runnable = [f for f in spec.forecaster if is_supported_phase1(f)]
+    runnable = [f for f in spec.forecaster if is_runnable(f)]
     for f in spec.forecaster:
-        if not is_supported_phase1(f):
+        if not is_runnable(f):
             warnings.warn(f"forecaster '{f}'는 Phase 2+ 대상 — 이번 실행에서 스킵.", UserWarning)
     if not runnable:
-        raise ValueError("Phase 1에서 실행 가능한 forecaster 없음(category_total 필요).")
+        raise ValueError("실행 가능한 forecaster 없음(category_total/distributional_total 필요).")
 
     feat_key = _stage_key({"source": spec.data.source, "store": spec.data.store,
                            "target": spec.target, "alpha": spec.alpha})

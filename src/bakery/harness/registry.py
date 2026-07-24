@@ -28,6 +28,26 @@ def kind_of(name: str) -> ForecasterKind:
     return _KIND[name]
 
 
-def is_supported_phase1(name: str) -> bool:
-    """Phase 1은 category_total 경로만 실행(나머지는 taxonomy 등록만)."""
-    return kind_of(name) is ForecasterKind.CATEGORY_TOTAL
+_RUNNABLE_KINDS: frozenset[ForecasterKind] = frozenset(
+    {ForecasterKind.CATEGORY_TOTAL, ForecasterKind.DISTRIBUTIONAL}
+)
+
+
+def is_runnable(name: str) -> bool:
+    """실행 가능한 forecaster(category_total/distributional_total)면 True. 미등록/미지원=False."""
+    try:
+        return kind_of(name) in _RUNNABLE_KINDS
+    except KeyError:
+        return False
+
+
+def build_forecaster(name: str):
+    """forecaster 이름 → 어댑터 인스턴스. 미등록 KeyError."""
+    from bakery.harness.forecasters import (
+        CategoryTotalForecaster, DistributionalTotalForecaster,
+    )
+    factories = {
+        "category_total": CategoryTotalForecaster,
+        "distributional_total": DistributionalTotalForecaster,
+    }
+    return factories[name]()
