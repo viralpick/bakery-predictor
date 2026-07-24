@@ -2,116 +2,112 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** cli.py 안에 갇힌 backtest 오케스트레이션 스파인을 `src/bakery/harness/`로 추출하고, YAML config 1파일=1실험으로 실행하는 단일 표면을 만든다.
+**Goal:** 발행 헤드라인 백테스트 엔진(`scripts/store_predictive_power.windowed_backtest` = 카테고리 총량 + event_prior)을 `src/bakery/harness/`로 추출하고, YAML config 1파일=1실험으로 실행하는 단일 표면을 만든다.
 
-**Architecture:** `src/bakery`(프리미티브)는 재구현하지 않고 호출만 한다. `harness/config.py`가 YAML→`ExperimentSpec`(canonical 강제+경고), `harness/registry.py`가 forecaster/layer 이름→객체(kind 분류), `harness/runner.py`가 spec→단계별 캐시 실행→`RunResult`. 완료 기준은 광교 lightgbm_v2 adjusted_demand backtest 숫자 재현.
+**Architecture:** canonical = **category_total + event_prior**(총량 granularity). `windowed_backtest` 코어를 harness로 추출하고 원본 스크립트는 harness 코어를 import하는 래퍼로 전환(단일 출처). config.py가 YAML→`ExperimentSpec`(canonical 강제+경고), registry가 forecaster 이름→kind, runner가 spec→feat build→backtest_core→`RunResult`. 완료 기준은 추출 코어가 원본 `windowed_backtest`와 예측값 정확일치(엔진 동등성).
 
-**Tech Stack:** Python 3.12, pydantic v2(설정 검증), PyYAML, pandas, typer(CLI), pytest. 기존 `src/bakery/evaluation`(run_backtest/generate_time_splits/metrics)·`models`·`data.loader` 재사용.
+**Tech Stack:** Python 3.12, pydantic v2, PyYAML, pandas, numpy, lightgbm, typer, pytest. 기존 `src/bakery/models/category_total`(`fit_category_total`, random_state=42), `models/event_prior`(`EventLevelPrior`), `features/category_aggregate`(`build_category_daily`/`build_features`) 재사용.
 
 ## Global Constraints
 
-- **측정헌장** (docs/superpowers/specs/2026-07-24-harness-backbone-design.md §5): target 기본=`adjusted_demand`; `potential_demand`는 `allow_deprecated: true` 없으면 ERROR; metric 기본 6종(wape, wpe, waste_rate, soldout_median, stockout_item_rate, shortfall_day_rate); MAPE 단독 지정 시 경고.
-- **Time leakage 금지**: random split 스키마 거부. window.scheme ∈ {expanding, rolling}만.
-- **재구현 금지**: harness는 `src/bakery` 심볼을 호출만 한다. 모델/피처/평가 로직을 harness에 복제하지 않는다.
-- **테스트 단언**: 기대값 아는 단언은 정확값 `==`. 부동소수는 `pytest.approx`.
-- **pytest 실행**: 이 repo addopts에 `-q` 있음. 카운트 필요 시 `uv run pytest --color=no` (추가 `-q` 금지 — passed 요약 사라짐).
-- Phase 1 범위는 **스파인만**. report.py / viz / eda.py는 Phase 2~3 (본 계획 밖).
+- **canonical 스택** (docs/superpowers/specs/2026-07-24-harness-backbone-design.md §4): 기본 forecaster=`[category_total, distributional_total]`, layers=`[event_prior]`. category_total = 총량 granularity(item 배분 아님). lightgbm v0~v3 = 비교용 보조.
+- **카테고리 타깃 컬럼**: `adjusted_demand_unit` (category level). item-level의 `adjusted_demand`와 다름 — 혼동 금지.
+- **헤드라인 파라미터** (원본 상수, 정확 보존): `ALPHA=0.8`, `PROD_Q=0.85`, `DEFAULT_WINDOW_DAYS=730`, `MAIN_FOLDS=52`, `HORIZON=7`, `MIN_TRAIN_ROWS=60`, `TARGET="adjusted_demand_unit"`.
+- **event_prior leakage 규칙** (헌장 1번): prior는 train window가 아니라 **pre-test 전체 history**(`df["date"] < test_start_date`)로 fit. blend는 expected·production 둘 다 보정.
+- **측정헌장**: target 기본=카테고리 `adjusted_demand_unit`; `potential_demand`는 `allow_deprecated: true` 없으면 ERROR; metric 기본 6종.
+- **재구현 금지**: harness는 `src/bakery` 심볼을 호출만. `windowed_backtest`는 **추출**(로직 복제 아님) — 원본은 harness 코어를 import.
+- **테스트 단언**: 기대값 아는 단언은 정확값 `==`, 부동소수는 `np.testing.assert_allclose(rtol=1e-9)`.
+- **pytest 실행**: 이 repo addopts에 `-q` 있음. 카운트 필요 시 `uv run pytest --color=no` (추가 `-q` 금지).
+- **STORE_EVENT_PRIORS 키**: 원본은 한글 라벨("광교"). harness preset은 영문 키("gwangyo") + 데이터 store_id "store_gw01".
+- Phase 1 범위는 **스파인만**. report.py/eda.py/viz는 Phase 2~3.
 
 ---
 
 ## File Structure
 
-- `src/bakery/harness/__init__.py` — 공개 심볼 re-export (ExperimentSpec, load_spec, run_experiment, RunResult)
-- `src/bakery/harness/config.py` — `ExperimentSpec`(pydantic) + `load_spec(path)` + canonical 검증/경고
-- `src/bakery/harness/registry.py` — `ForecasterKind` enum + `resolve_forecasters(names, target)` + `resolve_layers(names)` + kind 조회
-- `src/bakery/harness/runner.py` — `RunResult` dataclass + `run_experiment(spec, out_dir, cache_dir)` (단계 캐시)
-- `src/bakery/features/enrich.py` — `enrich_daily(ds, variants)` (cli._enrich_if_needed 이동, 순환 import 방지)
-- `src/bakery/cli.py` — `harness-run` 커맨드 추가 (thin wrapper) + enrich 재-export
-- `experiments/gwangyo_default.yaml` — canonical 재현용 config
-- `tests/harness/test_config.py` — 스키마·강제·경고
-- `tests/harness/test_registry.py` — 이름→객체·kind 분류
-- `tests/harness/test_runner.py` — 단계 캐시·재개·RunResult 구조
-- `tests/harness/test_reproduce_backtest.py` — ★acceptance: 기존 backtest 숫자 재현
+- `src/bakery/harness/__init__.py` — 공개 심볼 re-export
+- `src/bakery/harness/config.py` — `ExperimentSpec`(pydantic) + `load_spec` + canonical 검증/경고
+- `src/bakery/harness/event_priors.py` — 특수일 상수(XMAS/CHILDRENS/CHUSEOK/SEOLLAL) + `STORE_EVENT_PRIORS` preset + `resolve_event_priors`
+- `src/bakery/harness/backtest_core.py` — `windowed_backtest`/`metrics_from_preds` 추출(단일 출처)
+- `src/bakery/harness/registry.py` — `ForecasterKind` + `kind_of` + `is_supported_phase1`
+- `src/bakery/harness/runner.py` — `RunResult` + `run_experiment`(feat build→core→result, 캐시)
+- `src/bakery/cli.py` — `harness-run` 커맨드
+- `scripts/store_predictive_power.py` — `windowed_backtest`를 harness 코어 import 래퍼로 전환
+- `experiments/gwangyo_default.yaml`
+- `tests/harness/test_config.py`, `test_event_priors.py`, `test_backtest_core_equivalence.py`(★acceptance), `test_registry.py`, `test_runner.py`, `test_cli_harness.py`
 
 ---
 
-## Task 1: ExperimentSpec 스키마 + canonical 강제
+## Task 1: ExperimentSpec 스키마 + canonical 강제 (카테고리 기본)
 
 **Files:**
-- Create: `src/bakery/harness/__init__.py`
-- Create: `src/bakery/harness/config.py`
+- Create: `src/bakery/harness/__init__.py`, `src/bakery/harness/config.py`
 - Test: `tests/harness/test_config.py`
 
 **Interfaces:**
 - Produces:
-  - `class DataSpec(source: Literal["real","synthetic","parquet"], store: str | None = None)`
-  - `class WindowSpec(scheme: Literal["expanding","rolling"] = "expanding", n_splits: int = 8, horizon_days: int = 7, step_days: int = 7)`
-  - `class ExperimentSpec(name: str, data: DataSpec, target: str = "adjusted_demand", forecaster: list[str], layers: list[str] = [], window: WindowSpec, metrics: list[str], closing_alpha: float = 0.8, allow_deprecated: bool = False)`
-  - `DEFAULT_FORECASTERS: list[str] = ["lightgbm_v2", "distributional_total"]`
-  - `DEFAULT_LAYERS: list[str] = ["event_prior"]`
-  - `DEFAULT_METRICS: list[str] = ["wape","wpe","waste_rate","soldout_median","stockout_item_rate","shortfall_day_rate"]`
-  - `load_spec(path: str | Path) -> ExperimentSpec` — YAML 파싱 + 검증, 경고는 `warnings.warn`
-  - `class SpecError(ValueError)` — 강제 규칙 위반
+  - `class DataSpec(source: Literal["real","synthetic","parquet"], store: str = "store_gw01")`
+  - `class WindowSpec(scheme: Literal["expanding","rolling"] = "expanding", n_folds: int = 52, window_days: int = 730, horizon_days: int = 7)`
+  - `class ExperimentSpec(name, data, target="adjusted_demand_unit", forecaster, layers, event_priors="gwangyo", window, metrics, alpha=0.8, production_q=0.85, allow_deprecated=False)`
+  - `DEFAULT_FORECASTERS=["category_total","distributional_total"]`, `DEFAULT_LAYERS=["event_prior"]`, `DEFAULT_METRICS=[6종]`
+  - `load_spec(path) -> ExperimentSpec`, `class SpecError(ValueError)`
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/harness/test_config.py
-import warnings
-import pytest
-import yaml
+import pytest, yaml
 from bakery.harness.config import (
     ExperimentSpec, load_spec, SpecError,
     DEFAULT_FORECASTERS, DEFAULT_LAYERS, DEFAULT_METRICS,
 )
 
 
-def _write(tmp_path, body: dict):
+def _write(tmp_path, body):
     p = tmp_path / "exp.yaml"
     p.write_text(yaml.safe_dump(body), encoding="utf-8")
     return p
 
 
-def test_defaults_applied_when_omitted(tmp_path):
-    spec = load_spec(_write(tmp_path, {"name": "x", "data": {"source": "real", "store": "gwangyo"}}))
-    assert spec.target == "adjusted_demand"
-    assert spec.forecaster == DEFAULT_FORECASTERS
-    assert spec.layers == DEFAULT_LAYERS
-    assert spec.metrics == DEFAULT_METRICS
-    assert spec.window.scheme == "expanding"
-    assert spec.closing_alpha == 0.8
+def test_defaults_are_category_stack(tmp_path):
+    spec = load_spec(_write(tmp_path, {"name": "x", "data": {"source": "real"}}))
+    assert spec.forecaster == DEFAULT_FORECASTERS       # [category_total, distributional_total]
+    assert spec.layers == DEFAULT_LAYERS                # [event_prior]
+    assert spec.target == "adjusted_demand_unit"
+    assert spec.data.store == "store_gw01"
+    assert spec.window.n_folds == 52
+    assert spec.window.window_days == 730
+    assert spec.alpha == 0.8
+    assert spec.event_priors == "gwangyo"
 
 
-def test_potential_demand_rejected_without_override(tmp_path):
+def test_potential_demand_rejected(tmp_path):
     body = {"name": "x", "data": {"source": "real"}, "target": "potential_demand"}
     with pytest.raises(SpecError, match="potential_demand"):
         load_spec(_write(tmp_path, body))
 
 
-def test_potential_demand_allowed_with_flag(tmp_path):
-    body = {"name": "x", "data": {"source": "synthetic"},
-            "target": "potential_demand", "allow_deprecated": True}
-    spec = load_spec(_write(tmp_path, body))
-    assert spec.target == "potential_demand"
-
-
-def test_random_split_scheme_rejected(tmp_path):
-    body = {"name": "x", "data": {"source": "real"}, "window": {"scheme": "random"}}
+def test_random_split_rejected(tmp_path):
     with pytest.raises(SpecError):
-        load_spec(_write(tmp_path, body))
+        load_spec(_write(tmp_path, {"name": "x", "data": {"source": "real"},
+                                    "window": {"scheme": "random"}}))
 
 
-def test_mape_only_metrics_warns(tmp_path):
-    body = {"name": "x", "data": {"source": "real"}, "metrics": ["mape"]}
+def test_mape_only_warns(tmp_path):
     with pytest.warns(UserWarning, match="MAPE"):
-        spec = load_spec(_write(tmp_path, body))
-    assert spec.metrics == ["mape"]
+        load_spec(_write(tmp_path, {"name": "x", "data": {"source": "real"}, "metrics": ["mape"]}))
 
 
-def test_deprecated_forecaster_warns(tmp_path):
-    body = {"name": "x", "data": {"source": "real"}, "forecaster": ["conformal_interval"]}
-    with pytest.warns(UserWarning, match="DEPRECATED"):
+def test_event_prior_without_preset_warns(tmp_path):
+    body = {"name": "x", "data": {"source": "real"}, "layers": ["event_prior"], "event_priors": None}
+    with pytest.warns(UserWarning, match="event_prior"):
         load_spec(_write(tmp_path, body))
+
+
+def test_single_forecaster_string_wrapped(tmp_path):
+    spec = load_spec(_write(tmp_path, {"name": "x", "data": {"source": "real"},
+                                       "forecaster": "category_total"}))
+    assert spec.forecaster == ["category_total"]
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -145,7 +141,7 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
-DEFAULT_FORECASTERS: list[str] = ["lightgbm_v2", "distributional_total"]
+DEFAULT_FORECASTERS: list[str] = ["category_total", "distributional_total"]
 DEFAULT_LAYERS: list[str] = ["event_prior"]
 DEFAULT_METRICS: list[str] = [
     "wape", "wpe", "waste_rate", "soldout_median",
@@ -160,28 +156,30 @@ class SpecError(ValueError):
 
 class DataSpec(BaseModel):
     source: Literal["real", "synthetic", "parquet"]
-    store: str | None = None
+    store: str = "store_gw01"
 
 
 class WindowSpec(BaseModel):
     scheme: Literal["expanding", "rolling"] = "expanding"
-    n_splits: int = 8
+    n_folds: int = 52
+    window_days: int = 730
     horizon_days: int = 7
-    step_days: int = 7
 
 
 class ExperimentSpec(BaseModel):
     name: str
     data: DataSpec
-    target: str = "adjusted_demand"
+    target: str = "adjusted_demand_unit"
     forecaster: list[str] = Field(default_factory=lambda: list(DEFAULT_FORECASTERS))
     layers: list[str] = Field(default_factory=lambda: list(DEFAULT_LAYERS))
+    event_priors: str | None = "gwangyo"
     window: WindowSpec = Field(default_factory=WindowSpec)
     metrics: list[str] = Field(default_factory=lambda: list(DEFAULT_METRICS))
-    closing_alpha: float = 0.8
+    alpha: float = 0.8
+    production_q: float = 0.85
     allow_deprecated: bool = False
 
-    @field_validator("forecaster", mode="before")
+    @field_validator("forecaster", "layers", mode="before")
     @classmethod
     def _wrap_single(cls, v):
         return [v] if isinstance(v, str) else v
@@ -191,7 +189,7 @@ def load_spec(path: str | Path) -> ExperimentSpec:
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     try:
         spec = ExperimentSpec(**raw)
-    except Exception as exc:  # pydantic ValidationError → SpecError
+    except Exception as exc:
         raise SpecError(str(exc)) from exc
     _enforce(spec)
     return spec
@@ -199,18 +197,17 @@ def load_spec(path: str | Path) -> ExperimentSpec:
 
 def _enforce(spec: ExperimentSpec) -> None:
     if spec.target == "potential_demand" and not spec.allow_deprecated:
-        raise SpecError(
-            "target=potential_demand는 오염 소스라 금지. allow_deprecated: true 필요 "
-            "(docs/.../2026-07-10-potential-demand-audit-design.md)"
-        )
+        raise SpecError("target=potential_demand는 오염 소스라 금지. allow_deprecated: true 필요.")
     if spec.metrics == ["mape"]:
         warnings.warn("MAPE 단독은 희소 품목에서 폭발한다. WAPE 병기 권장.", UserWarning)
+    if "event_prior" in spec.layers and spec.event_priors is None:
+        warnings.warn("event_prior layer가 있으나 event_priors 프리셋 키 미지정.", UserWarning)
     for name in spec.forecaster:
         if name in DEPRECATED_FORECASTERS:
             warnings.warn(f"{name}는 DEPRECATED forecaster.", UserWarning)
 ```
 
-Note: `window.scheme: "random"`은 `Literal["expanding","rolling"]`이라 pydantic이 거부 → `load_spec`이 `SpecError`로 변환하므로 `test_random_split_scheme_rejected` 통과.
+Note: `window.scheme: "random"`은 `Literal`이라 pydantic이 거부 → `SpecError`로 변환.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -221,262 +218,502 @@ Expected: PASS (6 passed)
 
 ```bash
 git add src/bakery/harness/__init__.py src/bakery/harness/config.py tests/harness/test_config.py
-git commit -m "feat(harness): ExperimentSpec YAML 스키마 + canonical 강제/경고"
+git commit -m "feat(harness): ExperimentSpec — 카테고리 총량 canonical 기본 + 강제/경고"
 ```
 
 ---
 
-## Task 2: Registry — 이름→객체 + kind 분류
+## Task 2: event_priors.py — STORE_EVENT_PRIORS 프리셋 승격
+
+**Files:**
+- Create: `src/bakery/harness/event_priors.py`
+- Modify: `src/bakery/harness/__init__.py`
+- Test: `tests/harness/test_event_priors.py`
+
+**Interfaces:**
+- Produces:
+  - `STORE_EVENT_PRIORS: dict[str, dict]` — 영문 키(`"gwangyo"`, `"samsung"`, `"mecenatpolis"`, `"gwanghwamun"`)
+  - `resolve_event_priors(key: str | None) -> tuple[dict | None, dict | None]` — `(events, lunar_events)`. None이면 `(None,None)`. 미등록 키 `KeyError`.
+
+**VERIFY 먼저** — 원본 특수일 상수 정의를 복사한다:
+Run:
+```bash
+uv run python -c "import sys; sys.path.insert(0,'scripts'); import store_predictive_power as s; print('XMAS', s.XMAS); print('CHILDRENS', s.CHILDRENS); print('CHUSEOK', s.CHUSEOK); print('SEOLLAL', s.SEOLLAL); print('PRIORS', s.STORE_EVENT_PRIORS)"
+```
+출력 dict를 `event_priors.py`에 **그대로** 복사(수기 재작성 금지). 키 매핑: 광교→gwangyo, 삼성타운→samsung, 메세나폴리스→mecenatpolis, 광화문→gwanghwamun.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/harness/test_event_priors.py
+import sys
+import pytest
+from bakery.harness.event_priors import STORE_EVENT_PRIORS, resolve_event_priors
+
+
+def test_gwangyo_preset_matches_script():
+    """harness 프리셋이 원본 scripts 정의와 동일해야 한다(단일 출처 승격)."""
+    sys.path.insert(0, "scripts")
+    import store_predictive_power as s
+    script_gw = s.STORE_EVENT_PRIORS["광교"]
+    events, lunar = resolve_event_priors("gwangyo")
+    assert events == script_gw["events"]
+    assert lunar == script_gw["lunar_events"]
+
+
+def test_resolve_none_returns_none_pair():
+    assert resolve_event_priors(None) == (None, None)
+
+
+def test_unknown_key_raises():
+    with pytest.raises(KeyError):
+        resolve_event_priors("nonexistent")
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest tests/harness/test_event_priors.py --color=no`
+Expected: FAIL — `ModuleNotFoundError: bakery.harness.event_priors`
+
+- [ ] **Step 3: Write implementation** (VERIFY 출력값을 채워 넣는다 — 아래는 골격, `{...}`는 VERIFY 실제값으로 교체)
+
+```python
+# src/bakery/harness/event_priors.py
+"""특수일 EventLevelPrior 프리셋 (scripts/store_predictive_power.py에서 승격, 단일 출처)."""
+from __future__ import annotations
+
+# ↓ VERIFY 출력값을 그대로 붙여넣기 (실제 값으로 교체)
+XMAS = {...}          # VERIFY: s.XMAS
+CHILDRENS = {...}     # VERIFY: s.CHILDRENS
+CHUSEOK = {...}       # VERIFY: s.CHUSEOK
+SEOLLAL = {...}       # VERIFY: s.SEOLLAL
+
+STORE_EVENT_PRIORS: dict[str, dict] = {
+    "gwangyo":      {"events": {**XMAS, **CHILDRENS}, "lunar_events": dict(CHUSEOK)},
+    "samsung":      {"events": dict(XMAS), "lunar_events": {}},
+    "mecenatpolis": {"events": dict(XMAS), "lunar_events": dict(SEOLLAL)},
+    "gwanghwamun":  {"events": dict(XMAS), "lunar_events": {}},
+}
+
+
+def resolve_event_priors(key: str | None) -> tuple[dict | None, dict | None]:
+    if key is None:
+        return None, None
+    cfg = STORE_EVENT_PRIORS[key]
+    return cfg.get("events"), cfg.get("lunar_events")
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `uv run pytest tests/harness/test_event_priors.py --color=no`
+Expected: PASS (3 passed). 실패 시 VERIFY 출력과 붙여넣은 값 diff.
+
+- [ ] **Step 5: Update __init__ + commit**
+
+```python
+# __init__.py append
+from bakery.harness.event_priors import STORE_EVENT_PRIORS, resolve_event_priors
+```
+Add to `__all__`: `"STORE_EVENT_PRIORS", "resolve_event_priors"`.
+
+```bash
+git add src/bakery/harness/event_priors.py src/bakery/harness/__init__.py tests/harness/test_event_priors.py
+git commit -m "feat(harness): STORE_EVENT_PRIORS 프리셋 승격 (단일 출처)"
+```
+
+---
+
+## Task 3: ★backtest_core.py — windowed_backtest 추출 + 엔진 동등성 (hard gate)
+
+**Files:**
+- Create: `src/bakery/harness/backtest_core.py`
+- Modify: `src/bakery/harness/__init__.py`
+- Test: `tests/harness/test_backtest_core_equivalence.py`
+
+**Interfaces:**
+- Consumes: `bakery.models.category_total.fit_category_total`, `bakery.models.event_prior.EventLevelPrior`, `bakery.models.category_total.BacktestResult`.
+- Produces:
+  - `windowed_backtest(df, *, window_days, target_col="adjusted_demand_unit", n_folds=52, horizon_days=7, production_q=0.85, alpha=0.8, events=None, lunar_events=None, min_train_rows=60) -> BacktestResult`
+  - `metrics_from_preds(p) -> dict`
+  - 모듈 상수 `MIN_TRAIN_ROWS=60`
+
+**목표:** 추출한 `windowed_backtest`가 원본 `scripts/store_predictive_power.windowed_backtest`와 **예측값 정확일치**. Phase 1 hard gate — PASS 없이 진행 불가.
+
+**전제 (VERIFY 완료 2026-07-24):** `fit_category_total` random_state=42, `EventLevelPrior` 비랜덤 → 결정적. real 데이터 존재(store_gw01). 정확일치 유효.
+
+- [ ] **Step 1: Write the failing equivalence test**
+
+```python
+# tests/harness/test_backtest_core_equivalence.py
+import sys
+import numpy as np
+
+from bakery.features.category_aggregate import build_category_daily, build_features
+from bakery.harness.event_priors import resolve_event_priors
+
+
+def _feat():
+    cd = build_category_daily(alpha=0.8)                    # None→canonical 3cat
+    return build_features(cd, target_col="adjusted_demand_unit")
+
+
+def test_core_matches_script_windowed_backtest():
+    sys.path.insert(0, "scripts")
+    import store_predictive_power as s
+    from bakery.harness.backtest_core import windowed_backtest as core_wb
+
+    feat = _feat()
+    events, lunar = resolve_event_priors("gwangyo")
+
+    legacy = s.windowed_backtest(
+        feat, window_days=s.DEFAULT_WINDOW_DAYS, n_folds=s.MAIN_FOLDS,
+        events=events, lunar_events=lunar,
+    )
+    got = core_wb(
+        feat, window_days=730, n_folds=52, production_q=0.85, alpha=0.8,
+        events=events, lunar_events=lunar,
+    )
+    lp = legacy.predictions.sort_values(["fold", "date"]).reset_index(drop=True)
+    gp = got.predictions.sort_values(["fold", "date"]).reset_index(drop=True)
+    assert len(lp) == len(gp)
+    np.testing.assert_allclose(gp["expected"].to_numpy(), lp["expected"].to_numpy(), rtol=1e-9)
+    np.testing.assert_allclose(gp["production"].to_numpy(), lp["production"].to_numpy(), rtol=1e-9)
+    np.testing.assert_allclose(gp["actual"].to_numpy(), lp["actual"].to_numpy(), rtol=1e-9)
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest tests/harness/test_backtest_core_equivalence.py --color=no`
+Expected: FAIL — `ModuleNotFoundError: bakery.harness.backtest_core`
+
+- [ ] **Step 3: Extract windowed_backtest into backtest_core.py**
+
+원본 `scripts/store_predictive_power.py:106-197`의 `windowed_backtest` + `metrics_from_preds`를 **로직 변경 없이** 옮긴다. 모듈 상수(`HORIZON`, `PROD_Q`, `ALPHA`)는 함수 인자 기본값으로 흡수(값 동일).
+
+```python
+# src/bakery/harness/backtest_core.py
+"""windowed_backtest 코어 — 카테고리 총량 + event_prior (발행 헤드라인 엔진).
+
+scripts/store_predictive_power.py에서 추출한 단일 출처. leakage-safe:
+prior는 pre-test 전체 history로 fit (train window보다 김).
+"""
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+
+from bakery.models.category_total import BacktestResult, fit_category_total
+from bakery.models.event_prior import EventLevelPrior
+
+MIN_TRAIN_ROWS = 60
+
+
+def windowed_backtest(
+    df: pd.DataFrame, *, window_days: int,
+    target_col: str = "adjusted_demand_unit", n_folds: int = 52,
+    horizon_days: int = 7, production_q: float = 0.85, alpha: float = 0.8,
+    events: dict | None = None, lunar_events: dict | None = None,
+    min_train_rows: int = MIN_TRAIN_ROWS,
+) -> BacktestResult:
+    df = df.sort_values("date").reset_index(drop=True).dropna(subset=[target_col]).copy()
+    df = df.dropna().reset_index(drop=True)
+    total = len(df)
+    test_size = horizon_days
+    if total <= n_folds * test_size + min_train_rows:
+        raise ValueError(f"Not enough data: total={total}, folds={n_folds}")
+
+    window = pd.Timedelta(days=window_days)
+    folds, preds = [], []
+    for k in range(n_folds):
+        test_end = total - k * test_size
+        test_start = test_end - test_size
+        test_df = df.iloc[test_start:test_end]
+        test_start_date = test_df["date"].iloc[0]
+        train_df = df[(df["date"] < test_start_date) & (df["date"] >= test_start_date - window)]
+        if len(train_df) < min_train_rows:
+            continue
+        model = fit_category_total(
+            train_df, target_col=target_col, alpha_demand=alpha, production_q=production_q,
+        )
+        exp_pred = model.predict_expected(test_df)
+        prod_pred = model.predict_production(test_df)
+        hist = df[df["date"] < test_start_date]     # leakage-safe: pre-test 전체
+        prior = EventLevelPrior(events=events, lunar_events=lunar_events).fit(hist, target_col=target_col)
+        exp_pred, prod_pred = prior.blend(test_df["date"].values, exp_pred, prod_pred)
+        actual = test_df[target_col].values
+        wape = np.abs(actual - exp_pred).sum() / max(np.abs(actual).sum(), 1)
+        folds.append(dict(
+            fold=k, n_train=len(train_df), n_test=len(test_df),
+            test_start=test_start_date, test_end=test_df["date"].iloc[-1], wape=wape,
+            wpe=(exp_pred - actual).sum() / max(actual.sum(), 1),
+            prod_pct_under=(prod_pred < actual).mean(),
+        ))
+        preds.append(pd.DataFrame({
+            "date": test_df["date"].values, "fold": k,
+            "actual": actual, "expected": exp_pred, "production": prod_pred,
+        }))
+    return BacktestResult(
+        folds=pd.DataFrame(folds).sort_values("fold").reset_index(drop=True),
+        predictions=pd.concat(preds, ignore_index=True),
+    )
+
+
+def metrics_from_preds(p: pd.DataFrame) -> dict:
+    actual, expected, prod = p["actual"], p["expected"], p["production"]
+    surplus = (prod - actual).clip(lower=0)
+    return {
+        "n_test": int(len(p)),
+        "wape": float(np.abs(actual - expected).sum() / max(np.abs(actual).sum(), 1)),
+        "wpe": float((expected - actual).sum() / max(actual.sum(), 1)),
+        "stockout_risk": float((prod < actual).mean()),
+        "surplus_mean_units": float(surplus.mean()),
+        "surplus_rate": float(surplus.sum() / max(actual.sum(), 1)),
+    }
+```
+
+⚠️ 원본과 **한 줄도 다르면 안 된다**(정확일치 게이트). `HORIZON=7`/`PROD_Q=0.85`/`ALPHA=0.8`이 인자 기본값으로 정확히 흡수됐는지, `fit_category_total` 호출 인자(`alpha_demand=alpha, production_q=production_q`)가 원본과 동일한지 대조.
+
+- [ ] **Step 4: Run equivalence test**
+
+Run: `uv run pytest tests/harness/test_backtest_core_equivalence.py --color=no`
+Expected: PASS. 불일치 시 원본 대비 diff(특히 fit 인자·prior fit history 범위·fold 루프 경계) 정밀 대조. **PASS 없이 다음 태스크 진행 금지.**
+
+- [ ] **Step 5: Update __init__ + commit**
+
+```python
+# __init__.py append
+from bakery.harness.backtest_core import windowed_backtest, metrics_from_preds
+```
+Add to `__all__`: `"windowed_backtest", "metrics_from_preds"`.
+
+```bash
+git add src/bakery/harness/backtest_core.py src/bakery/harness/__init__.py tests/harness/test_backtest_core_equivalence.py
+git commit -m "feat(harness): windowed_backtest 코어 추출 + 원본 엔진 동등성 검증"
+```
+
+---
+
+## Task 4: 원본 스크립트를 harness 코어 래퍼로 전환 (단일 출처)
+
+**Files:**
+- Modify: `scripts/store_predictive_power.py`
+- Test: (기존 회귀) `uv run pytest --color=no`
+
+**Interfaces:**
+- Consumes: `bakery.harness.backtest_core`.
+
+**목표:** 두 구현 공존 금지. 원본의 `windowed_backtest`/`metrics_from_preds` 정의를 harness import로 교체하되, **호출 시그니처는 원본 유지**(기존 호출부·weekly_overlay_series.py 불변).
+
+- [ ] **Step 1: Replace definitions with import**
+
+`scripts/store_predictive_power.py`에서 `windowed_backtest`/`metrics_from_preds` 함수 정의 본문을 삭제하고 상단 import에 추가:
+
+```python
+from bakery.harness.backtest_core import windowed_backtest, metrics_from_preds  # noqa: F401
+```
+
+`HORIZON`/`PROD_Q`/`ALPHA`/`MAIN_FOLDS`/`DEFAULT_WINDOW_DAYS`/`MIN_TRAIN_ROWS` 상수를 스크립트 다른 곳(find_optimal_* 등)에서도 참조하면 그 상수 정의는 **그대로 남긴다**(삭제 금지). harness 코어가 인자 기본값으로 흡수했으므로 값 동일.
+
+**VERIFY**: 원본 windowed_backtest 호출부의 키워드(events/lunar_events/production_q)가 harness 코어 시그니처와 일치하는지 확인.
+
+- [ ] **Step 2: Run full suite + weekly_overlay smoke**
+
+Run: `uv run pytest --color=no`
+Expected: 전체 PASS.
+
+Run: `WEEKLY_OUT_DIR=/tmp/wk uv run python scripts/weekly_overlay_series.py 2>&1 | tail -5`
+Expected: 에러 없이 overlay_unified.parquet 생성(값은 이전과 동일 — 코어 로직 불변).
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add scripts/store_predictive_power.py
+git commit -m "refactor(scripts): windowed_backtest를 harness 코어 import로 전환 (단일 출처)"
+```
+
+---
+
+## Task 5: Registry — forecaster 이름→kind
 
 **Files:**
 - Create: `src/bakery/harness/registry.py`
-- Modify: `src/bakery/harness/__init__.py` (re-export 추가)
+- Modify: `src/bakery/harness/__init__.py`
 - Test: `tests/harness/test_registry.py`
 
 **Interfaces:**
-- Consumes: `src/bakery/models`의 `SeasonalNaive`, `MovingAverage`, `GlobalLGBM`.
 - Produces:
-  - `class ForecasterKind(str, Enum)`: `POINT="point_forecaster"`, `DISTRIBUTIONAL="distributional"`, `COMPOSITE="composite_pipeline"`
-  - `kind_of(name: str) -> ForecasterKind` — 이름의 kind 반환, 미등록 시 `KeyError`
-  - `resolve_forecasters(names: list[str], *, target: str) -> list[Forecaster]` — Phase 1은 point_forecaster만 인스턴스화; distributional/composite는 `NotImplementedError("Phase 2+")`
-  - `feature_set_of(name: str) -> str | None` — lightgbm 계열의 feature_set("v0".."v3") 반환, 그 외 None. runner가 enrich variant 파싱에 재사용(드리프트 방지).
+  - `class ForecasterKind(str, Enum)`: `CATEGORY_TOTAL`, `DISTRIBUTIONAL`, `POINT`, `COMPOSITE`
+  - `kind_of(name) -> ForecasterKind` (미등록 `KeyError`)
   - `LAYER_NAMES: frozenset[str]` = `{"event_prior", "decision", "conformal_order"}`
-  - `resolve_layers(names: list[str]) -> list[str]` — Phase 1은 이름 검증만(미등록 시 `KeyError`), 객체화는 Phase 2+
+  - `is_supported_phase1(name) -> bool` — category_total만 True
 
-**확정 사실 (VERIFY 완료 2026-07-24):** `GlobalLGBM.__init__(params, y_col, feature_set, drop_groups)` — target 인자명은 **`y_col`** (not `target`). seed=42 고정(정확일치 유효). `resolve_forecasters`의 `target` 파라미터는 GlobalLGBM에 `y_col=target`으로 전달.
-
-Note (taxonomy, 설계 §4): v0~v3=`lightgbm[_v1/_v2/_v3]`(POINT), `distributional_total`(DISTRIBUTIONAL), `category_v4`(COMPOSITE). Phase 1 acceptance는 point_forecaster 경로만 필요하므로 나머지 kind는 등록만 하고 인스턴스화는 다음 Phase로 미룬다 (YAGNI).
+Note (taxonomy §4): category_total=CATEGORY_TOTAL(canonical), distributional_total=DISTRIBUTIONAL, lightgbm[_v1/2/3]·seasonal_naive·moving_average=POINT(보조), category_v4=COMPOSITE. Phase 1 runner는 category_total만 실행.
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/harness/test_registry.py
 import pytest
-from bakery.harness.registry import (
-    ForecasterKind, kind_of, resolve_forecasters, resolve_layers, LAYER_NAMES,
-)
-from bakery.models.lightgbm_regressor import GlobalLGBM
+from bakery.harness.registry import ForecasterKind, kind_of, LAYER_NAMES, is_supported_phase1
 
 
-def test_kind_of_classifies_by_taxonomy():
-    assert kind_of("seasonal_naive") == ForecasterKind.POINT
-    assert kind_of("lightgbm_v2") == ForecasterKind.POINT
+def test_kind_taxonomy():
+    assert kind_of("category_total") == ForecasterKind.CATEGORY_TOTAL
     assert kind_of("distributional_total") == ForecasterKind.DISTRIBUTIONAL
+    assert kind_of("lightgbm_v2") == ForecasterKind.POINT
     assert kind_of("category_v4") == ForecasterKind.COMPOSITE
 
 
-def test_kind_of_unknown_raises():
+def test_unknown_raises():
     with pytest.raises(KeyError):
-        kind_of("nonexistent_model")
+        kind_of("bogus")
 
 
-def test_resolve_point_forecaster_returns_globallgbm():
-    fs = resolve_forecasters(["lightgbm_v2"], target="adjusted_demand")
-    assert len(fs) == 1
-    assert isinstance(fs[0], GlobalLGBM)
-    assert fs[0].feature_set == "v2"
-
-
-def test_feature_set_of():
-    from bakery.harness.registry import feature_set_of
-    assert feature_set_of("lightgbm_v2") == "v2"
-    assert feature_set_of("lightgbm") == "v0"
-    assert feature_set_of("seasonal_naive") is None
-
-
-def test_resolve_distributional_not_yet_implemented():
-    with pytest.raises(NotImplementedError, match="Phase 2"):
-        resolve_forecasters(["distributional_total"], target="adjusted_demand")
-
-
-def test_resolve_layers_validates_names():
-    assert resolve_layers(["event_prior"]) == ["event_prior"]
-    with pytest.raises(KeyError):
-        resolve_layers(["bogus_layer"])
+def test_layers_registered():
+    assert "event_prior" in LAYER_NAMES
     assert "decision" in LAYER_NAMES
+
+
+def test_phase1_supports_category_total_only():
+    assert is_supported_phase1("category_total") is True
+    assert is_supported_phase1("distributional_total") is False
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/harness/test_registry.py --color=no`
-Expected: FAIL — `ModuleNotFoundError: No module named 'bakery.harness.registry'`
+Expected: FAIL — `ModuleNotFoundError: bakery.harness.registry`
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 3: Write implementation**
 
 ```python
 # src/bakery/harness/registry.py
 from __future__ import annotations
-
 from enum import Enum
-
-from bakery.models.base import Forecaster
-from bakery.models.lightgbm_regressor import GlobalLGBM
-from bakery.models.moving_average import MovingAverage
-from bakery.models.seasonal_naive import SeasonalNaive
 
 
 class ForecasterKind(str, Enum):
-    POINT = "point_forecaster"
+    CATEGORY_TOTAL = "category_total"
     DISTRIBUTIONAL = "distributional"
+    POINT = "point_forecaster"
     COMPOSITE = "composite_pipeline"
 
 
 _KIND: dict[str, ForecasterKind] = {
+    "category_total": ForecasterKind.CATEGORY_TOTAL,
+    "distributional_total": ForecasterKind.DISTRIBUTIONAL,
     "seasonal_naive": ForecasterKind.POINT,
     "moving_average": ForecasterKind.POINT,
     "lightgbm": ForecasterKind.POINT,
     "lightgbm_v1": ForecasterKind.POINT,
     "lightgbm_v2": ForecasterKind.POINT,
     "lightgbm_v3": ForecasterKind.POINT,
-    "distributional_total": ForecasterKind.DISTRIBUTIONAL,
     "category_v4": ForecasterKind.COMPOSITE,
 }
 
 LAYER_NAMES: frozenset[str] = frozenset({"event_prior", "decision", "conformal_order"})
-
-_FEATURE_SET = {
-    "lightgbm": "v0", "lightgbm_v1": "v1", "lightgbm_v2": "v2", "lightgbm_v3": "v3",
-}
 
 
 def kind_of(name: str) -> ForecasterKind:
     return _KIND[name]
 
 
-def feature_set_of(name: str) -> str | None:
-    """lightgbm 계열의 feature_set을 반환, 그 외는 None."""
-    return _FEATURE_SET.get(name)
-
-
-def resolve_forecasters(names: list[str], *, target: str) -> list[Forecaster]:
-    out: list[Forecaster] = []
-    for name in names:
-        k = kind_of(name)
-        if k is not ForecasterKind.POINT:
-            raise NotImplementedError(f"{name} ({k.value})는 Phase 2+ 구현 대상")
-        out.append(_build_point(name, target))
-    return out
-
-
-def _build_point(name: str, target: str) -> Forecaster:
-    if name == "seasonal_naive":
-        return SeasonalNaive(n_weeks=4)
-    if name == "moving_average":
-        return MovingAverage(window=28)
-    return GlobalLGBM(feature_set=_FEATURE_SET[name], y_col=target)  # 인자명 y_col (VERIFY 완료)
-
-
-def resolve_layers(names: list[str]) -> list[str]:
-    for name in names:
-        if name not in LAYER_NAMES:
-            raise KeyError(name)
-    return list(names)
+def is_supported_phase1(name: str) -> bool:
+    """Phase 1은 category_total 경로만 실행(나머지는 taxonomy 등록만)."""
+    return kind_of(name) is ForecasterKind.CATEGORY_TOTAL
 ```
-
-(VERIFY 완료: `GlobalLGBM.__init__`은 `y_col=` kwarg를 받음. `_build_point`는 `y_col=target`으로 전달 — 위 코드에 반영됨.)
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/harness/test_registry.py --color=no`
-Expected: PASS (5 passed)
+Expected: PASS (4 passed)
 
 - [ ] **Step 5: Update __init__ + commit**
 
 ```python
-# src/bakery/harness/__init__.py  — append to imports and __all__
-from bakery.harness.registry import (
-    ForecasterKind, kind_of, feature_set_of, resolve_forecasters, resolve_layers, LAYER_NAMES,
-)
+# __init__.py append
+from bakery.harness.registry import ForecasterKind, kind_of, LAYER_NAMES, is_supported_phase1
 ```
-Add `"ForecasterKind", "kind_of", "feature_set_of", "resolve_forecasters", "resolve_layers", "LAYER_NAMES"` to `__all__`.
+Add to `__all__`: `"ForecasterKind", "kind_of", "LAYER_NAMES", "is_supported_phase1"`.
 
 ```bash
 git add src/bakery/harness/registry.py src/bakery/harness/__init__.py tests/harness/test_registry.py
-git commit -m "feat(harness): forecaster/layer registry + kind taxonomy"
+git commit -m "feat(harness): forecaster kind taxonomy (category_total canonical)"
 ```
 
 ---
 
-## Task 3: Runner — 단계별 캐시 실행 + RunResult
+## Task 6: Runner — spec → feat build → core → RunResult (캐시)
 
 **Files:**
 - Create: `src/bakery/harness/runner.py`
-- Create: `src/bakery/features/enrich.py` (cli._enrich_if_needed 이동)
-- Modify: `src/bakery/harness/__init__.py`, `src/bakery/cli.py` (enrich 재-export)
+- Modify: `src/bakery/harness/__init__.py`
 - Test: `tests/harness/test_runner.py`
 
 **Interfaces:**
-- Consumes: `ExperimentSpec`(Task 1), `resolve_forecasters`/`feature_set_of`(Task 2); `bakery.data.loader.load_dataset`, `bakery.evaluation.split.generate_time_splits`, `bakery.evaluation.backtest.run_backtest`, `bakery.features.category_aggregate.build_item_adjusted_demand`, `bakery.features.enrich.enrich_daily`.
+- Consumes: `ExperimentSpec`(T1), `resolve_event_priors`(T2), `windowed_backtest`/`metrics_from_preds`(T3), `is_supported_phase1`(T5); `bakery.features.category_aggregate.build_category_daily`/`build_features`.
 - Produces:
-  - `STAGES: tuple[str,...]` = `("load","features","fit_predict","evaluate")` (Phase 1은 fit·predict를 run_backtest가 함께 하므로 1단계로 묶고, report는 Phase 2)
-  - `class RunResult` (dataclass): `name: str`, `predictions: pd.DataFrame`, `fold_metrics: pd.DataFrame`, `demand_col: str`, `resolved: dict` (config_resolved)
-  - `run_experiment(spec: ExperimentSpec, *, out_dir: Path, cache_dir: Path | None = None) -> RunResult`
-  - 캐시: 각 단계 산출을 `cache_dir/<stage>_<hash>.parquet|json`. hash = 그 단계에 영향 주는 spec 필드의 안정 직렬화(`_stage_key`). config 무변경+파일 존재 시 로드.
+  - `STAGES: tuple[str,...]` = `("features","backtest","evaluate")`
+  - `class RunResult` (dataclass): `name`, `predictions: pd.DataFrame`, `fold_metrics: pd.DataFrame`, `metrics: dict`, `resolved: dict`
+  - `run_experiment(spec, *, out_dir: Path, cache_dir: Path | None = None, _trace: list | None = None) -> RunResult`
+  - Phase 1: category_total만 실행. distributional/point는 경고 후 스킵. event_prior layer는 backtest_core가 events/lunar로 처리.
 
-**⚠️ Phase 1 축소 (사용자 요청 "중간부터 실행"의 부분 구현):** `--from STAGE`/`--only STAGE`(임의 단계 재개)는 **Phase 2로 연기**한다. 이유: Phase 1엔 report/eda 단계가 없어 features 캐시 히트만으로 "중간부터"의 실질 이득(evaluate/report만 재실행)이 아직 성립하지 않음. Phase 1은 **features 단계 자동 캐시**(동일 config 재실행 시 피처 재계산 스킵)까지만 제공하고, 명시적 스테이지 선택은 report 단계가 생기는 Phase 2에서 배선한다. no-op 플래그를 노출하지 않는다(동작하는 것으로 오해 방지).
+Note: 캐시는 features 단계만. 키 = (source, store, target, alpha). 임의 스테이지 재개(`--from`/`--only`)는 Phase 2.
 
-Note: Phase 1의 캐시 검증은 "동일 spec 2회 실행 시 2회차가 load/features 아티팩트를 재사용한다"를 파일 mtime이 아니라 **캐시 히트 카운터**(RunResult에 부수적으로 노출하지 않고, runner 내부 `_load_or_compute`가 반환하는 hit 여부를 테스트에서 monkeypatch로 관찰)로 확인한다. 과설계를 피하려 hit 여부는 `run_experiment(..., _trace=list)` 선택 인자로 관찰 가능하게 한다.
-
-- [ ] **Step 1: Write the failing test** (synthetic 경로로 빠르게 — real 데이터 없이 CI 가능)
+- [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/harness/test_runner.py
-from pathlib import Path
-import pandas as pd
-import pytest
 from bakery.harness.config import ExperimentSpec, DataSpec, WindowSpec
 from bakery.harness.runner import run_experiment, RunResult, STAGES
 
 
-def _synth_spec():
+def _spec(n_folds=52):
     return ExperimentSpec(
-        name="synth_smoke",
-        data=DataSpec(source="synthetic"),
-        target="potential_demand",
-        forecaster=["seasonal_naive"],
-        layers=[],
-        window=WindowSpec(scheme="expanding", n_splits=2, horizon_days=7, step_days=7),
-        allow_deprecated=True,
+        name="gw_core", data=DataSpec(source="real", store="store_gw01"),
+        target="adjusted_demand_unit", forecaster=["category_total"], layers=["event_prior"],
+        event_priors="gwangyo",
+        window=WindowSpec(scheme="expanding", n_folds=n_folds, window_days=730, horizon_days=7),
+        alpha=0.8, production_q=0.85,
     )
 
 
-def test_run_experiment_returns_runresult(tmp_path):
-    result = run_experiment(_synth_spec(), out_dir=tmp_path / "out", cache_dir=tmp_path / "cache")
+def test_run_returns_runresult(tmp_path):
+    result = run_experiment(_spec(), out_dir=tmp_path / "out", cache_dir=None)
     assert isinstance(result, RunResult)
-    assert result.name == "synth_smoke"
+    assert result.name == "gw_core"
     assert not result.predictions.empty
-    assert {"date", "yhat"}.issubset(result.predictions.columns)
-    assert result.demand_col == "potential_demand"
+    assert {"date", "expected", "production", "actual"}.issubset(result.predictions.columns)
+    assert "wape" in result.metrics
 
 
-def test_run_writes_config_resolved(tmp_path):
-    out = tmp_path / "out"
-    run_experiment(_synth_spec(), out_dir=out, cache_dir=tmp_path / "cache")
-    resolved = out / "synth_smoke" / "config_resolved.yaml"
-    assert resolved.exists()
+def test_run_writes_artifacts(tmp_path):
+    run_experiment(_spec(), out_dir=tmp_path / "out", cache_dir=None)
+    d = tmp_path / "out" / "gw_core"
+    assert (d / "config_resolved.yaml").exists()
+    assert (d / "predictions.csv").exists()
+    assert (d / "metrics.json").exists()
 
 
-def test_cache_hit_on_second_run(tmp_path):
+def test_features_cache_hit(tmp_path):
     cache = tmp_path / "cache"
-    trace1, trace2 = [], []
-    run_experiment(_synth_spec(), out_dir=tmp_path / "o1", cache_dir=cache, _trace=trace1)
-    run_experiment(_synth_spec(), out_dir=tmp_path / "o2", cache_dir=cache, _trace=trace2)
-    # 1회차: load/features 계산(miss). 2회차: 둘 다 캐시 히트.
-    assert ("load", "miss") in trace1
-    assert ("load", "hit") in trace2
-    assert ("features", "hit") in trace2
+    t1, t2 = [], []
+    run_experiment(_spec(), out_dir=tmp_path / "o1", cache_dir=cache, _trace=t1)
+    run_experiment(_spec(), out_dir=tmp_path / "o2", cache_dir=cache, _trace=t2)
+    assert ("features", "miss") in t1
+    assert ("features", "hit") in t2
 
 
 def test_stages_constant():
-    assert STAGES == ("load", "features", "fit_predict", "evaluate")
+    assert STAGES == ("features", "backtest", "evaluate")
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/harness/test_runner.py --color=no`
-Expected: FAIL — `ModuleNotFoundError: No module named 'bakery.harness.runner'`
+Expected: FAIL — `ModuleNotFoundError: bakery.harness.runner`
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 3: Write implementation**
 
 ```python
 # src/bakery/harness/runner.py
@@ -484,21 +721,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
 import yaml
 
-from bakery.data.loader import load_dataset
-from bakery.evaluation.backtest import run_backtest
-from bakery.evaluation.split import generate_time_splits
-from bakery.features.category_aggregate import build_item_adjusted_demand
-from bakery.features.enrich import enrich_daily  # Task 5에서 cli._enrich_if_needed를 여기로 이동
+from bakery.features.category_aggregate import build_category_daily, build_features
+from bakery.harness.backtest_core import metrics_from_preds, windowed_backtest
 from bakery.harness.config import ExperimentSpec
-from bakery.harness.registry import feature_set_of, resolve_forecasters
+from bakery.harness.event_priors import resolve_event_priors
+from bakery.harness.registry import is_supported_phase1
 
-STAGES: tuple[str, ...] = ("load", "features", "fit_predict", "evaluate")
+STAGES: tuple[str, ...] = ("features", "backtest", "evaluate")
 
 
 @dataclass
@@ -506,13 +742,12 @@ class RunResult:
     name: str
     predictions: pd.DataFrame
     fold_metrics: pd.DataFrame
-    demand_col: str
+    metrics: dict
     resolved: dict
 
 
 def _stage_key(fields: dict) -> str:
-    blob = json.dumps(fields, sort_keys=True, default=str)
-    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+    return hashlib.sha256(json.dumps(fields, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
 def _load_or_compute(stage, key, cache_dir, compute, trace):
@@ -530,151 +765,132 @@ def _load_or_compute(stage, key, cache_dir, compute, trace):
     return df
 
 
-def _demand_col_of(spec: ExperimentSpec) -> str:
-    """값 계산 없이 최종 수요 컬럼명만 반환."""
-    if spec.data.source == "real" and spec.target == "adjusted_demand":
-        return "adjusted_demand"
-    return spec.target
-
-
-def _variant_set(spec: ExperimentSpec) -> list[str]:
-    """lightgbm forecaster들의 feature_set variant(enrich 요구사항 결정)."""
-    return sorted({fs for name in spec.forecaster if (fs := feature_set_of(name)) is not None})
-
-
 def run_experiment(
     spec: ExperimentSpec, *, out_dir: Path, cache_dir: Path | None = None,
     _trace: list | None = None,
 ) -> RunResult:
     trace = _trace if _trace is not None else []
-    variants = _variant_set(spec)
-    demand_col = _demand_col_of(spec)
+    runnable = [f for f in spec.forecaster if is_supported_phase1(f)]
+    for f in spec.forecaster:
+        if not is_supported_phase1(f):
+            warnings.warn(f"forecaster '{f}'는 Phase 2+ 대상 — 이번 실행에서 스킵.", UserWarning)
+    if not runnable:
+        raise ValueError("Phase 1에서 실행 가능한 forecaster 없음(category_total 필요).")
 
-    ds = load_dataset(source=spec.data.source, data_dir=None)
+    feat_key = _stage_key({"source": spec.data.source, "store": spec.data.store,
+                           "target": spec.target, "alpha": spec.alpha})
 
     def _feat():
-        base = enrich_daily(ds, variants) if variants else ds.daily
-        if spec.data.store:
-            base = base[base["store_id"] == spec.data.store].copy()
-        if spec.data.source == "real" and spec.target == "adjusted_demand":
-            return build_item_adjusted_demand(base, alpha=spec.closing_alpha)
-        return base
+        cd = build_category_daily(alpha=spec.alpha)
+        return build_features(cd, target_col=spec.target)
 
-    # 캐시 키에 반드시 variants·store 포함 — v0(enrich 없음)와 v2(calendar+weather)가
-    # 같은 features 캐시를 공유하지 않도록(캐시 무효화 버그 방지, advisor #2).
-    feat_key = _stage_key({
-        "source": spec.data.source, "store": spec.data.store,
-        "target": spec.target, "alpha": spec.closing_alpha, "variants": variants,
-    })
-    # load 단계는 DailyDataset(비-DataFrame)이라 parquet 캐시 대상이 아님 →
-    # features 캐시 파일 존재로 load hit/miss를 대리 판정한다.
-    load_hit = cache_dir is not None and (cache_dir / f"features_{feat_key}.parquet").exists()
-    trace.append(("load", "hit" if load_hit else "miss"))
-    daily = _load_or_compute("features", feat_key, cache_dir, _feat, trace)
+    feat = _load_or_compute("features", feat_key, cache_dir, _feat, trace)
 
-    windows = generate_time_splits(
-        daily["date"], n_splits=spec.window.n_splits,
-        val_horizon_days=spec.window.horizon_days, step_days=spec.window.step_days,
+    events, lunar = resolve_event_priors(spec.event_priors) if "event_prior" in spec.layers else (None, None)
+    trace.append(("backtest", "run"))
+    bt = windowed_backtest(
+        feat, window_days=spec.window.window_days, target_col=spec.target,
+        n_folds=spec.window.n_folds, horizon_days=spec.window.horizon_days,
+        production_q=spec.production_q, alpha=spec.alpha,
+        events=events, lunar_events=lunar,
     )
-    forecasters = resolve_forecasters(spec.forecaster, target=demand_col)
-    fold_df, pred_df = run_backtest(daily, forecasters, windows)
+    trace.append(("evaluate", "run"))
+    metrics = metrics_from_preds(bt.predictions)
 
     out = out_dir / spec.name
     out.mkdir(parents=True, exist_ok=True)
     resolved = spec.model_dump()
     (out / "config_resolved.yaml").write_text(yaml.safe_dump(resolved, allow_unicode=True), encoding="utf-8")
-    pred_df.to_csv(out / "predictions.csv", index=False)
-    fold_df.to_csv(out / "fold_results.csv", index=False)
+    bt.predictions.to_csv(out / "predictions.csv", index=False)
+    bt.folds.to_csv(out / "fold_results.csv", index=False)
+    (out / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
 
-    return RunResult(name=spec.name, predictions=pred_df, fold_metrics=fold_df,
-                     demand_col=demand_col, resolved=resolved)
+    return RunResult(name=spec.name, predictions=bt.predictions, fold_metrics=bt.folds,
+                     metrics=metrics, resolved=resolved)
 ```
 
-**이 스텝에 enrich 추출 포함** (순환 import 방지 — advisor·self-review): `cli.py`의 `_enrich_if_needed`를 `src/bakery/features/enrich.py`로 이동해 `enrich_daily(ds, variants)`로 노출하고, `cli.py`는 `from bakery.features.enrich import enrich_daily as _enrich_if_needed`로 재-export(기존 호출부·시그니처 불변). runner는 cli가 아니라 features.enrich에서 import → 순환 없음. 이동 시 `_enrich_if_needed`의 시그니처가 `(ds: DailyDataset, variants: list[str])`인지 확인하고 그대로 `enrich_daily`로 리네임.
-
-**VERIFY signatures before running** (기존 심볼과 정확히 일치해야 함):
-Run:
-```bash
-uv run python -c "import inspect; from bakery.data.loader import load_dataset; from bakery.evaluation.split import generate_time_splits; from bakery.evaluation.backtest import run_backtest; from bakery.features.category_aggregate import build_item_adjusted_demand; print('load', inspect.signature(load_dataset)); print('split', inspect.signature(generate_time_splits)); print('bt', inspect.signature(run_backtest)); print('adj', inspect.signature(build_item_adjusted_demand))"
-```
-Expected: 각 시그니처 확인. `run_backtest`가 `(daily, forecasters, windows)` 순서인지, `pred_df`에 `yhat` 컬럼이 있는지 확인 후 test의 컬럼 단언(`{"date","yhat"}`)을 실제 출력에 맞춰 조정.
-
-또한 `_enrich_if_needed` 시그니처 확인 후 이동:
-```bash
-uv run python -c "import inspect; from bakery.cli import _enrich_if_needed; print(inspect.signature(_enrich_if_needed))"
-```
-Expected: `(ds, variants)`. 그대로 `src/bakery/features/enrich.py`의 `enrich_daily(ds, variants)`로 이동, cli.py는 재-export.
+**VERIFY** build_category_daily가 real canonical을 기본으로 읽는지:
+Run: `uv run python -c "from bakery.features.category_aggregate import build_category_daily; cd=build_category_daily(alpha=0.8); print(type(cd), cd.df.shape)"`
+Expected: CategoryDaily, 광교 3cat 일별.
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/harness/test_runner.py --color=no`
-Expected: PASS (4 passed). 만약 synthetic daily에 `store_id`가 없거나 컬럼명이 다르면 VERIFY 결과에 맞춰 test/impl 조정.
+Expected: PASS (4 passed). n_folds=52가 real span에서 ValueError면 test의 `_spec()` 호출을 `_spec(n_folds=8)`로 낮추되 **acceptance(Task 3)는 52 유지**(Task 3는 이미 통과했으므로 실제 feasible 확인됨 — 이 경우 test만 조정).
 
 - [ ] **Step 5: Update __init__ + commit**
 
 ```python
-# src/bakery/harness/__init__.py  — append
+# __init__.py append
 from bakery.harness.runner import RunResult, run_experiment, STAGES
 ```
 Add to `__all__`: `"RunResult", "run_experiment", "STAGES"`.
 
 ```bash
-git add src/bakery/harness/runner.py src/bakery/harness/__init__.py tests/harness/test_runner.py \
-        src/bakery/features/enrich.py src/bakery/cli.py
-git commit -m "feat(harness): 단계 캐시 runner + RunResult + enrich 스파인 추출"
+git add src/bakery/harness/runner.py src/bakery/harness/__init__.py tests/harness/test_runner.py
+git commit -m "feat(harness): runner — spec→feat→windowed_backtest→RunResult"
 ```
 
 ---
 
-## Task 4: CLI `harness run` 커맨드 (thin wrapper)
+## Task 7: CLI harness-run + experiments/gwangyo_default.yaml
 
 **Files:**
-- Modify: `src/bakery/cli.py` (커맨드 추가, 기존 커맨드 불변)
+- Modify: `src/bakery/cli.py`
+- Create: `experiments/gwangyo_default.yaml`
 - Test: `tests/harness/test_cli_harness.py`
 
 **Interfaces:**
-- Consumes: `load_spec`(Task 1), `run_experiment`(Task 3).
-- Produces: CLI `bakery harness-run <config.yaml> [--out DIR] [--cache DIR]`. (`--from`/`--only` 스테이지 선택은 Phase 2로 연기 — Task 3 노트 참조.)
+- Consumes: `load_spec`(T1), `run_experiment`(T6).
+- Produces: CLI `bakery harness-run <config.yaml> [--out DIR] [--cache DIR]`.
 
-Note: typer는 서브그룹보다 단일 커맨드가 기존 패턴(app.command)과 맞으므로 `harness-run` 하이픈 커맨드로 추가한다(기존 `format-bonavi-v2` 등과 일관). 설계 문서의 `harness run` 표기는 `harness-run`으로 실현.
+- [ ] **Step 1: Write experiments/gwangyo_default.yaml**
 
-- [ ] **Step 1: Write the failing test**
+```yaml
+# experiments/gwangyo_default.yaml
+name: gwangyo_default
+data:
+  source: real
+  store: store_gw01
+target: adjusted_demand_unit
+forecaster: [category_total]        # distributional_total은 Phase 2 실행(등록만)
+layers: [event_prior]
+event_priors: gwangyo
+window:
+  scheme: expanding
+  n_folds: 52
+  window_days: 730
+  horizon_days: 7
+alpha: 0.8
+production_q: 0.85
+```
+
+- [ ] **Step 2: Write the failing test**
 
 ```python
 # tests/harness/test_cli_harness.py
-import yaml
 from typer.testing import CliRunner
 from bakery.cli import app
 
 runner = CliRunner()
 
 
-def test_harness_run_synthetic_smoke(tmp_path):
-    cfg = tmp_path / "exp.yaml"
-    cfg.write_text(yaml.safe_dump({
-        "name": "cli_smoke",
-        "data": {"source": "synthetic"},
-        "target": "potential_demand",
-        "allow_deprecated": True,
-        "forecaster": ["seasonal_naive"],
-        "layers": [],
-        "window": {"scheme": "expanding", "n_splits": 2},
-    }), encoding="utf-8")
+def test_harness_run_default_config(tmp_path):
     result = runner.invoke(app, [
-        "harness-run", str(cfg),
-        "--out", str(tmp_path / "out"), "--cache", str(tmp_path / "cache"),
-    ])  # --from/--only 없음 (Phase 2)
+        "harness-run", "experiments/gwangyo_default.yaml",
+        "--out", str(tmp_path / "out"),
+    ])
     assert result.exit_code == 0, result.output
-    assert (tmp_path / "out" / "cli_smoke" / "predictions.csv").exists()
-    assert (tmp_path / "out" / "cli_smoke" / "config_resolved.yaml").exists()
+    assert (tmp_path / "out" / "gwangyo_default" / "predictions.csv").exists()
+    assert (tmp_path / "out" / "gwangyo_default" / "metrics.json").exists()
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 3: Run test to verify it fails**
 
 Run: `uv run pytest tests/harness/test_cli_harness.py --color=no`
-Expected: FAIL — `No such command 'harness-run'` (exit_code != 0)
+Expected: FAIL — `No such command 'harness-run'`
 
-- [ ] **Step 3: Write minimal implementation** — add to `src/bakery/cli.py` (near other `@app.command` defs, after imports add `from bakery.harness import load_spec, run_experiment`)
+- [ ] **Step 4: Add CLI command** — `src/bakery/cli.py` (imports에 `from bakery.harness import load_spec, run_experiment` 추가, 다른 `@app.command` 근처에)
 
 ```python
 @app.command("harness-run")
@@ -687,134 +903,22 @@ def cmd_harness_run(
     spec = load_spec(config)
     console.print(f"[cyan]harness[/] {spec.name} forecaster={spec.forecaster} target={spec.target}")
     result = run_experiment(spec, out_dir=out, cache_dir=cache)
-    console.print(f"[green]wrote[/] {out}/{result.name}/predictions.csv (demand_col={result.demand_col})")
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `uv run pytest tests/harness/test_cli_harness.py --color=no`
-Expected: PASS (1 passed)
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/bakery/cli.py tests/harness/test_cli_harness.py
-git commit -m "feat(cli): harness-run 커맨드 (YAML 실험 단일 표면)"
-```
-
----
-
-## Task 5: ★Acceptance — 광교 lightgbm_v2 재현
-
-**Files:**
-- Create: `experiments/gwangyo_default.yaml`
-- Test: `tests/harness/test_reproduce_backtest.py`
-
-**Interfaces:**
-- Consumes: `run_experiment`(Task 3), `enrich_daily`(Task 3), 그리고 **비교 기준**으로 기존 cli 헬퍼 `_build_forecasters` + `generate_time_splits` + `run_backtest` + `build_item_adjusted_demand`.
-
-**목표:** harness 경로와 기존 cli 경로가 **동일 fold·동일 forecaster·동일 target**에서 예측값이 일치함을 증명. 데이터가 real 단일 forecaster(lightgbm_v2)로 좁혀 비교한다.
-
-**전제 (VERIFY 완료 2026-07-24):** real 데이터 로컬 존재 확인됨 — `load_dataset(source="real")` 성공, 25,105행, `store_id`의 유일값 = **`store_gw01`**(광교). GlobalLGBM `seed=42` 고정 → 정확일치(rtol=1e-9) 유효.
-**★이 테스트는 skip하지 않는다.** 이것이 Phase 1 완료의 hard gate다(PASS 없이는 Phase 1 미완). real이 사라진 예외 상황에서만 `load_dataset` 실패로 error가 나며, 그때는 조용한 skip이 아니라 명시적 실패로 드러나야 한다.
-
-- [ ] **Step 1: Write the failing test**
-
-```python
-# tests/harness/test_reproduce_backtest.py
-from pathlib import Path
-import numpy as np
-import pandas as pd
-import pytest
-
-from bakery.harness.config import ExperimentSpec, DataSpec, WindowSpec
-from bakery.harness.runner import run_experiment
-from bakery.evaluation.split import generate_time_splits
-from bakery.evaluation.backtest import run_backtest
-from bakery.features.category_aggregate import build_item_adjusted_demand
-from bakery.data.loader import load_dataset
-
-STORE = "store_gw01"  # 광교 (VERIFY 완료: real daily의 유일 store_id)
-
-
-def test_harness_reproduces_legacy_lightgbm_v2(tmp_path):
-    n_splits, horizon, step, alpha = 8, 7, 7, 0.8
-
-    # --- 기존(legacy) 경로 재현 (enrich → store filter → adjusted_demand) ---
-    ds = load_dataset(source="real", data_dir=None)
-    from bakery.features.enrich import enrich_daily  # Task 3에서 이동
-    from bakery.cli import _build_forecasters
-    daily = enrich_daily(ds, ["v2"])
-    daily = daily[daily["store_id"] == STORE].copy()
-    daily = build_item_adjusted_demand(daily, alpha=alpha)
-    windows = generate_time_splits(daily["date"], n_splits=n_splits,
-                                   val_horizon_days=horizon, step_days=step)
-    forecasters = _build_forecasters(["v2"], include_production=False,
-                                     v23_target="adjusted_demand", drop_groups=frozenset())
-    legacy_fold, legacy_pred = run_backtest(daily, forecasters, windows)
-
-    # --- harness 경로 (runner가 동일 순서: enrich → store filter → adjusted_demand) ---
-    spec = ExperimentSpec(
-        name="gwangyo_v2_repro", data=DataSpec(source="real", store=STORE),
-        target="adjusted_demand", forecaster=["lightgbm_v2"], layers=[],
-        window=WindowSpec(scheme="expanding", n_splits=n_splits,
-                          horizon_days=horizon, step_days=step),
-        closing_alpha=alpha,
+    console.print(
+        f"[green]wrote[/] {out}/{result.name}/ "
+        f"(WAPE={result.metrics['wape']:.4f}, n={result.metrics['n_test']})"
     )
-    result = run_experiment(spec, out_dir=tmp_path / "out", cache_dir=None)
-
-    # 예측값 정확 일치 (동일 fold·모델·target이므로 deterministic해야 함)
-    lp = legacy_pred.sort_values(["date", "item_id"]).reset_index(drop=True)
-    hp = result.predictions.sort_values(["date", "item_id"]).reset_index(drop=True)
-    assert len(lp) == len(hp)
-    np.testing.assert_allclose(hp["yhat"].to_numpy(), lp["yhat"].to_numpy(), rtol=1e-9)
 ```
 
-Note: legacy·harness 두 경로 모두 **같은 전처리 순서**(enrich→store filter→adjusted_demand)를 밟는다. runner(Task 3)의 `_feat()`가 이미 이 순서로 구현되어 있으므로(enrich_daily → store 필터 → build_item_adjusted_demand), acceptance는 별도 runner 수정 없이 두 경로를 나란히 비교만 한다. enrich 부재로 인한 피처 불일치 리스크는 Task 3에서 이미 해소됨.
+- [ ] **Step 5: Run test + full suite**
 
-- [ ] **Step 2: Run test to verify it fails**
+Run: `uv run pytest tests/harness/test_cli_harness.py --color=no && uv run pytest --color=no`
+Expected: 둘 다 PASS.
 
-Run: `uv run pytest tests/harness/test_reproduce_backtest.py --color=no`
-Expected: 이 테스트 파일이 아직 없으므로 collection 후 실행. Task 3까지 완료된 상태라면 값이 일치해 PASS할 가능성이 높다 — 이 경우 "실패 후 통과" TDD 리듬 대신 **회귀 가드**로 간주(스파인이 이미 배선됐으므로 정상). 만약 FAIL이면 diff를 출력해 원인 규명(순서/필터/target 불일치).
-
-디버깅용 실패 진단:
-```python
-# FAIL 시 임시 추가해 원인 파악 (통과 후 제거)
-print("len legacy/harness:", len(legacy_pred), len(result.predictions))
-print("cols:", sorted(result.predictions.columns))
-```
-
-- [ ] **Step 3: Run full suite to verify no regression**
-
-Run: `uv run pytest --color=no`
-Expected: 전체 PASS (기존 테스트 + harness 신규 테스트). enrich 이동(Task 3)이 cli 기존 커맨드를 깨지 않았는지 여기서 최종 확인.
-
-- [ ] **Step 4: (조정) 컬럼명 불일치 시 test 정합**
-
-`run_backtest` 출력 컬럼이 `yhat`/`item_id`/`date`가 아니면(Task 3 VERIFY에서 확인된 실제 이름) test의 정렬/비교 컬럼을 실제 이름으로 교체. 값 비교 자체(rtol=1e-9)는 불변.
-
-- [ ] **Step 5: Write experiments/gwangyo_default.yaml + commit**
-
-```yaml
-# experiments/gwangyo_default.yaml
-name: gwangyo_default
-data:
-  source: real
-  store: store_gw01   # 광교 (real daily의 유일 store_id)
-target: adjusted_demand
-forecaster: [lightgbm_v2]
-layers: []
-window:
-  scheme: expanding
-  n_splits: 8
-  horizon_days: 7
-  step_days: 7
-closing_alpha: 0.8
-```
+- [ ] **Step 6: Commit**
 
 ```bash
-git add experiments/gwangyo_default.yaml tests/harness/test_reproduce_backtest.py
-git commit -m "feat(harness): 광교 lightgbm_v2 재현 acceptance + 기본 experiment config"
+git add src/bakery/cli.py experiments/gwangyo_default.yaml tests/harness/test_cli_harness.py
+git commit -m "feat(cli): harness-run 커맨드 + 광교 기본 experiment config"
 ```
 
 ---
@@ -822,19 +926,23 @@ git commit -m "feat(harness): 광교 lightgbm_v2 재현 acceptance + 기본 expe
 ## Self-Review 결과
 
 **Spec coverage:**
-- §3 디렉토리 → Task 1~5에서 config/registry/runner/cli/experiments 생성. ✅ (report.py/eda.py/viz는 Phase 2~3, 명시적 범위 밖)
-- §4 Taxonomy → Task 2 `_KIND` 4kind 중 3개(POINT/DIST/COMPOSITE); post_layer는 `LAYER_NAMES`로 분리. ✅
-- §5 canonical 강제표 → Task 1 `_enforce` (target/potential_demand/metrics/split/deprecated). ✅
-- §6 단계 캐시·재개 → Task 3 STAGES + `_load_or_compute`. ⚠️ **Phase 1은 features 자동 캐시까지만** (동일 config 재실행 시 피처 재계산 스킵). 임의 스테이지 재개(`--from`/`--only`)는 report 단계가 생기는 **Phase 2로 명시 연기** — no-op 플래그를 노출하지 않음. 사용자 요청 "중간부터 실행"의 부분 구현임을 Task 3 인터페이스 노트에 표면화. ✅(축소 명시)
-- §7 RunResult → Task 3. ✅  §9 Phase1 acceptance → Task 5(skip 없는 hard gate). ✅
+- §2 원칙1(두 스파인 추출) → Task 3(windowed_backtest 추출) + Task 4(원본 래퍼화). ✅
+- §4 taxonomy(category_total canonical) → Task 5 registry `_KIND`. ✅
+- §5 config(카테고리 기본·event_priors 프리셋·folds52/window730) → Task 1 + Task 2. ✅
+- §5 STORE_EVENT_PRIORS 정착 → Task 2 event_priors.py. ✅
+- §9 acceptance(엔진 동등성) → Task 3 equivalence test(hard gate). ✅
+- §4 event_prior 후처리·leakage 규칙(pre-test 전체 history) → Task 3 코어에 보존+주석. ✅
+- §7 RunResult → Task 6. ✅
+- report/eda/viz(§8) = Phase 2~3, 범위 밖. distributional/point 실행 = Phase 2(Task 5/6 등록만·경고 스킵). ✅
 
-**Placeholder scan:** 코드 스텝 모두 실제 코드 포함. VERIFY 스텝은 시그니처 불확실성을 명시적으로 처리(추측 금지 원칙). ✅
+**Placeholder scan:** Task 2 event_priors.py의 `XMAS={...}`는 VERIFY 출력을 붙여넣는 의도적 골격 — VERIFY 스텝이 정확값을 강제하므로 placeholder 아님. 나머지 코드 스텝 완전. ✅
 
-**Type consistency:** `run_experiment(spec, *, out_dir, cache_dir, _trace)` 시그니처가 Task 3 정의 = Task 4/5 호출부 일치(from_stage/only_stage 제거 반영). `resolve_forecasters(names, *, target)` Task 2 정의 = Task 3 호출 일치. `feature_set_of` Task 2 정의 = Task 3 `_variant_set` 사용 일치. `RunResult` 필드(name/predictions/fold_metrics/demand_col/resolved) Task 3~5 일관. ✅
+**Type consistency:** `windowed_backtest(...events, lunar_events...)` T3 정의 = T4 import·T6 호출 일치. `run_experiment(spec, *, out_dir, cache_dir, _trace)` T6 정의 = T7 호출 일치. `RunResult`(name/predictions/fold_metrics/metrics/resolved) T6~T7 일관. `resolve_event_priors→(events,lunar)` T2=T6 일치. ✅
 
 **VERIFY 완료 (2026-07-24, 실행 전 확정):**
-1. ✅ `GlobalLGBM.__init__(params, y_col, feature_set, drop_groups)` — 인자명 `y_col`, seed=42 고정(정확일치 유효). 플랜 반영 완료.
-2. ✅ real 데이터 존재 — 25,105행, store_id 유일값 `store_gw01`. acceptance skip 제거, store 값 확정.
-3. ⏳ `run_backtest` 반환 `pred_df` 컬럼명(`yhat`/`item_id`/`date`) — Task 3 Step 3 전 VERIFY로 확인(테스트 컬럼 단언 조정).
-4. ⏳ synthetic `ds.daily`에 `store_id` 존재 여부 — Task 3 Step 4에서 확인(synthetic엔 store 필터 미적용이 기본이라 무해).
-5. ✅ 순환 import 방지: `enrich_daily`를 features 모듈로 이동, cli·runner 양쪽이 거기서 import — Task 3에 통합.
+1. ✅ `fit_category_total` random_state=42, `EventLevelPrior` 비랜덤 → 정확일치 유효.
+2. ✅ 상수: ALPHA=0.8, PROD_Q=0.85, WINDOW=730, FOLDS=52, HORIZON=7, MIN_TRAIN=60, TARGET="adjusted_demand_unit".
+3. ✅ STORE_EVENT_PRIORS["광교"]={"events":{XMAS,CHILDRENS},"lunar_events":CHUSEOK}. real store_id=store_gw01.
+4. ⏳ XMAS/CHILDRENS/CHUSEOK/SEOLLAL 실제 dict — Task 2 VERIFY로 복사.
+5. ⏳ build_category_daily(alpha=0.8) real 기본 로드 — Task 6 VERIFY로 확인.
+6. ⏳ n_folds=52가 real 데이터에서 feasible한지 — Task 3(acceptance)에서 확정; runner test는 부족 시 낮춤.
