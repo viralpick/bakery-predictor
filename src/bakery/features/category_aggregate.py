@@ -175,10 +175,22 @@ def build_item_adjusted_demand(
     이므로 두 항 기준 통일. discount_rows 자동로드 시 closing_returns도 자동로드.
     """
     if discount_rows is None:
-        discount_rows = load_sales_with_discount().closing_discount()
-        if closing_returns is None:
-            from bakery.analysis.discount import load_closing_returns
-            closing_returns = load_closing_returns()
+        # 신규 라인레벨 클린 parquet이 있으면 그걸 우선(canonical과 소스 정합).
+        # 없으면 옛 0520 xlsx로 폴백(하위호환·CI).
+        from bakery.analysis.discount import (
+            CLEAN_PARQUET_DEFAULT,
+            load_closing_returns,
+            load_closing_returns_v2,
+            load_sales_with_discount_v2,
+        )
+        if CLEAN_PARQUET_DEFAULT.exists():
+            discount_rows = load_sales_with_discount_v2().closing_discount()
+            if closing_returns is None:
+                closing_returns = load_closing_returns_v2()
+        else:
+            discount_rows = load_sales_with_discount().closing_discount()
+            if closing_returns is None:
+                closing_returns = load_closing_returns()
     out = daily.copy()
     out["item_id"] = out["item_id"].astype(str)
     out["date"] = pd.to_datetime(out["date"])

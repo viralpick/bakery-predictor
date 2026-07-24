@@ -1280,6 +1280,38 @@ def cmd_format_bonavi(
     )
 
 
+@app.command("format-bonavi-v2")
+def cmd_format_bonavi_v2(
+    sales_xlsx: Path = Path("data/internal/보나비 판매 데이터_20260721.xlsx"),
+    master_xlsx: Path = Path("data/internal/보나비 데이터_20260526.xlsx"),
+    store_code: str = "1000000047",
+    rename_store_id: str = "store_gw01",
+    out_path: Path = Path("data/internal/bonavi_daily.parquet"),
+    reconvert: bool = False,
+) -> None:
+    """신규 라인레벨 파일(0721) → DAILY_COLUMNS parquet. 타깃=당일폐기Y − salad.
+
+    판매정보2 시트 헤더 스왑을 값 기준으로 교정하고, 라벨구간(재고정보 2021-2025)만
+    daily로 만든다. reconvert=True면 클린 parquet을 xlsx에서 재생성(느림).
+    """
+    from .data import bonavi_loader_v2 as v2
+
+    if reconvert or not v2.CLEAN_PARQUET.exists():
+        console.print(f"[cyan]convert[/] {sales_xlsx} → {v2.CLEAN_PARQUET} (per-sheet 스왑 교정)")
+        v2.convert_sales_to_parquet(sales_xlsx, v2.CLEAN_PARQUET)
+    console.print(f"[cyan]bonavi-v2[/] {v2.CLEAN_PARQUET} → {out_path} (store={store_code} → {rename_store_id})")
+    out = v2.build_v2(
+        master_xlsx=master_xlsx, store_code=store_code,
+        rename_store_id=rename_store_id, out_path=out_path,
+    )
+    df = pd.read_parquet(out)
+    console.print(
+        f"[green]wrote[/] {out} ({len(df):,} rows, "
+        f"{df['item_id'].nunique()} items, {df['category_id'].nunique()} categories, "
+        f"{df['date'].nunique()} days, stockout {df['is_stockout'].sum():,})"
+    )
+
+
 @app.command("ingest-living-pop-csv")
 def cmd_ingest_living_pop_csv() -> None:
     """data/external/living_pop_zips/*.zip(LOCAL_PEOPLE_DONG history) → living_population.parquet.
