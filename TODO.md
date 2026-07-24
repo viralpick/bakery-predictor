@@ -1,5 +1,15 @@
 # TODO
 
+## Harness Backbone (실험 단일 표면, 2026-07-24 설계)
+
+설계: docs/superpowers/specs/2026-07-24-harness-backbone-design.md. cli.py 스파인을 `src/bakery/harness/`로 추출, YAML config 1파일=1실험, canonical 강제+경고, 단계별 캐시·재개.
+
+- [ ] **Phase 1 스파인** — config/registry/runner (캐시·재개). 완료기준: 광교 lightgbm_v2 adjusted_demand 기존 backtest 숫자를 YAML로 재현.
+- [ ] **Phase 2 결과분석** — report.py + result_report.html (metric 6종 + KPI 카드 + 실험 비교).
+- [ ] **Phase 3 데이터분석** — eda.py + data_report.html.
+- [ ] **★차기 별도 스펙 (A) 전처리 일반화** — 새 데이터/스펙이 와도 loader/adapter만 추가해 canonical schema 진입. 데이터 수령 사이드라 성격이 달라 backbone 스펙에서 분리(사용자 결정 2026-07-24). 참조: bonavi_loader_v2, docs/superpowers/specs/2026-07-23-new-data-integration-design.md.
+- [ ] **★차기 별도 스펙 (B) AOS/온톨로지 예측 배선 정합** — ontology/scenario.py가 GlobalLGBM(v2) 직접 fit(네 번째 예측 배선처)을 harness canonical 스택 호출로 재배선. onto/scenario/writeback/loop가 단일 예측 엔진 공유. decision(v6)은 이미 post_layer로 흡수, AOS 기계 자체는 범위 밖. 사용자 결정 2026-07-24. 참조: project_poc_v7_aos_demonstrator.
+
 ## v7 PoC
 
 - [x] **상류 레버 `what_if_driver`** (S6, PR#11) — 드라이버 가상변경 → 실 LightGBM(v2) 재예측 → risk/cost link 전파. 읽기 전용. 설계 docs/superpowers/specs/2026-06-30-whatif-driver-design.md.

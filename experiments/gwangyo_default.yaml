@@ -1,0 +1,16 @@
+# experiments/gwangyo_default.yaml
+name: gwangyo_default
+data:
+  source: real
+  store: store_gw01
+target: adjusted_demand_unit
+forecaster: [category_total]        # distributional_total은 Phase 2 실행(등록만)
+layers: [event_prior]
+event_priors: gwangyo
+window:
+  scheme: expanding
+  n_folds: 52
+  window_days: 730
+  horizon_days: 7
+alpha: 0.8
+production_q: 0.85
