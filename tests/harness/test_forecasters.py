@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 
 from bakery.features.category_aggregate import build_category_daily, build_features
 from bakery.harness.forecasters import CategoryTotalForecaster, DistributionalTotalForecaster

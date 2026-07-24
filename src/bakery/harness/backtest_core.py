@@ -1,10 +1,12 @@
-"""windowed_backtest 코어 — 카테고리 총량 + event_prior (발행 헤드라인 엔진).
+"""windowed_backtest 코어 — forecaster-general expanding backtest + event_prior.
 
-scripts/store_predictive_power.py에서 추출한 단일 출처. leakage-safe:
-prior는 pre-test 전체 history로 fit (train window보다 김).
+forecaster 인자로 category_total(LightGBM, 기본) / distributional_total(NGBoost) 등을
+태운다(Forecaster 어댑터). default=None→CategoryTotalForecaster라 category 경로는
+scripts/store_predictive_power.py 원본과 바이트 동등(엔진 동등성 게이트로 회귀 방지).
 
-원본 모듈 상수(ALPHA=0.8, PROD_Q=0.85, HORIZON=7, MIN_TRAIN_ROWS=60)는 함수 인자
-기본값으로 흡수했다 — 값 동일이라 로직 불변(엔진 동등성 게이트).
+leakage-safe: event_prior는 pre-test 전체 history로 fit(train window보다 김), 예측 이후
+post-model 블렌드라 forecaster 무관하게 균일 적용. 원본 모듈 상수(ALPHA=0.8, PROD_Q=0.85,
+HORIZON=7, MIN_TRAIN_ROWS=60)는 함수 인자 기본값으로 흡수했다(값 동일).
 """
 from __future__ import annotations
 
