@@ -11,8 +11,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from bakery.models.category_total import BacktestResult, fit_category_total
+from bakery.models.category_total import BacktestResult
 from bakery.models.event_prior import EventLevelPrior
+from bakery.harness.forecasters import CategoryTotalForecaster, Forecaster
 
 MIN_TRAIN_ROWS = 60
 
@@ -23,7 +24,9 @@ def windowed_backtest(
     horizon_days: int = 7, production_q: float = 0.85, alpha: float = 0.8,
     events: dict | None = None, lunar_events: dict | None = None,
     min_train_rows: int = MIN_TRAIN_ROWS,
+    forecaster: Forecaster | None = None,
 ) -> BacktestResult:
+    fc = forecaster if forecaster is not None else CategoryTotalForecaster()
     df = df.sort_values("date").reset_index(drop=True).dropna(subset=[target_col]).copy()
     df = df.dropna().reset_index(drop=True)
     total = len(df)
@@ -42,9 +45,8 @@ def windowed_backtest(
         train_df = df[(df["date"] < test_start_date) & (df["date"] >= test_start_date - window)]
         if len(train_df) < min_train_rows:
             continue
-        model = fit_category_total(
-            train_df, target_col=target_col,
-            alpha_demand=alpha, production_q=production_q,
+        model = fc.fit(
+            train_df, target_col=target_col, alpha=alpha, production_q=production_q,
         )
         exp_pred = model.predict_expected(test_df)
         prod_pred = model.predict_production(test_df)
