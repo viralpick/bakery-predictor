@@ -43,8 +43,7 @@ from bakery.features.category_aggregate import (
     build_category_daily,
     build_features,
 )
-from bakery.models.category_total import BacktestResult, fit_category_total
-from bakery.models.event_prior import EventLevelPrior
+from bakery.harness.backtest_core import metrics_from_preds, windowed_backtest
 from store_daily import build_store_closing_rows, build_store_daily, item_category_map
 from v4_new_data_backtest import V2
 
@@ -97,86 +96,6 @@ STORE_EVENT_PRIORS: dict[str, dict[str, dict]] = {
     "메세나폴리스": {"events": dict(XMAS), "lunar_events": dict(SEOLLAL)},
     "광화문":     {"events": dict(XMAS), "lunar_events": {}},
 }
-
-
-# ---------------------------------------------------------------------------
-# leakage-safe windowed backtest (expanding_window_backtest 복제 + train slice 교체)
-# ---------------------------------------------------------------------------
-
-def windowed_backtest(
-    df: pd.DataFrame,
-    *,
-    window_days: int,
-    target_col: str = TARGET,
-    n_folds: int = MAIN_FOLDS,
-    horizon_days: int = HORIZON,
-    production_q: float = PROD_Q,
-    events: dict[str, tuple[int, int]] | None = None,
-    lunar_events: dict | None = None,
-) -> BacktestResult:
-    """category_total.expanding_window_backtest 와 동일하되 train slice 만 교체.
-
-    train = df[(date < test_start_date) & (date >= test_start_date - window_days)].
-    test slicing (row 기반 iloc) 은 원본과 동일 → anchor 재현 가능.
-    """
-    df = df.sort_values("date").reset_index(drop=True).dropna(subset=[target_col]).copy()
-    df = df.dropna().reset_index(drop=True)
-    total = len(df)
-    test_size = horizon_days
-    if total <= n_folds * test_size + MIN_TRAIN_ROWS:
-        raise ValueError(f"Not enough data: total={total}, folds={n_folds}")
-
-    window = pd.Timedelta(days=window_days)
-    folds, preds = [], []
-    for k in range(n_folds):
-        test_end = total - k * test_size
-        test_start = test_end - test_size
-        test_df = df.iloc[test_start:test_end]
-        test_start_date = test_df["date"].iloc[0]
-        # === 유일한 변경점: train slice 를 날짜 기반 rolling window 로 ===
-        train_df = df[(df["date"] < test_start_date) & (df["date"] >= test_start_date - window)]
-        if len(train_df) < MIN_TRAIN_ROWS:
-            continue
-        model = fit_category_total(
-            train_df, target_col=target_col,
-            alpha_demand=ALPHA, production_q=production_q,
-        )
-        exp_pred = model.predict_expected(test_df)
-        prod_pred = model.predict_production(test_df)
-        # 특수일 레벨-앵커 prior: pre-test 전체 history로 fit (train window보다 길게, leakage-safe)
-        hist = df[df["date"] < test_start_date]
-        prior = EventLevelPrior(events=events, lunar_events=lunar_events).fit(hist, target_col=target_col)
-        exp_pred, prod_pred = prior.blend(test_df["date"].values, exp_pred, prod_pred)
-        actual = test_df[target_col].values
-        wape = np.abs(actual - exp_pred).sum() / max(np.abs(actual).sum(), 1)
-        folds.append(dict(
-            fold=k, n_train=len(train_df), n_test=len(test_df),
-            test_start=test_start_date, test_end=test_df["date"].iloc[-1],
-            wape=wape,
-            wpe=(exp_pred - actual).sum() / max(actual.sum(), 1),
-            prod_pct_under=(prod_pred < actual).mean(),
-        ))
-        preds.append(pd.DataFrame({
-            "date": test_df["date"].values, "fold": k,
-            "actual": actual, "expected": exp_pred, "production": prod_pred,
-        }))
-    return BacktestResult(
-        folds=pd.DataFrame(folds).sort_values("fold").reset_index(drop=True),
-        predictions=pd.concat(preds, ignore_index=True),
-    )
-
-
-def metrics_from_preds(p: pd.DataFrame) -> dict:
-    actual, expected, prod = p["actual"], p["expected"], p["production"]
-    surplus = (prod - actual).clip(lower=0)
-    return {
-        "n_test": int(len(p)),
-        "wape": float(np.abs(actual - expected).sum() / max(np.abs(actual).sum(), 1)),
-        "wpe": float((expected - actual).sum() / max(actual.sum(), 1)),
-        "stockout_risk": float((prod < actual).mean()),
-        "surplus_mean_units": float(surplus.mean()),
-        "surplus_rate": float(surplus.sum() / max(actual.sum(), 1)),
-    }
 
 
 # ---------------------------------------------------------------------------
