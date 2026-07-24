@@ -43,6 +43,16 @@ class Forecaster(Protocol):
 
 - **CategoryTotalForecaster** (`name="category_total"`): `fit` → `fit_category_total(train, target_col=target_col, alpha_demand=alpha, production_q=production_q)`. 반환 `CategoryTotalModel`이 이미 `predict_expected`/`predict_production`(q fit-고정) 계약 만족 → 그대로 반환(무손상).
 - **DistributionalTotalForecaster** (`name="distributional_total"`): `fit` → `fit_distributional_total(train, target_col=target_col)` (alpha 무시) 후 **얇은 wrapper**(`_ProdQBound`)로 감싸 `predict_production(df)`가 인자 없이 `model.predict_production(df, production_q=production_q)`를 호출하도록 바인딩. **ngboost는 fit 내부 lazy import**(category 전용 실행 시 무거운 import 회피).
+  - **★결정성 (hermetic seed)**: NGBoost 0.5.11은 `NGBRegressor(random_state=...)` 인자만으론 비결정적(fit마다 상대오차 ~0.8%) — **전역 numpy RNG**를 사용하기 때문. 실증 완료: `random_state=42`만으론 diff 2.4단위, `np.random.seed(42)` 후 fit → diff 0.0. 어댑터 `fit`에서 **save/restore로 hermetic하게** 시드(전역 RNG 누수 없음, code-quality "숨은 글로벌 변경" 회피). `fit_distributional_total`(공유 src)은 건드리지 않음(기존 distributional 스택 수치 shift 방지). 시드는 `42` 하드코딩(fit_distributional_total 기본값과 일치, 설정화는 YAGNI).
+    ```python
+    state = np.random.get_state()
+    np.random.seed(42)
+    try:
+        model = fit_distributional_total(train, target_col=target_col)
+    finally:
+        np.random.set_state(state)
+    ```
+    fold 루프 8-fold 2회 실행 run-to-run 정확일치·루프 전후 RNG 상태 불변 실증 완료.
 
 ### 2. `backtest_core.windowed_backtest` 일반화 — 한 곳만 변경
 
@@ -92,7 +102,7 @@ out/<exp>/
 ## Acceptance (검증 기준)
 
 1. **★category_total 엔진 동등성 게이트(기존 `test_backtest_core_equivalence`) 계속 통과** — 어댑터 리팩토링이 category 경로를 바꾸지 않았음을 증명(회귀 방지 핵심 hard gate).
-2. **distributional 신규 test** (`test_distributional_wiring`): `windowed_backtest(feat, forecaster=DistributionalTotalForecaster())`가 예측 산출 + **결정성**(random_state=42 → 2회 실행 `expected`/`production` 정확일치) + WAPE 유한·정상 범위(0<wape<1). harness에 distributional "원본"이 없으므로 정확일치 대신 결정성+sanity.
+2. **distributional 신규 test** (`test_distributional_wiring`): `windowed_backtest(feat, forecaster=DistributionalTotalForecaster())`가 예측 산출 + **결정성**(hermetic seed 덕분에 2회 실행 `expected`/`production` `assert_array_equal` 정확일치 — random_state 인자만으론 불충분, §1 hermetic seed 참조) + WAPE 유한·정상 범위(0<wape<1). harness에 distributional "원본"이 없으므로 정확일치 대신 결정성+sanity. **주의**: 이 결정적 WAPE는 한 realization일 뿐, 과거 발행된(비결정적) full-window distributional 수치와 같을 필요 없음 → 특정 앵커 등호 아닌 sane 범위로만 단언.
 3. **runner test**: `ExperimentResult` 반환, `runs`에 두 forecaster 키, `comparison` 2행, 산출물 파일 존재. distributional이 느리므로 **소 n_folds(8)** 사용.
 4. 전체 스위트 통과(사전존재 `test_store_daily_redefine` 실패는 무관, 별도).
 
