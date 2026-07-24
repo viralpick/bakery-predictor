@@ -1,5 +1,7 @@
 import pytest
-from bakery.harness.registry import ForecasterKind, kind_of, LAYER_NAMES, is_supported_phase1
+from bakery.harness.registry import (
+    ForecasterKind, kind_of, LAYER_NAMES, is_runnable, build_forecaster,
+)
 
 
 def test_kind_taxonomy():
@@ -19,6 +21,19 @@ def test_layers_registered():
     assert "decision" in LAYER_NAMES
 
 
-def test_phase1_supports_category_total_only():
-    assert is_supported_phase1("category_total") is True
-    assert is_supported_phase1("distributional_total") is False
+def test_is_runnable():
+    assert is_runnable("category_total") is True
+    assert is_runnable("distributional_total") is True
+    assert is_runnable("lightgbm_v2") is False
+    assert is_runnable("bogus") is False
+
+
+def test_build_forecaster():
+    from bakery.harness.forecasters import CategoryTotalForecaster, DistributionalTotalForecaster
+    assert isinstance(build_forecaster("category_total"), CategoryTotalForecaster)
+    assert isinstance(build_forecaster("distributional_total"), DistributionalTotalForecaster)
+
+
+def test_build_forecaster_unknown_raises():
+    with pytest.raises(KeyError):
+        build_forecaster("lightgbm_v2")

@@ -1,41 +1,53 @@
 from bakery.harness.config import ExperimentSpec, DataSpec, WindowSpec
-from bakery.harness.runner import run_experiment, RunResult, STAGES
+from bakery.harness.runner import run_experiment, ExperimentResult, RunResult, STAGES
 
 
-def _spec(n_folds=8):   # 8 folds: wrapper/캐시/IO 검증엔 충분(엔진 정확성은 Task 3 equivalence가 52에서 담당)
+def _spec(forecaster=("category_total", "distributional_total"), n_folds=8):
     return ExperimentSpec(
         name="gw_core", data=DataSpec(source="real", store="store_gw01"),
-        target="adjusted_demand_unit", forecaster=["category_total"], layers=["event_prior"],
+        target="adjusted_demand_unit", forecaster=list(forecaster), layers=["event_prior"],
         event_priors="gwangyo",
         window=WindowSpec(scheme="expanding", n_folds=n_folds, window_days=730, horizon_days=7),
         alpha=0.8, production_q=0.85,
     )
 
 
-def test_run_returns_runresult(tmp_path):
+def test_run_returns_experiment_result(tmp_path):
     result = run_experiment(_spec(), out_dir=tmp_path / "out", cache_dir=None)
-    assert isinstance(result, RunResult)
+    assert isinstance(result, ExperimentResult)
     assert result.name == "gw_core"
-    assert not result.predictions.empty
-    assert {"date", "expected", "production", "actual"}.issubset(result.predictions.columns)
-    assert "wape" in result.metrics
+    assert set(result.runs) == {"category_total", "distributional_total"}
+    assert all(isinstance(r, RunResult) for r in result.runs.values())
+    assert len(result.comparison) == 2
+    assert {"forecaster", "wape"}.issubset(result.comparison.columns)
 
 
 def test_run_writes_artifacts(tmp_path):
     run_experiment(_spec(), out_dir=tmp_path / "out", cache_dir=None)
     d = tmp_path / "out" / "gw_core"
     assert (d / "config_resolved.yaml").exists()
-    assert (d / "predictions.csv").exists()
-    assert (d / "metrics.json").exists()
+    assert (d / "comparison.csv").exists()
+    for fname in ("category_total", "distributional_total"):
+        assert (d / fname / "predictions.csv").exists()
+        assert (d / fname / "metrics.json").exists()
 
 
 def test_features_cache_hit(tmp_path):
     cache = tmp_path / "cache"
     t1, t2 = [], []
-    run_experiment(_spec(), out_dir=tmp_path / "o1", cache_dir=cache, _trace=t1)
-    run_experiment(_spec(), out_dir=tmp_path / "o2", cache_dir=cache, _trace=t2)
+    spec = _spec(forecaster=("category_total",))   # 캐시만 검증 — 빠른 단일 forecaster
+    run_experiment(spec, out_dir=tmp_path / "o1", cache_dir=cache, _trace=t1)
+    run_experiment(spec, out_dir=tmp_path / "o2", cache_dir=cache, _trace=t2)
     assert ("features", "miss") in t1
     assert ("features", "hit") in t2
+
+
+def test_unrunnable_skipped_with_warning(tmp_path):
+    import pytest
+    spec = _spec(forecaster=("category_total", "lightgbm_v2"))
+    with pytest.warns(UserWarning, match="lightgbm_v2"):
+        result = run_experiment(spec, out_dir=tmp_path / "out", cache_dir=None)
+    assert set(result.runs) == {"category_total"}
 
 
 def test_stages_constant():

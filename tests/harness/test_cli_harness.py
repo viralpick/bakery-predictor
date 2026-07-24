@@ -10,5 +10,7 @@ def test_harness_run_default_config(tmp_path):
         "--out", str(tmp_path / "out"),
     ])
     assert result.exit_code == 0, result.output
-    assert (tmp_path / "out" / "gwangyo_default" / "predictions.csv").exists()
-    assert (tmp_path / "out" / "gwangyo_default" / "metrics.json").exists()
+    d = tmp_path / "out" / "gwangyo_default"
+    assert (d / "comparison.csv").exists()
+    assert (d / "category_total" / "predictions.csv").exists()
+    assert (d / "category_total" / "metrics.json").exists()
