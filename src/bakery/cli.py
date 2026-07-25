@@ -1336,6 +1336,27 @@ def cmd_format_bonavi_v2(
     )
 
 
+@app.command("build-data")
+def cmd_build_data(reconvert: bool = False, diagnose: bool = True) -> None:
+    """raw → interim → processed/internal 재생성. diagnose면 on-disk와 rtol 진단."""
+    import tempfile
+
+    from .data import pipeline
+
+    if diagnose:
+        with tempfile.TemporaryDirectory() as td:
+            rebuilt = pipeline.build_internal(reconvert=reconvert, out_root=Path(td))
+            ref = {k: paths.dataset(k) for k in rebuilt}
+            diff = pipeline.equivalence_diff(rebuilt, ref)
+            for name, d in diff.items():
+                tag = "OK" if d <= 1e-9 else "DRIFT"
+                console.print(f"[{'green' if d <= 1e-9 else 'red'}]{tag}[/] {name}: max_diff={d:g}")
+            console.print("[dim]DRIFT는 §6 커버리지 리포트로 표면화(재배치 차단 아님)[/]")
+    else:
+        out = pipeline.build_internal(reconvert=reconvert)
+        console.print(f"[green]wrote[/] {list(out.values())}")
+
+
 @app.command("ingest-living-pop-csv")
 def cmd_ingest_living_pop_csv() -> None:
     """data/external/living_pop_zips/*.zip(LOCAL_PEOPLE_DONG history) → living_population.parquet.
