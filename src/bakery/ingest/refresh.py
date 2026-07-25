@@ -23,10 +23,8 @@
   - `living_population_api.backfill`은 서울 열린데이터광장 rolling ~2개월
     윈도우만 반환한다. on-disk `living_population.parquet`은 2017년까지의
     CSV backfill 이력을 포함하므로, refresh_fn 호출 시 어댑터가 파일을
-    "최근 2개월분"으로 통째 덮어써 과거 이력이 사라진다. 이 위험 때문에
-    실제 fetch 경로는 이 태스크에서 실행하지 않았고(.env 미가정), dry_run만
-    검증했다. 실사용 전 living_population_api.backfill 자체에 병합 로직을
-    추가하거나 별도 CSV 재적재 스텝을 거쳐야 한다.
+    "최근 2개월분"으로 통째 덮어써 과거 이력이 사라질 수 있다 — 아래 커버리지
+    보존 가드가 이를 감지해 자동으로 되돌린다(§coverage guard).
   - forecast(short/mid)는 둘 다 동일한 `forecast_api.backfill_forecast()` 한
     호출로 채워진다. `--source all`로 갱신하면 이 함수가 두 번 불릴 수 있어
     API 호출이 중복되지만(허용 budget 내), 별도 dedup은 하지 않았다(KISS).
@@ -34,13 +32,35 @@
     월 스냅샷(`ym`) 1종, 분기(`quarter`) 1종, 날짜 개념이 아예 없는 경우
     (`competitor_raw`, business_id 단위 스냅샷) 1종 — 이 마지막 경우는 parquet
     파일의 mtime을 freshness 근사치로 쓴다.
+
+§coverage guard (리뷰 후속, data-loss 방지)
+  모든 "observed" 어댑터가 자기 fetch 창만으로 파일을 통째 덮어쓰는 구조라서,
+  fetch 창이 on-disk 이력보다 좁으면(예: weather 기본 시작일 2024-01-01인데
+  파일은 2021년부터 있음) 실제 갱신이 과거 이력을 조용히 삭제할 수 있다.
+  이건 어댑터별로 패치하지 않고 `refresh_source` 한 곳에 일반화된 가드로
+  구현했다 — "어댑터 출력을 받아들일지 말지 결정"은 오케스트레이션의 역할이지
+  어댑터 재구현이 아니다:
+    1. non-dry-run 시작 전, 대상 parquet이 있으면 바이트 그대로 임시 파일에
+       스냅샷.
+    2. spec.refresh_fn() 호출 (어댑터가 파일을 덮어씀).
+    3. 새 파일이 스냅샷보다 row 수가 적거나 최소 날짜(freshness key)가
+       더 늦으면(=커버리지가 줄면) 스냅샷을 원복하고 결과를 PROTECTED로
+       표시한다. `force=True`면 축소를 그대로 받아들인다.
+    4. 커버리지가 같거나 늘면(=superset, calendar/consumption/population의
+       "매번 전체 재fetch" 패턴) 정상적으로 새 파일을 유지한다.
+  가드는 kind=="observed"에만 적용한다 — forecast는 매번 창이 미래로
+  슬라이드하며 "축소"처럼 보이는 게 정상 동작이라 대상에서 제외한다.
 """
 from __future__ import annotations
 
+import os
+import shutil
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date as Date
 from datetime import timedelta
+from pathlib import Path
 
 import pandas as pd
 
@@ -95,6 +115,8 @@ class RefreshResult:
     added_rows: int
     last_date: pd.Timestamp | None
     gap_days: int
+    applied: bool = True          # False=coverage guard가 축소를 감지해 원복(PROTECTED)
+    message: str | None = None    # PROTECTED 사유 등 부가 메시지
 
 
 def _read_dataset(dataset_key: str) -> pd.DataFrame:
@@ -134,24 +156,103 @@ def _freshness(df: pd.DataFrame, spec: SourceSpec) -> tuple[pd.Timestamp | None,
     return last_date, gap
 
 
-def refresh_source(spec: SourceSpec, today: pd.Timestamp, dry_run: bool = False) -> RefreshResult:
+def _coverage_stats(df: pd.DataFrame, spec: SourceSpec) -> tuple[int, pd.Timestamp | None]:
+    """(row_count, min_freshness_key). date_col=None(competitor 등)은 min=None —
+    row 수 축소만으로 판정한다."""
+    if df.empty:
+        return 0, None
+    if spec.date_col is None:
+        return len(df), None
+    if spec.date_col in ("ym", "quarter"):
+        return len(df), _period_to_timestamp(df, spec.date_col).min()
+    return len(df), pd.to_datetime(df[spec.date_col]).min()
+
+
+def _is_coverage_shrink(
+    before: tuple[int, pd.Timestamp | None], after: tuple[int, pd.Timestamp | None],
+) -> bool:
+    """이전 대비 row 수가 줄었거나(=일부 소실) 최소 날짜가 더 늦어졌으면(=과거 이력
+    소실) 커버리지 축소로 판정. 이전이 애초에 비어 있었다면 잃을 게 없으므로 False."""
+    before_rows, before_min = before
+    after_rows, after_min = after
+    if before_rows == 0:
+        return False
+    if after_rows < before_rows:
+        return True
+    return bool(before_min is not None and after_min is not None and after_min > before_min)
+
+
+def _snapshot_dataset(dataset_path: Path) -> Path | None:
+    """갱신 전 원본 parquet을 같은 디렉터리의 임시 파일로 바이트 그대로 복사."""
+    if not dataset_path.exists():
+        return None
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{dataset_path.stem}.refresh_bak_", suffix=".parquet", dir=dataset_path.parent,
+    )
+    os.close(fd)
+    snapshot_path = Path(tmp_name)
+    shutil.copy2(dataset_path, snapshot_path)
+    return snapshot_path
+
+
+def _apply_coverage_guard(
+    spec: SourceSpec, dataset_path: Path, snapshot_path: Path | None,
+    before: pd.DataFrame, after: pd.DataFrame, force: bool,
+) -> tuple[pd.DataFrame, bool, str | None]:
+    """축소 감지 시 스냅샷 원복. 반환은 (최종 df, applied, message)."""
+    if spec.kind != "observed" or snapshot_path is None:
+        return after, True, None
+
+    before_stats = _coverage_stats(before, spec)
+    after_stats = _coverage_stats(after, spec)
+    if not _is_coverage_shrink(before_stats, after_stats):
+        snapshot_path.unlink(missing_ok=True)
+        return after, True, None
+
+    before_rows, before_min = before_stats
+    after_rows, after_min = after_stats
+    detail = (
+        f"refresh would shrink coverage (was {before_rows} rows from {before_min}, "
+        f"fetched {after_rows} rows from {after_min})"
+    )
+    if force:
+        snapshot_path.unlink(missing_ok=True)
+        return after, True, f"{detail} — kept anyway (--force)"
+
+    shutil.move(str(snapshot_path), str(dataset_path))
+    return before, False, f"{detail} — kept existing; pass --force to override"
+
+
+def refresh_source(
+    spec: SourceSpec, today: pd.Timestamp, dry_run: bool = False, force: bool = False,
+) -> RefreshResult:
     """소스 하나 갱신. dry_run=True면 refresh_fn(실제 API 호출)을 절대 부르지 않고
     현재 on-disk freshness만 보고한다.
 
-    observed/forecast 구분은 어댑터 자체의 overwrite 동작에 내재돼 있다(둘 다
-    refresh_fn 호출 후 파일 전체를 다시 읽어 diff하는 동일 코드 경로) — 여기서
-    별도 분기하지 않는다.
+    non-dry-run에서는 §coverage guard(모듈 docstring)가 적용된다: kind=="observed"
+    소스가 fetch 후 on-disk 이력보다 좁아지면(row 수 감소 또는 최소 날짜 후퇴)
+    자동으로 원복하고 `applied=False`로 표시한다. force=True면 축소를 그대로 받아들인다.
+    forecast는 창이 매번 미래로 슬라이드하는 게 정상이라 가드 대상에서 제외한다.
     """
+    dataset_path = paths.dataset(spec.dataset_key)
     before = _read_dataset(spec.dataset_key)
     if dry_run:
         last_date, gap = _freshness(before, spec)
         return RefreshResult(name=spec.name, added_rows=0, last_date=last_date, gap_days=gap)
 
+    snapshot_path = _snapshot_dataset(dataset_path) if spec.kind == "observed" else None
     spec.refresh_fn()
-    after = _read_dataset(spec.dataset_key)
-    added_rows = len(after) - len(before)
-    last_date, gap = _freshness(after, spec)
-    return RefreshResult(name=spec.name, added_rows=added_rows, last_date=last_date, gap_days=gap)
+    fetched = _read_dataset(spec.dataset_key)
+
+    final_df, applied, message = _apply_coverage_guard(
+        spec, dataset_path, snapshot_path, before, fetched, force,
+    )
+    added_rows = len(final_df) - len(before)
+    last_date, gap = _freshness(final_df, spec)
+    return RefreshResult(
+        name=spec.name, added_rows=added_rows, last_date=last_date, gap_days=gap,
+        applied=applied, message=message,
+    )
 
 
 def freshness_summary(specs: list[SourceSpec]) -> pd.DataFrame:
@@ -174,10 +275,16 @@ def select_sources(source: str) -> list[SourceSpec]:
 
 
 def _default_calendar_backfill() -> object:
+    # start_year=2024는 on-disk calendar_raw.parquet의 실제 커버리지(2024~)와 우연히
+    # 맞물려 있을 뿐 보장되지 않는다 — 커버리지 보존은 여기가 아니라 refresh_source의
+    # coverage guard가 책임진다.
     return calendar_api.backfill(2024, Date.today().year)
 
 
 def _default_weather_backfill() -> object:
+    # start=2024-01-01은 on-disk weather_observed.parquet 실제 이력(2021~)보다 좁다 —
+    # 그대로 두면 fetch가 2021-2023을 삭제하므로 refresh_source의 coverage guard가
+    # 이 축소를 감지해 원복한다(§coverage guard, 모듈 docstring).
     return weather_api.backfill(Date(2024, 1, 1), Date.today())
 
 

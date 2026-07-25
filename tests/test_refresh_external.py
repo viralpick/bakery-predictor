@@ -86,3 +86,101 @@ def test_refresh_source_dry_run_never_calls_refresh_fn():
     assert called["count"] == 0
     assert result.name == "weather"
     assert result.added_rows == 0
+
+
+# --- coverage guard (리뷰 후속: data-loss 방지) ---------------------------
+#
+# 모든 어댑터가 자기 fetch 창만으로 parquet을 통째 덮어쓰므로, fetch 창이
+# on-disk 이력보다 좁으면(예: weather 기본 시작일 2024가 2021년부터 있는
+# 파일을 덮어씀) 과거 이력이 조용히 삭제될 수 있다. 아래는 실제 API 없이
+# 가짜 refresh_fn으로 그 축소 시나리오를 재현해 가드를 검증한다.
+
+def _write_parquet(path, dates: list[str], values: list[int]) -> None:
+    pd.DataFrame({"date": pd.to_datetime(dates), "v": values}).to_parquet(path, index=False)
+
+
+def test_coverage_guard_restores_snapshot_on_shrink(tmp_path, monkeypatch):
+    target = tmp_path / "fake_obs.parquet"
+    _write_parquet(target, ["2021-01-01", "2022-01-01", "2023-01-01", "2024-01-01", "2025-01-01"],
+                    [0, 1, 2, 3, 4])
+    monkeypatch.setattr(refresh.paths, "dataset", lambda name: target)
+
+    def _shrink_fetch():
+        _write_parquet(target, ["2024-01-01", "2025-01-01"], [30, 40])
+        return target
+
+    spec = refresh.SourceSpec(name="fake_obs", dataset_key="fake_obs", kind="observed",
+                               date_col="date", refresh_fn=_shrink_fetch)
+    result = refresh.refresh_source(spec, today=pd.Timestamp("2026-07-25"), dry_run=False, force=False)
+
+    restored = pd.read_parquet(target)
+    assert len(restored) == 5  # 원본 5행으로 복원됨
+    assert restored["v"].tolist() == [0, 1, 2, 3, 4]
+    assert result.applied is False
+    assert result.added_rows == 0
+    assert result.message is not None and "shrink" in result.message
+
+
+def test_coverage_guard_force_keeps_shrunk_result(tmp_path, monkeypatch):
+    target = tmp_path / "fake_obs.parquet"
+    _write_parquet(target, ["2021-01-01", "2022-01-01", "2023-01-01", "2024-01-01", "2025-01-01"],
+                    [0, 1, 2, 3, 4])
+    monkeypatch.setattr(refresh.paths, "dataset", lambda name: target)
+
+    def _shrink_fetch():
+        _write_parquet(target, ["2024-01-01", "2025-01-01"], [30, 40])
+        return target
+
+    spec = refresh.SourceSpec(name="fake_obs", dataset_key="fake_obs", kind="observed",
+                               date_col="date", refresh_fn=_shrink_fetch)
+    result = refresh.refresh_source(spec, today=pd.Timestamp("2026-07-25"), dry_run=False, force=True)
+
+    kept = pd.read_parquet(target)
+    assert len(kept) == 2  # force=True → 축소된 결과 그대로 유지
+    assert kept["v"].tolist() == [30, 40]
+    assert result.applied is True
+    assert result.added_rows == 2 - 5
+
+
+def test_coverage_guard_keeps_superset_without_restore(tmp_path, monkeypatch):
+    target = tmp_path / "fake_obs.parquet"
+    _write_parquet(target, ["2023-01-01", "2024-01-01", "2025-01-01"], [2, 3, 4])
+    monkeypatch.setattr(refresh.paths, "dataset", lambda name: target)
+
+    def _superset_fetch():
+        _write_parquet(
+            target,
+            ["2019-01-01", "2020-01-01", "2021-01-01", "2022-01-01",
+             "2023-01-01", "2024-01-01", "2025-01-01"],
+            [-4, -3, -2, -1, 2, 3, 4],
+        )
+        return target
+
+    spec = refresh.SourceSpec(name="fake_obs", dataset_key="fake_obs", kind="observed",
+                               date_col="date", refresh_fn=_superset_fetch)
+    result = refresh.refresh_source(spec, today=pd.Timestamp("2026-07-25"), dry_run=False, force=False)
+
+    kept = pd.read_parquet(target)
+    assert len(kept) == 7  # superset 그대로 유지, 원복 안 됨
+    assert result.applied is True
+    assert result.added_rows == 7 - 3
+
+
+def test_coverage_guard_skipped_for_forecast_kind(tmp_path, monkeypatch):
+    """forecast는 창이 매 호출마다 미래로 슬라이드하는 게 정상이라 가드 대상에서 제외."""
+    target = tmp_path / "fake_forecast.parquet"
+    _write_parquet(target, ["2026-07-20", "2026-07-21", "2026-07-22", "2026-07-23", "2026-07-24"],
+                    [0, 1, 2, 3, 4])
+    monkeypatch.setattr(refresh.paths, "dataset", lambda name: target)
+
+    def _sliding_fetch():
+        _write_parquet(target, ["2026-07-26", "2026-07-27"], [6, 7])
+        return target
+
+    spec = refresh.SourceSpec(name="fake_forecast", dataset_key="fake_forecast", kind="forecast",
+                               date_col="date", refresh_fn=_sliding_fetch)
+    result = refresh.refresh_source(spec, today=pd.Timestamp("2026-07-25"), dry_run=False, force=False)
+
+    kept = pd.read_parquet(target)
+    assert len(kept) == 2  # 가드 미적용 — 어댑터 출력 그대로
+    assert result.applied is True

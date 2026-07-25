@@ -1406,12 +1406,14 @@ def cmd_ingest_forecast() -> None:
 
 
 @app.command("refresh-external")
-def cmd_refresh_external(source: str = "all", dry_run: bool = False) -> None:
+def cmd_refresh_external(source: str = "all", dry_run: bool = False, force: bool = False) -> None:
     """외부 8종 소스(calendar/weather/living_population/population/consumption/
     competitor/forecast_short_term_daily/forecast_mid_term_daily) 통합 갱신.
 
     source=all|<name>. --dry-run이면 실제 API를 호출하지 않고 현재 on-disk
-    freshness만 보고한다(.env 없이도 안전하게 확인 가능).
+    freshness만 보고한다(.env 없이도 안전하게 확인 가능). observed 소스는
+    fetch 결과가 기존 이력보다 커버리지가 좁아지면(coverage guard) 자동으로
+    원복되고 PROTECTED로 표시된다 — --force로 축소를 그대로 받아들일 수 있다.
     """
     from .ingest import refresh
 
@@ -1423,8 +1425,12 @@ def cmd_refresh_external(source: str = "all", dry_run: bool = False) -> None:
 
     today = pd.Timestamp.today()
     for spec in specs:
-        result = refresh.refresh_source(spec, today=today, dry_run=dry_run)
-        console.print(f"[cyan]{result.name}[/] +{result.added_rows} rows, last={result.last_date}")
+        result = refresh.refresh_source(spec, today=today, dry_run=dry_run, force=force)
+        status = "[green]applied[/]" if result.applied else "[yellow]PROTECTED[/]"
+        line = f"[cyan]{result.name}[/] {status} +{result.added_rows} rows, last={result.last_date}"
+        if result.message:
+            line += f" — {result.message}"
+        console.print(line)
 
     console.print(refresh.freshness_summary(specs).to_string(index=False))
 
