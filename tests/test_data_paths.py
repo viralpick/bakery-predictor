@@ -1,4 +1,3 @@
-from pathlib import Path
 import pytest
 from bakery.data import paths
 
@@ -47,3 +46,12 @@ def test_dataset_resolves_waste_alpha_4stores():
     assert paths.dataset("waste_alpha_4stores") == (
         paths.PROCESSED_DIR / "internal" / "waste_alpha_4stores.parquet"
     )
+
+
+def test_living_pop_zips_dir_resolves():
+    """src/bakery/ingest/living_population_csv.py:32 ZIP_DIR_DEFAULT consumer.
+
+    Directory of dynamically-named zips, not a single .parquet — doesn't fit dataset(name),
+    so it's a standalone module constant instead.
+    """
+    assert paths.LIVING_POP_ZIPS_DIR == paths.RAW_DIR / "external" / "living_pop_zips"

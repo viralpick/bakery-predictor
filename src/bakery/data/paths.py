@@ -46,6 +46,11 @@ _DATASETS: dict[str, Path] = {
     "forecast_mid_term_daily": _EXTERNAL / "forecast_mid_term_daily.parquet",
 }
 
+# living_pop_zips: 동적으로 이름 붙는 zip들의 디렉터리라 dataset(name) 1:1 매핑에 안 맞음.
+# 유일한 src 소비처=ingest/living_population_csv.py:32 ZIP_DIR_DEFAULT. Task 5에서 재배선.
+# Task 1 인벤토리 new_path: data/raw/external/living_pop_zips/
+LIVING_POP_ZIPS_DIR = _RAW_EXTERNAL / "living_pop_zips"
+
 
 def dataset(name: str) -> Path:
     """등록된 데이터 파일의 절대 경로. 미등록 이름은 KeyError."""
