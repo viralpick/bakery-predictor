@@ -9,10 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 
 DEFAULT_FORECASTERS: list[str] = ["category_total", "distributional_total"]
 DEFAULT_LAYERS: list[str] = ["event_prior"]
-DEFAULT_METRICS: list[str] = [
-    "wape", "wpe", "waste_rate", "soldout_median",
-    "stockout_item_rate", "shortfall_day_rate",
-]
+DEFAULT_METRICS: list[str] = ["wape", "wpe", "stockout_risk", "surplus_mean_units", "surplus_rate"]
 DEPRECATED_FORECASTERS = {"conformal_interval"}
 
 
