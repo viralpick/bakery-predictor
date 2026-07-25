@@ -9,6 +9,7 @@ from bakery.harness.runner import RunResult, ExperimentResult, run_experiment, S
 from bakery.harness.forecasters import (
     Forecaster, FittedForecaster, CategoryTotalForecaster, DistributionalTotalForecaster,
 )
+from bakery.harness.report import build_report
 
 __all__ = [
     "ExperimentSpec", "DataSpec", "WindowSpec", "load_spec", "SpecError",
@@ -18,4 +19,5 @@ __all__ = [
     "ForecasterKind", "kind_of", "LAYER_NAMES", "is_runnable", "build_forecaster",
     "RunResult", "ExperimentResult", "run_experiment", "STAGES",
     "Forecaster", "FittedForecaster", "CategoryTotalForecaster", "DistributionalTotalForecaster",
+    "build_report",
 ]

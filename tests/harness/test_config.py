@@ -21,6 +21,7 @@ def test_defaults_are_category_stack(tmp_path):
     assert spec.window.window_days == 730
     assert spec.alpha == 0.8
     assert spec.event_priors == "gwangyo"
+    assert spec.metrics == ["wape", "wpe", "stockout_risk", "surplus_mean_units", "surplus_rate"]
 
 
 def test_potential_demand_rejected(tmp_path):
