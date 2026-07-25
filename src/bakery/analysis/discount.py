@@ -13,7 +13,9 @@ from typing import Protocol
 
 import pandas as pd
 
-DEFAULT_XLSX = Path("data/internal/보나비 데이터_20260520.xlsx")
+from bakery.data import paths
+
+DEFAULT_XLSX = paths.dataset("legacy_xlsx_0520")
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +166,7 @@ def load_closing_returns(xlsx_path: Path | str = DEFAULT_XLSX) -> pd.DataFrame:
 # v2 loaders — 신규 라인레벨 클린 parquet (English 컬럼) 기반
 # ---------------------------------------------------------------------------
 
-CLEAN_PARQUET_DEFAULT = Path("data/internal/sales_lines_clean.parquet")
+CLEAN_PARQUET_DEFAULT = paths.dataset("sales_lines_clean")
 _GW_STORE_CODE = "1000000047"
 
 

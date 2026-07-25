@@ -20,6 +20,7 @@ import pandas as pd
 
 from bakery.analysis.discount import load_sales_with_discount
 from bakery.analysis.seasonal import filter_seasonal
+from bakery.data import paths
 from bakery.data.calendar import LUNAR_EVENT_DATES, build_calendar_daily
 
 
@@ -60,7 +61,7 @@ class CategoryDaily:
 
 def _attach_unit_price(daily: pd.DataFrame) -> pd.DataFrame:
     """item_id → 단가 (품목정보 시트). NaN은 평균 4000으로 fallback."""
-    xl_path = Path("data/internal/보나비 데이터_20260520.xlsx")
+    xl_path = paths.dataset("legacy_xlsx_0520")
     if not xl_path.exists():
         daily["unit_price"] = 4000.0
         return daily
@@ -81,7 +82,7 @@ def build_category_daily(
 ) -> CategoryDaily:
     """카테고리 합 daily: unit + revenue 두 metric."""
     if daily_raw is None:
-        daily_raw = pd.read_parquet("data/internal/bonavi_daily.parquet")
+        daily_raw = pd.read_parquet(paths.dataset("bonavi_daily"))
         daily_raw["item_id"] = daily_raw["item_id"].astype(str)
 
     daily = filter_seasonal(daily_raw)
@@ -310,7 +311,7 @@ WEATHER_FEATURE_COLS = [
 
 def add_weather_features(
     df: pd.DataFrame,
-    weather_path: str = "data/external/weather_observed.parquet",
+    weather_path: str = str(paths.dataset("weather_observed")),
     station_id: int = 119,
 ) -> pd.DataFrame:
     d = df.copy()
@@ -392,7 +393,7 @@ def _haversine_km(lat1, lon1, lat2, lon2):
 
 def add_competitor_features(
     df: pd.DataFrame,
-    competitor_path: str = "data/external/competitor_raw.parquet",
+    competitor_path: str = str(paths.dataset("competitor_raw")),
     store_lat: float = GWANGYO_LAT,
     store_lon: float = GWANGYO_LON,
     radius_km: float = COMPETITOR_RADIUS_KM,

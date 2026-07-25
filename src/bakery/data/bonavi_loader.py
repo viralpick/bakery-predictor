@@ -13,7 +13,7 @@ column placeholders) we drop, and every-sheet 판매구분 = 0 (정상) and
 셋트상품구분 = SS (단품) only — we exclude returns and bundles for the
 first PoC pass. 예약(대량) 주문 라인은 `bulk.flag_bulk_lines`로 추가 제거한다.
 
-Output: `data/internal/bonavi_daily.parquet` conforming to
+Output: `bonavi_daily` dataset (see `data/paths.py`) conforming to
 `schema.DAILY_COLUMNS` so `loader._load_real_dataset` can swap it in.
 """
 
@@ -26,12 +26,13 @@ import numpy as np
 import pandas as pd
 
 from ..features.potential_demand import StoreHours, attach_potential_demand
+from . import paths
 from .bulk import SINGLE_FLOOR, flag_bulk_lines
 from .schema import DAILY_COLUMNS, validate_daily
 
-XLSX_DEFAULT = Path("data/internal/보나비 데이터_20260520.xlsx")
-INVENTORY_XLSX_DEFAULT = Path("data/internal/보나비 데이터_20260526.xlsx")  # 재고정보 시트는 이 파일에만 존재
-OUT_DEFAULT = Path("data/internal/bonavi_daily.parquet")
+XLSX_DEFAULT = paths.dataset("legacy_xlsx_0520")
+INVENTORY_XLSX_DEFAULT = paths.dataset("master_xlsx")  # 재고정보 시트는 이 파일에만 존재
+OUT_DEFAULT = paths.dataset("bonavi_daily")
 DEFAULT_STORE_CODE = "1000000047"  # 아티제 아브뉴프랑광교점
 
 # Keyword → category (order matters; cake/sandwich first, then pastry, then bread).
@@ -470,7 +471,7 @@ def build(
     returns = load_returns(xlsx_path, store_code=store_code)
 
     # Receipts with hh:mm — written once and reused by DiD substitution.
-    receipts_out = Path(receipts_path or "data/internal/bonavi_receipts.parquet")
+    receipts_out = Path(receipts_path or paths.dataset("bonavi_receipts"))
     receipts_df = load_receipts_with_time(xlsx_path, store_code=store_code)
     if rename_store_id is not None:
         receipts_df = receipts_df.copy()  # store_id stays implicit; receipts only carries receipt_id/item_id/timestamp
@@ -501,7 +502,7 @@ def build(
         measured_profiles = {rename_store_id: next(iter(measured_profiles.values()))} if measured_profiles else {}
 
     # Second pass — apply substitution outflow to potential_demand
-    receipts_path = Path(receipts_path or "data/internal/bonavi_receipts.parquet")
+    receipts_path = Path(receipts_path or paths.dataset("bonavi_receipts"))
     if apply_substitution and receipts_path.exists():
         try:
             from ..analysis.substitution import compute_substitution_matrix

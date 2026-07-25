@@ -28,6 +28,7 @@ import pandas as pd
 
 from ..features.potential_demand import StoreHours, attach_potential_demand
 from ..ingest.inventory import load_inventory
+from . import paths
 from .bonavi_loader import (
     SINGLE_FLOOR,
     _aggregate_returns,
@@ -38,11 +39,11 @@ from .bonavi_loader import (
 )
 from .schema import DAILY_COLUMNS, validate_daily
 
-NEW_SALES_XLSX = Path("data/internal/보나비 판매 데이터_20260721.xlsx")
-MASTER_XLSX = Path("data/internal/보나비 데이터_20260526.xlsx")  # 품목정보·재고정보 시트
-CLEAN_PARQUET = Path("data/internal/sales_lines_clean.parquet")
-OUT_DEFAULT = Path("data/internal/bonavi_daily.parquet")
-RECEIPTS_DEFAULT = Path("data/internal/bonavi_receipts.parquet")
+NEW_SALES_XLSX = paths.dataset("sales_xlsx")
+MASTER_XLSX = paths.dataset("master_xlsx")  # 품목정보·재고정보 시트
+CLEAN_PARQUET = paths.dataset("sales_lines_clean")
+OUT_DEFAULT = paths.dataset("bonavi_daily")
+RECEIPTS_DEFAULT = paths.dataset("bonavi_receipts")
 DEFAULT_STORE_CODE = "1000000047"  # 아티제 아브뉴프랑광교점
 LABEL_END = "20251231"  # 재고(폐기/생산) 라벨 가용 끝 — 이후는 sales-only
 
