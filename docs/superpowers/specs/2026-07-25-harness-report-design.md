@@ -18,11 +18,13 @@ harness `ExperimentResult`를 사람이 볼 수 있는 **자기포함 HTML repor
 | 품목별 매진률 | 품목별 완판일/활성일. 완판 = production_qty>0 & waste_qty≤0 | store_daily(item-day 실측), `assign_stockout_fields` | X (관측, 실험 무관) |
 | 매진 median t | 완판 item-day의 매진시각(=마지막 실판매) median | store_daily `stockout_time` | X (관측) |
 
-**검증된 사실:**
-- 품목별 매진시각 도출은 신뢰 가능: 완판행 stockout_time 100% 채워짐 / 비완판행 100% NaN (사용자 요구 "당일 실제 매진 품목만 매진시각" 정확 충족).
-- 광교 신 데이터 item-day 매진율 **0.151**은 진짜(조인 버그 아님): `aggregate_daily`가 production/waste 정상 병합, 완판 15%=나머지 85% 폐기>0(과잉생산, 카테고리 폐기 97%와 층위 정합), 매진시각 hour 분포 현실적(저녁 피크, **median 18시**, 22시 이후 급감).
-- 따라서 실패 중인 `test_store_daily_redefine`의 `0.50<rate<0.70` 기대가 **stale(구 데이터 기준)** → 0.151로 재baseline이 이 스텝 in-scope(canary).
-- 품목별 매진률 raw median=0.0 (1150품목 중 다수 희소/미완판) → **분포+활성필터+top으로 표시**(raw median 무의미).
+**검증된 사실 (2026-07-25 재규명):**
+- 품목별 매진시각 도출은 신뢰 가능: 완판행 stockout_time 100% 채워짐 / 비완판행 100% NaN (사용자 요구 "당일 실제 매진 품목만 매진시각" 정확 충족). 매진시각 hour 분포 현실적(저녁 피크, **median 18시**).
+- ⚠️ **매진률 0.151은 희석 아티팩트**(초기 "진짜다" 판정은 오류였음). 분해: 전체 판매 item-day(308k) 0.151 = inventory 커버리지 0.249 × 매칭내 매진율 **0.605**. inventory(생산/폐기 기록) 없는 76%가 매진여부 **UNKNOWN(censored)인데 False로 강제**됨.
+- 원인 = 판매 품목 1150개 중 **968개가 "etc"(완제품/납품, 생산기록 없음 → "완판" 개념 자체 부재)**. 구운 빵 카테고리(bread/pastry/sandwich/cake/sweets/salad)는 inventory 100% 커버, etc만 0%. 즉 완판 불가능한 완제품까지 분모에 넣어 희석.
+- **진짜 매진율 = 생산품목 기준 0.605** (실패 중인 `test_store_daily_redefine`의 0.60 기대·PR#39 60.5%와 일치 → 테스트가 옳고 canary로 정상 작동 중).
+- **결정(사용자 2026-07-25)**: 아이템 스코프 수정은 **데이터 진입점 문제**로, 로드맵 3/4단계(전처리/무결성)에서 처리. 이 report 스텝에서는 **재baseline 금지**(0.151을 정답으로 고착시키지 않음). `test_store_daily_redefine`은 사전존재 실패(canary)로 유지.
+- 품목별 매진률 raw median=0.0 (1150품목 중 다수 희소/etc) → **분포+활성필터+top으로 표시**(raw median 무의미).
 
 ## 아키텍처
 
@@ -61,10 +63,9 @@ DEFAULT_METRICS = ["wape", "wpe", "stockout_risk", "surplus_mean_units", "surplu
 ```
 계산 불가 3종(soldout_median/stockout_item_rate/shortfall_day_rate — 카테고리 총량 레벨에 없는 매진시각/item-level 요구) 제거. spec.metrics 기반 컬럼 선택(필터링)은 향후.
 
-### 5. test_store_daily_redefine 재baseline
+### 5. test_store_daily_redefine — 재baseline 안 함(canary 유지)
 
-`tests/test_store_daily_redefine.py::test_build_store_daily_uses_redefinition`의
-`assert 0.50 < rate < 0.70` → `assert 0.10 < rate < 0.20`(실측 0.151 반영). 주석도 "옛 92%→재정의 ~60%대"에서 "신 데이터 재정의 ~15%(폐기 85% 과잉생산)"로 갱신. 단위 test(`test_assign_stockout_fields_redefinition_exact`)와 leak test는 불변(이미 통과).
+~~재baseline~~ **취소**: 0.60 기대는 **옳다**(생산품목 기준 매진율 0.605). 0.151은 완제품 희석 아티팩트. 이 실패 테스트는 데이터 진입점 버그의 정확한 canary이므로 **그대로 실패 상태 유지**하고, 로드맵 3/4단계(전처리/무결성)에서 진입점(inventory 커버리지/etc 스코프)을 고치며 해소한다. 이 report 스텝은 test_store_daily_redefine을 건드리지 않는다.
 
 ## Acceptance (검증)
 
@@ -72,8 +73,8 @@ DEFAULT_METRICS = ["wape", "wpe", "stockout_risk", "surplus_mean_units", "surplu
 2. **soldout view 단위 test**: 소형 store_daily 형태 DataFrame(완판/비완판 혼합) 주입 → 매진 median t = 알려진 값(정확 `==`), 품목별 매진률 필터 동작. (build_store_daily 전체 실행 회피 위해 `_soldout_view`를 DataFrame 인자로 분리 — 테스트 가능성.)
 3. **CLI test 확장**: 기존 test_cli_harness(gwangyo_default, category 1종, store_gw01)에 report.html 존재 + 품목별 매진 섹션 문자열 단언 추가.
 4. **config test**: DEFAULT_METRICS 정합 반영(내용 단언 추가).
-5. **test_store_daily_redefine PASS**(재baseline) — 오래된 실패 해소.
-6. 전체 스위트 green.
+5. **test_store_daily_redefine은 건드리지 않음** — 사전존재 실패(canary)로 유지. 전체 스위트는 이 1건 실패 예상(데이터 진입점 버그, 로드맵 3/4서 해소).
+6. 나머지 전체 스위트 green(사전존재 1건 제외).
 
 ## 마이그레이션 스텝
 

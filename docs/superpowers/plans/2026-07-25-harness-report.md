@@ -15,7 +15,7 @@
   - 품목별 매진률 = store_daily item-day `is_stockout` 품목별 평균(관측, 실험 무관).
   - 매진 median t = 완판 item-day `stockout_time` hour의 median(관측, 헌장 KPI).
 - **품목별 매진률 raw median=0.0**(1150품목 다수 희소) → 활성일 ≥ `min_active_days`(기본 30) 필터 후 분포+top 표시.
-- **검증된 실측값**(2026-07-25): 광교 신 데이터 item-day 매진율 **0.151**(진짜, 폐기 85% 과잉생산과 정합), 매진시각 median **18시**. 완판행 stockout_time 100% 채워짐/비완판 100% NaN.
+- **검증된 실측값**(2026-07-25): 매진시각 median **18시**, 완판행 stockout_time 100% 채워짐/비완판 100% NaN. ⚠️ 매진률 0.151은 **완제품(etc 968개) 희석 아티팩트** — 생산품목 기준 진짜 매진율은 **0.605**. 아이템 스코프/희석 수정은 **데이터 진입점 문제로 로드맵 3/4단계 이연**(사용자 결정). 이 스텝은 build_store_daily의 매진 정의를 건드리지 않고 report만 만든다.
 - **plotly stateless**: build_dashboard의 `_PLOTLY_INCLUDED` 전역 플래그 패턴 금지(여러 호출 시 깨짐). `fig_to_div(fig, div_id, *, include_js: bool, height=450)`로 명시 인자화, 첫 fig만 `include_js=True`.
 - **재구현 금지**: report는 `src/bakery` 심볼 호출만. store_daily는 `scripts/store_daily.py` `build_store_daily`(sys.path.insert 패턴).
 - **테스트 단언**: 기대값 아는 것은 정확값 `==`(매진 median t, 비교표 값, 라벨 문자열). 부동소수는 근사.
@@ -31,7 +31,7 @@
 ## File Structure
 
 - **Modify** `src/bakery/harness/config.py` — `DEFAULT_METRICS` 실산출 5종으로 정합.
-- **Modify** `tests/test_store_daily_redefine.py` — 매진율 기대 0.60→0.151 재baseline.
+- (제외) ~~`tests/test_store_daily_redefine.py` 재baseline~~ — 취소, canary로 유지.
 - **Create** `src/bakery/harness/report.py` — `fig_to_div` + `_soldout_stats` + `_soldout_view` + `_store_daily_for` + `build_report`.
 - **Modify** `src/bakery/harness/__init__.py` — `build_report` re-export.
 - **Modify** `src/bakery/cli.py` — `cmd_harness_run` report 자동생성.
@@ -39,30 +39,24 @@
 
 ---
 
-## Task 1: metrics 정합 + 매진 재baseline
+## Task 1: DEFAULT_METRICS 정합
 
 **Files:**
-- Modify: `src/bakery/harness/config.py`, `tests/harness/test_config.py`, `tests/test_store_daily_redefine.py`
+- Modify: `src/bakery/harness/config.py`, `tests/harness/test_config.py`
 
 **Interfaces:**
 - Produces: `DEFAULT_METRICS = ["wape", "wpe", "stockout_risk", "surplus_mean_units", "surplus_rate"]`.
 
-**배경:** `metrics_from_preds` 실산출은 5종(+n_test). 기존 `DEFAULT_METRICS` 6종 중 3종(soldout_median/stockout_item_rate/shortfall_day_rate)은 카테고리 총량 레벨에 없는 데이터(매진시각/item-level) 요구 → 제거(decorative→honest). 매진 재baseline은 검증된 실측 0.151 반영.
+**배경:** `metrics_from_preds` 실산출은 5종(+n_test). 기존 `DEFAULT_METRICS` 6종 중 3종(soldout_median/stockout_item_rate/shortfall_day_rate)은 카테고리 총량 레벨에 없는 데이터(매진시각/item-level) 요구 → 제거(decorative→honest).
 
-- [ ] **Step 1: Update tests (fail 유도)**
+⚠️ **매진 재baseline 안 함**: 초기 계획의 0.60→0.151 재baseline은 **폐기**(0.151은 완제품 희석 버그값이라 고착 금지). `test_store_daily_redefine`은 사전존재 실패(canary)로 그대로 둔다 — 이 Task는 그 파일을 건드리지 않는다.
+
+- [ ] **Step 1: Update test (fail 유도)**
 
 `tests/harness/test_config.py`의 `test_defaults_are_category_stack`에 metrics 내용 단언 추가(함수 마지막 줄 뒤):
 ```python
     assert spec.metrics == ["wape", "wpe", "stockout_risk", "surplus_mean_units", "surplus_rate"]
 ```
-
-`tests/test_store_daily_redefine.py::test_build_store_daily_uses_redefinition`의 기대 교체:
-```python
-    # 신 데이터 재정의 후 광교 item-day is_stockout 비율 ~0.151 (폐기 85% 과잉생산, 검증 2026-07-25)
-    rate = d["is_stockout"].mean()
-    assert 0.10 < rate < 0.20, f"expected redefined ~0.151, got {rate:.3f}"
-```
-(기존 `assert 0.50 < rate < 0.70` 줄 + 그 위 주석 교체. 나머지 단언 불변.)
 
 - [ ] **Step 2: Run to verify fail**
 
@@ -78,14 +72,14 @@ DEFAULT_METRICS: list[str] = ["wape", "wpe", "stockout_risk", "surplus_mean_unit
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `uv run pytest tests/harness/test_config.py tests/test_store_daily_redefine.py --color=no`
-Expected: PASS (config 6 + redefine 3 = 9 passed). redefine의 `test_build_store_daily_uses_redefinition`은 build_store_daily 실행(~수십초).
+Run: `uv run pytest tests/harness/test_config.py --color=no`
+Expected: PASS (6 passed).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/bakery/harness/config.py tests/harness/test_config.py tests/test_store_daily_redefine.py
-git commit -m "fix(harness): DEFAULT_METRICS 실산출 5종 정합 + 매진 재baseline(0.60→0.151 검증)"
+git add src/bakery/harness/config.py tests/harness/test_config.py
+git commit -m "fix(harness): DEFAULT_METRICS 실산출 5종 정합(계산불가 3종 제거)"
 ```
 
 ---
@@ -458,7 +452,7 @@ Run: `uv run pytest tests/harness/test_cli_harness.py --color=no`
 Expected: PASS (1 passed).
 
 Run(전체, distributional/equivalence 포함 ~20분): `uv run pytest --color=no`
-Expected: 전체 PASS (사전존재 `test_store_daily_redefine`은 Task 1서 재baseline되어 이제 통과 → 실패 0 목표).
+Expected: **사전존재 `test_store_daily_redefine` 1건만 실패**(매진률 희석 canary, 데이터 진입점 버그 — 로드맵 3/4서 해소, 이 스텝 범위 밖), 나머지 전부 PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -475,8 +469,8 @@ git commit -m "feat(cli): harness-run report.html 자동 생성"
 - §아키텍처 1(report.py, 섹션 1-3) → Task 2. ✅
 - §아키텍처 1 섹션 4(품목별 매진 실측) + §2(store 해석) → Task 3. ✅
 - §아키텍처 3(CLI 자동생성) → Task 4. ✅
-- §아키텍처 4(metrics 정합) + §5(재baseline) → Task 1. ✅
-- §Acceptance 1-2(build_report/soldout 단위 test) → Task 2/3. §3(CLI) → Task 4. §4(config) → Task 1. §5(redefine) → Task 1. ✅
+- §아키텍처 4(metrics 정합) → Task 1. §5(redefine 재baseline 취소, canary 유지) → 어느 Task도 test_store_daily_redefine 안 건드림. ✅
+- §Acceptance 1-2(build_report/soldout 단위 test) → Task 2/3. §3(CLI) → Task 4. §4(config) → Task 1. §5(redefine 유지=사전존재 1건 실패 예상) → Task 4 전체 스위트 expectation. ✅
 
 **Placeholder scan:** 모든 코드 스텝 완전(report.py 전체·stats·view·store 해석·CLI). Task 2의 "섹션 4는 Task 3서 추가" 주석은 의도적 순차(Task 3가 교체). ✅
 
@@ -486,6 +480,6 @@ git commit -m "feat(cli): harness-run report.html 자동 생성"
 1. ✅ plotly 6.7.0 정식 의존성. pio/go/make_subplots import 가능(build_dashboard 사용).
 2. ✅ STORE_MAP dict `scripts/store_daily.py`(store_gw01→1000000047), build_store_daily(cd, store_id, exclude_bulk) 시그니처.
 3. ✅ ExperimentResult/RunResult/comparison/predictions/fold_metrics 컬럼 계약 확인.
-4. ✅ 매진 실측: 광교 0.151·median 18시·완판행 stockout_time 100%.
+4. ✅ 매진 실측: median 18시·완판행 stockout_time 100%. 매진률 0.151=완제품 희석 아티팩트(생산품목 진짜 0.605), 스코프 수정은 데이터 진입점 문제로 로드맵 3/4 이연(사용자 결정) — 이 스텝은 정의 안 건드림.
 5. ✅ DEFAULT_METRICS 소비처 = config+__init__+test_config(내용 미단언). 후방호환.
 6. ✅ fig_to_div stateless 재설계(전역 플래그 제거).
