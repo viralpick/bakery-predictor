@@ -1376,11 +1376,11 @@ def cmd_ingest_forecast() -> None:
     중기예보: 매일 2회 발표(06·18). horizon D+4~D+10 커버.
     """
     console.print("[cyan]forecast[/] 최신 단기 + 중기예보 ingestion")
-    paths = forecast_api.backfill_forecast()
-    for kind, p in paths.items():
+    out_paths = forecast_api.backfill_forecast()
+    for kind, p in out_paths.items():
         df = pd.read_parquet(p)
         console.print(f"[green]wrote[/] {kind}: {p} ({len(df):,} rows)")
-    if not paths:
+    if not out_paths:
         console.print("[yellow]warning[/] no forecast rows returned — check API status / region codes")
 
 
