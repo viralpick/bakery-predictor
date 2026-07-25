@@ -26,21 +26,42 @@ def test_dataset_exists_at_new_location(name):
     assert p.exists(), f"{name} not at {p}"
 
 
+_STRAY_FILE_PATTERNS = ["*.parquet", "*.xlsx", "*.xls"]
+
+
+def _stray_real_files(flat_dir: Path) -> list[Path]:
+    """flat_dir 바로 아래에서, 심링크가 아닌 실체 데이터 파일(parquet/xlsx/xls)을 찾는다.
+    이동 후 옛 평면 경로엔 심링크만 남아야 하므로, 실체 파일이 남아있으면 회귀다."""
+    reals: list[Path] = []
+    for pattern in _STRAY_FILE_PATTERNS:
+        reals.extend(f for f in flat_dir.glob(pattern) if f.is_file() and not f.is_symlink())
+    return reals
+
+
 def test_no_parquet_left_in_flat_internal_root():
     flat = paths.DATA_DIR / "internal"
     if not paths.RAW_DIR.exists():
         pytest.skip("data not migrated")
-    # 옛 평면 루트엔 심링크만 허용, 실체 parquet 금지
-    reals = [f for f in flat.glob("*.parquet") if f.is_file() and not f.is_symlink()]
-    assert reals == [], f"real parquet still in flat root: {reals}"
+    # 옛 평면 루트엔 심링크만 허용, 실체 parquet/xlsx/xls 금지(raw source 4종 회귀 포함 감지)
+    reals = _stray_real_files(flat)
+    assert reals == [], f"real data file still in flat internal root: {reals}"
 
 
 def test_no_parquet_left_in_flat_internal_v2_root():
     flat_v2 = paths.DATA_DIR / "internal" / "v2"
     if not paths.RAW_DIR.exists():
         pytest.skip("data not migrated")
-    reals = [f for f in flat_v2.glob("*.parquet") if f.is_file() and not f.is_symlink()]
-    assert reals == [], f"real parquet still in flat v2 root: {reals}"
+    reals = _stray_real_files(flat_v2)
+    assert reals == [], f"real data file still in flat v2 root: {reals}"
+
+
+def test_no_parquet_left_in_flat_external_root():
+    flat = paths.DATA_DIR / "external"
+    if not paths.RAW_DIR.exists():
+        pytest.skip("data not migrated")
+    # 9종 registry-moved parquet(weather_observed, calendar_raw 등)이 실체로 회귀하지 않았는지 확인
+    reals = _stray_real_files(flat)
+    assert reals == [], f"real data file still in flat external root: {reals}"
 
 
 def test_legacy_symlink_resolves():

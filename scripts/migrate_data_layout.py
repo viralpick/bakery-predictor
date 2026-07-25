@@ -105,7 +105,11 @@ ARCHIVE_MOVES: dict[str, Path] = {
 
 
 def _move_with_symlink(old: Path, new: Path) -> str:
-    """old -> new byte-preserving 이동 후 old 위치에 심링크. idempotent."""
+    """old -> new byte-preserving 이동 후 old 위치에 심링크. idempotent.
+
+    idempotency는 "이미 심링크"인 경우만 skip으로 커버한다 — old가 심링크도 아니고
+    실체 파일도 아닌(완전히 없는) 경우엔 skip(missing)만 반환하고 복구(재심링크)하지 않는다.
+    """
     if old.is_symlink():
         return "skip(already-symlinked)"
     if not old.exists():
@@ -118,7 +122,7 @@ def _move_with_symlink(old: Path, new: Path) -> str:
 
 def _move_to_archive(old: Path, new: Path) -> str:
     """cruft 격리: byte-preserving 이동, 심링크 없음."""
-    if not old.exists() or old.is_symlink():
+    if not old.exists():
         return "skip"
     new.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(old), str(new))
