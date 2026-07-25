@@ -8,6 +8,7 @@ from __future__ import annotations
 import html as html_lib
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.io as pio
@@ -56,6 +57,53 @@ def _overlay_div(name: str, preds: pd.DataFrame, *, include_js: bool) -> str:
     return fig_to_div(fig, f"overlay_{name}", include_js=include_js)
 
 
+def _soldout_stats(daily: pd.DataFrame, *, min_active_days: int = 30) -> dict:
+    so = daily[daily["is_stockout"]].copy()
+    hours = pd.to_datetime(so["stockout_time"]).dt.hour if len(so) else pd.Series(dtype=float)
+    median_hour = float(hours.median()) if len(hours) else None
+    active = daily.groupby("item_id").size()
+    keep = active[active >= min_active_days].index
+    per_item_rate = daily[daily["item_id"].isin(keep)].groupby("item_id")["is_stockout"].mean()
+    top_items = (per_item_rate.sort_values(ascending=False).head(20)
+                 .rename("soldout_rate").reset_index())
+    return {
+        "median_hour": median_hour,
+        "n_soldout": int(len(so)),
+        "rate_overall": float(daily["is_stockout"].mean()) if len(daily) else 0.0,
+        "hour_counts": hours.value_counts().sort_index(),
+        "per_item_rate": per_item_rate,
+        "top_items": top_items,
+    }
+
+
+def _soldout_view(daily: pd.DataFrame, *, include_js: bool) -> str:
+    stats = _soldout_stats(daily)
+    parts = [f"<p><b>매진 median t</b>: {stats['median_hour']}시 "
+             f"| 전체 매진율 {stats['rate_overall']:.3f} (n_soldout={stats['n_soldout']})</p>"]
+    hc = stats["hour_counts"]
+    fig_h = go.Figure(go.Bar(x=list(hc.index), y=list(hc.values)))
+    fig_h.update_layout(title="매진시각 hour 분포", xaxis_title="hour", yaxis_title="완판 item-day 수")
+    parts.append(fig_to_div(fig_h, "soldout_hour", include_js=include_js))
+    ti = stats["top_items"]
+    fig_t = go.Figure(go.Bar(x=ti["item_id"].astype(str), y=ti["soldout_rate"]))
+    fig_t.update_layout(title="품목별 매진률 top 20", xaxis_title="item_id", yaxis_title="매진률")
+    parts.append(fig_to_div(fig_t, "soldout_top", include_js=False))
+    return "\n".join(parts)
+
+
+def _store_daily_for(store_id: str) -> pd.DataFrame | None:
+    import sys
+    sys.path.insert(0, "scripts")
+    try:
+        from store_daily import STORE_MAP, build_store_daily
+    except ImportError:
+        return None
+    cd = next((code for code, (_, sid) in STORE_MAP.items() if sid == store_id), None)
+    if cd is None:
+        return None
+    return build_store_daily(cd, store_id, exclude_bulk=True)
+
+
 _HTML_SHELL = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <title>harness report — {name}</title>
 <style>body{{font-family:system-ui,sans-serif;max-width:1100px;margin:20px auto;padding:0 16px}}
@@ -75,7 +123,11 @@ def build_report(result: ExperimentResult, *, out_path: Path, store: str | None 
     divs.append("<h2>3. 예측 오버레이</h2>")
     for name, rr in result.runs.items():
         divs.append(_overlay_div(name, rr.predictions, include_js=False))
-    # 섹션 4(품목별 매진 실측)는 Task 3에서 store 인자로 추가
+    if store is not None:
+        daily = _store_daily_for(store)
+        if daily is not None and not daily.empty:
+            divs.append("<h2>4. 품목별 매진 실측 (관측, forecaster 무관)</h2>")
+            divs.append(_soldout_view(daily, include_js=False))
     html = _HTML_SHELL.format(name=result.name, body="\n".join(divs))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(html, encoding="utf-8")
