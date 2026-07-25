@@ -1405,6 +1405,30 @@ def cmd_ingest_forecast() -> None:
         console.print("[yellow]warning[/] no forecast rows returned — check API status / region codes")
 
 
+@app.command("refresh-external")
+def cmd_refresh_external(source: str = "all", dry_run: bool = False) -> None:
+    """외부 8종 소스(calendar/weather/living_population/population/consumption/
+    competitor/forecast_short_term_daily/forecast_mid_term_daily) 통합 갱신.
+
+    source=all|<name>. --dry-run이면 실제 API를 호출하지 않고 현재 on-disk
+    freshness만 보고한다(.env 없이도 안전하게 확인 가능).
+    """
+    from .ingest import refresh
+
+    try:
+        specs = refresh.select_sources(source)
+    except KeyError as exc:
+        console.print(f"[red]error[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    today = pd.Timestamp.today()
+    for spec in specs:
+        result = refresh.refresh_source(spec, today=today, dry_run=dry_run)
+        console.print(f"[cyan]{result.name}[/] +{result.added_rows} rows, last={result.last_date}")
+
+    console.print(refresh.freshness_summary(specs).to_string(index=False))
+
+
 @app.command("grounding-eval")
 def cmd_grounding_eval(
     provider: str = "auto",
