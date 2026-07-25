@@ -83,7 +83,7 @@ from .models.lightgbm_regressor import (
 from .models.moving_average import MovingAverage
 from .models.seasonal_naive import SeasonalNaive
 from .models.stockout_classifier import StockoutClassifier
-from .harness import load_spec, run_experiment
+from .harness import load_spec, run_experiment, build_report
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 console = Console()
@@ -107,6 +107,8 @@ def cmd_harness_run(
     for _, row in result.comparison.iterrows():
         table.add_row(*[f"{v:.4f}" if isinstance(v, float) else str(v) for v in row])
     console.print(table)
+    report_path = build_report(result, out_path=out / result.name / "report.html", store=spec.data.store)
+    console.print(f"[green]report[/] {report_path}")
 
 
 @app.command("generate-data")
