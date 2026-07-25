@@ -2,9 +2,9 @@
 
 import pandas as pd
 import pytest
-from pathlib import Path
 from pandas.api.types import is_string_dtype, is_integer_dtype
 
+from bakery.data import paths
 from bakery.ingest.inventory import load_inventory, _normalize_inventory
 
 
@@ -63,7 +63,7 @@ def test_normalize_inventory_numeric_conversion():
 
 def test_load_inventory_real_file():
     """Test load_inventory with real file and gwangyo store."""
-    xl_path = Path("data/internal/보나비 데이터_20260526.xlsx")
+    xl_path = paths.dataset("master_xlsx")
 
     if not xl_path.exists():
         pytest.skip(f"Real data file not found: {xl_path}")
