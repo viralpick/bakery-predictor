@@ -55,14 +55,17 @@ data/
 - 신규 `src/bakery/data/paths.py`:
   - 레이어 루트 상수 `RAW_DIR / INTERIM_DIR / PROCESSED_DIR` (환경변수/인자 override 가능).
   - **named dataset registry**: `dataset("sales")` → `PROCESSED_DIR/internal/sales/...parquet`. 이름→경로 단일 매핑. provenance/vintage 태그 접근자 포함.
-- 100곳+ 하드코딩 리터럴을 named accessor로 마이그레이션 (mechanical·greppable). 이후 "파일이 어디 있는가"의 단일 출처.
+- **canonical `src/` + `tests/` 만 named accessor로 마이그레이션**(테스트 게이트). 일회성 `scripts/`(~55곳)는 **하위호환 심링크 shim**(옛 경로 → 신 위치, gitignore된 로컬 전용)으로 하드코딩 리터럴을 안 깨지게 유지 — dead 코드에 광범위 편집 강요 회피(사용자 결정).
 - `config.py`의 `EXTERNAL_DATA_DIR`는 `paths.py`로 흡수(하위호환 alias 유지).
+- **src가 실제 소비하는 데이터 파일은 ~10개**(bonavi_daily/receipts=재빌드-결정적, sales_lines_clean=interim, 외부 7종=move-only). `data/internal/v2/` 테이블(inventory/items/stores/stockout 등)은 **src 소비처 0**(scripts 전용) → cruft/orphan 분류 대상.
 
 ## 5. 단일진입 파이프라인 `bakery build-data`
 
 - raw → interim → processed 스테이지를 순서대로 실행. 기존 loader/build 함수를 **호출**하는 오케스트레이터(`src/bakery/data/pipeline.py`).
 - 스테이지: (1) raw Excel 파싱 → interim 클린 parquet (2) interim → processed canonical 테이블 (3) 크로스체크 리포트(§7) 생성.
-- **동등성 게이트 (hard gate)**: 재배치 후 `build-data`로 재생성한 processed parquet이 현재 processed와 수치 `rtol=1e-9` 일치. 결정성 확인(seed 고정 지점). 이 게이트 통과가 "순수 재배치는 수치 불변" 보증. (harness Phase 1의 windowed_backtest 동등성과 동일 규율.)
+- **동등성 = 게이트가 아니라 진단(advisor 교정)**: 재배치 자체는 **byte-preserving**(파일 이동은 내용 불변 → 수치 불가침)이라 재빌드로 보증할 필요가 없다. 재배치 안전망은 (1) grep 전수 열거 (2) 테스트 통과 (3) byte-identity 확인. `build-data`는 **별도 신규 능력**으로, 현재 processed는 `.pre-*-bak`이 증명하듯 수개월 in-place 변형으로 누적된 것이라 clean rebuild가 disk와 다를 수 있다.
+  - **내부 결정적 테이블**(bonavi_daily/receipts): 진단 결과 `build_v2`(clean→daily) 재생성이 on-disk와 **rtol=1e-9 완전 일치 확인됨**(2026-07-25) → 이들엔 **진짜 동등성 게이트** 적용 가능.
+  - **누적/orphan·외부 API 테이블**: 재생성 불가 → **move-only**(이동 후 존재 확인만). rebuild가 disk와 어긋나면 그건 파이프라인 버그 아니면 아티팩트 드리프트 → **§6 커버리지 리포트로 흘려보냄**(탐지), 재배치를 막지 않음.
 - 재개/캐시는 최소한(스테이지 완료 마커). 임의 스테이지 재개 정교화는 본 스펙 범위 밖.
 
 ### 규명된 크로스소스 불일치 (탐지 대상, 화해는 별도 게이트)
@@ -107,9 +110,9 @@ data/
 
 ## 10. 성공 기준
 
-- [ ] `data/{raw,interim,processed}/` 레이아웃으로 원본↔파생 물리 분리 완료.
-- [ ] `src/bakery/data/paths.py` named registry로 경로 리터럴 100곳+ 중앙화, 하드코딩 잔여 0(테스트/스크립트 포함).
-- [ ] `bakery build-data`가 raw에서 processed 전체를 재생성하고, **동등성 게이트(rtol=1e-9)** 통과.
+- [ ] `data/{raw,interim,processed}/` 레이아웃으로 원본↔파생 물리 분리 완료(이동 파일 byte-identity 확인).
+- [ ] `src/bakery/data/paths.py` named registry로 **`src/`+`tests/`** 데이터 경로 리터럴 중앙화, 이 두 곳 하드코딩 잔여 0. `scripts/`는 하위호환 심링크 shim으로 유지(마이그레이션 대상 아님).
+- [ ] `bakery build-data`가 내부 결정적 테이블(bonavi_daily/receipts)을 재생성하고 **rtol=1e-9 동등성 게이트** 통과. 외부/orphan은 move-only로 존재 확인. rebuild-vs-disk diff는 커버리지 리포트로 표면화.
 - [ ] 전체 테스트 스위트(553+ / leakage 포함) 통과.
 - [ ] `bakery refresh-external`이 8종 소스를 idempotent 갱신하고 freshness 요약 출력.
 - [ ] 커버리지 매트릭스 리포트가 §5의 규명된 불일치 4종을 모두 셀 단위로 표면화(codex 산출물 앵커 검증 통과).
