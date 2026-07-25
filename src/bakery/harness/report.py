@@ -8,7 +8,6 @@ from __future__ import annotations
 import html as html_lib
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.io as pio
@@ -79,7 +78,10 @@ def _soldout_stats(daily: pd.DataFrame, *, min_active_days: int = 30) -> dict:
 def _soldout_view(daily: pd.DataFrame, *, include_js: bool) -> str:
     stats = _soldout_stats(daily)
     parts = [f"<p><b>매진 median t</b>: {stats['median_hour']}시 "
-             f"| 전체 매진율 {stats['rate_overall']:.3f} (n_soldout={stats['n_soldout']})</p>"]
+             f"| 전체 매진율 {stats['rate_overall']:.3f} (n_soldout={stats['n_soldout']})</p>",
+             "<p class='note'>⚠️ 매진율은 완제품(생산기록 없는 etc) 검열 포함 희석값 "
+             "— 생산품목 기준 실제 매진율은 더 높음(데이터 진입점 정합은 후속 단계). "
+             "매진 median t는 완판 실측이라 유효.</p>"]
     hc = stats["hour_counts"]
     fig_h = go.Figure(go.Bar(x=list(hc.index), y=list(hc.values)))
     fig_h.update_layout(title="매진시각 hour 분포", xaxis_title="hour", yaxis_title="완판 item-day 수")

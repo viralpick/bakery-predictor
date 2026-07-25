@@ -107,7 +107,9 @@ def cmd_harness_run(
     for _, row in result.comparison.iterrows():
         table.add_row(*[f"{v:.4f}" if isinstance(v, float) else str(v) for v in row])
     console.print(table)
-    report_path = build_report(result, out_path=out / result.name / "report.html", store=spec.data.store)
+    # 매진 실측 섹션은 real 데이터에만(synthetic/parquet엔 실측 store_daily 없음/무의미).
+    report_store = spec.data.store if spec.data.source == "real" else None
+    report_path = build_report(result, out_path=out / result.name / "report.html", store=report_store)
     console.print(f"[green]report[/] {report_path}")
 
 

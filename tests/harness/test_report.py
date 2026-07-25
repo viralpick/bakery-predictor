@@ -1,4 +1,3 @@
-import numpy as np
 import pandas as pd
 
 from bakery.harness.report import _soldout_stats, build_report, fig_to_div
@@ -43,6 +42,9 @@ def test_build_report_creates_html(tmp_path):
     assert "distributional_total" in html
     assert "전체매진 위험" in html          # stockout_risk relabel
     assert "plotly" in html.lower()          # plotly.js 포함(첫 fig include_js)
+    # ★stateless fig_to_div 핵심 불변: 여러 fig여도 plotly.js는 정확히 1회만 임베드
+    # ("cdn.plot.ly" 마커는 test_fig_to_div_include_js_toggle서 검증된 리터럴)
+    assert html.count("cdn.plot.ly") == 1
     assert "exp_x" in html                   # 실험명
 
 
