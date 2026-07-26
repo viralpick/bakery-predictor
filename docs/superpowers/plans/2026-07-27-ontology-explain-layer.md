@@ -471,6 +471,145 @@ git commit -m "feat(grounding): q_explain_total/q_explain_item Q셋 + forward �
 
 ---
 
+### Task 4: `rank_forward_items` 도구 (q_explain_item live 도달성)
+
+Task 3 리뷰 발견(Important): grounded arm이 q_explain_item의 gold(forward our_order 최대 품목)에 도달할 도구가 없다(rank_stockout_*는 historical). architect 결정 = forward 품목-순위 도구 추가. q_explain_item을 2-step 체인(rank_forward_items top1 → explain_item_order)으로 완성한다. + Task 3 Minor 2건(dead horizon_days, item 정합 회귀테스트) 정리.
+
+**Files:**
+- Modify: `src/bakery/ontology/explain.py` (rank_forward_items 추가)
+- Modify: `src/bakery/ontology/grounding/tools.py` (ToolSpec + dispatch)
+- Modify: `src/bakery/ontology/grounding/questions.py` (_forward_top_item을 rank_forward_items로 단일화, _forward_ctx dead 인자 정리)
+- Modify: `tests/test_ontology_explain.py`, `tests/test_grounding_tools.py`, `tests/test_grounding_questions.py`
+
+**Interfaces:**
+- Produces: `explain.rank_forward_items(store_id, *, daily, date, k=3, horizon_days=7, use_forecast=False) -> pd.DataFrame` cols [item_id, our_order], forward our_order 내림차순 top-k.
+
+- [ ] **Step 1: 실패 테스트 작성**
+
+`tests/test_ontology_explain.py`에 추가:
+
+```python
+def test_rank_forward_items_matches_seam(daily, ff, target_date):
+    """rank_forward_items top-k == seam item_quantities our_order 내림차순."""
+    from bakery.ontology.explain import rank_forward_items
+    ranked = rank_forward_items(STORE, daily=daily, date=target_date, k=3, use_forecast=False)
+    iq = ff.item_quantities
+    iq_d = iq[pd.to_datetime(iq["date"]) == pd.Timestamp(target_date)].copy()
+    iq_d["item_id"] = iq_d["item_id"].astype(str)
+    expected = list(iq_d.sort_values(["our_order", "item_id"], ascending=[False, True])
+                    .head(3)["item_id"])
+    assert list(ranked["item_id"].astype(str)) == expected
+    assert len(ranked) == 3
+```
+
+- [ ] **Step 2: 실패 확인**
+
+Run: `uv run pytest tests/test_ontology_explain.py -k rank_forward --color=no > /tmp/5b_t4.txt 2>&1; echo "EXIT=$?"; tail -6 /tmp/5b_t4.txt`
+Expected: FAIL (ImportError: rank_forward_items)
+
+- [ ] **Step 3: 구현 — explain.py**
+
+`explain.py`에 추가(_forward_at_date 재사용, store 필터 이미 처리됨):
+
+```python
+def rank_forward_items(store_id, *, daily, date, k=3, horizon_days=7, use_forecast=False):
+    """forward our_order 기준 top-k 품목 (q_explain_item 진입점).
+
+    [item_id, our_order] 내림차순. explain_item_order의 품목 선택과 동일 seam.
+    """
+    _, iq = _forward_at_date(store_id, daily, date, horizon_days, use_forecast)
+    ranked = iq.sort_values(["our_order", "item_id"], ascending=[False, True]).head(k)
+    return ranked[["item_id", "our_order"]].reset_index(drop=True)
+```
+
+- [ ] **Step 4: 통과 확인 (explain)**
+
+Run: `uv run pytest tests/test_ontology_explain.py -k rank_forward --color=no > /tmp/5b_t4.txt 2>&1; echo "EXIT=$?"; tail -6 /tmp/5b_t4.txt`
+Expected: EXIT=0, 1 passed.
+
+- [ ] **Step 5: 도구 등록 + questions 단일화**
+
+`grounding/tools.py` TOOL_SPECS에 추가:
+
+```python
+    ToolSpec("rank_forward_items",
+             "Top-k items by forward production quantity (our_order) for a store on a date. "
+             "Use to find which items are produced most next week, then explain one with explain_item_order.",
+             {"type": "object", "properties": {
+                 "store_id": {"type": "string"},
+                 "date": {"type": "string", "description": "forward horizon date YYYY-MM-DD"},
+                 "k": {"type": "integer"}},
+              "required": ["store_id", "date", "k"], "additionalProperties": False}),
+```
+
+`_call`에 분기:
+
+```python
+    if name == "rank_forward_items":
+        return explain.rank_forward_items(a["store_id"], daily=dataset.daily, date=a["date"], k=a["k"], use_forecast=False)
+```
+
+`questions.py::_forward_top_item`을 rank_forward_items로 단일화(중복 제거 + item 정합 구조적 보장):
+
+```python
+def _forward_top_item(dataset: DailyDataset, store: str, date: str) -> str:
+    """forward our_order 최대 품목 = rank_forward_items top1 (단일 소스)."""
+    ranked = explain.rank_forward_items(store, daily=dataset.daily, date=date, k=1, use_forecast=False)
+    return str(ranked["item_id"].iloc[0])
+```
+
+`_forward_ctx`의 미사용 `horizon_days` 인자: 실제로 forecast_forward 기본 horizon(7)과 연동되지 않으므로, 인자를 제거하거나(호출부 `_forward_ctx(dataset)`만 있으면 제거) 본문에서 실제 사용. **제거 권장**(dead 인자).
+
+`test_tool_specs_cover_seven_functions`(현재 9개 기대)를 10개로 갱신하고, 이름을 `test_tool_specs_cover_all_functions`로 리네임(Task 2 roll-up Minor 해소).
+
+- [ ] **Step 6: 도구/gold 테스트**
+
+`tests/test_grounding_tools.py`에 rank_forward_items dispatch 테스트 추가:
+
+```python
+def test_dispatch_rank_forward_items(dataset):
+    import json
+    from bakery.ontology.grounding.llm import ToolCall
+    from bakery.ontology.grounding.tools import dispatch
+    store = str(dataset.daily["store_id"].iloc[0])
+    date = _forward_date(dataset, store)
+    res = dispatch(ToolCall(id="c3", name="rank_forward_items",
+                            arguments={"store_id": store, "date": date, "k": 3}), dataset)
+    rows = json.loads(res.content)
+    assert len(rows) == 3
+    assert all("item_id" in r and "our_order" in r for r in rows)
+    # 내림차순
+    assert [r["our_order"] for r in rows] == sorted([r["our_order"] for r in rows], reverse=True)
+```
+
+`tests/test_grounding_questions.py`에 gold-item 정합 회귀 테스트 추가(Task 3 Minor):
+
+```python
+def test_gold_explain_item_equals_top_forward(dataset):
+    """q_explain_item gold item == rank_forward_items top1 (단일 소스 정합)."""
+    from bakery.ontology.grounding.questions import QUESTIONS, build_gold, _forward_ctx
+    from bakery.ontology import explain
+    q = next(q for q in QUESTIONS if q.id == "q_explain_item")
+    gold = build_gold(q, dataset)
+    store, date = _forward_ctx(dataset)
+    top = explain.rank_forward_items(store, daily=dataset.daily, date=date, k=1, use_forecast=False)
+    assert gold["item_id"] == str(top["item_id"].iloc[0])
+```
+
+- [ ] **Step 7: 통과 확인 + 회귀**
+
+Run: `uv run pytest tests/test_ontology_explain.py tests/test_grounding_tools.py tests/test_grounding_questions.py --color=no > /tmp/5b_t4b.txt 2>&1; echo "EXIT=$?"; tail -8 /tmp/5b_t4b.txt`
+Expected: EXIT=0, all passed.
+
+- [ ] **Step 8: 커밋**
+
+```bash
+git add src/bakery/ontology/explain.py src/bakery/ontology/grounding/tools.py src/bakery/ontology/grounding/questions.py tests/test_ontology_explain.py tests/test_grounding_tools.py tests/test_grounding_questions.py
+git commit -m "feat(grounding): rank_forward_items 도구 + q_explain_item 2-step 체인 도달성 (5b Task4)"
+```
+
+---
+
 ## Self-Review 체크
 
 - **Spec coverage**: §3(설명 함수)=Task1, §4(도구)=Task2, §5(Q셋 forward 컨텍스트+gold)=Task3, §6 acceptance=Task1(reconcile/보존식)+Task3(gold 결정론·무회귀). §2 비목표(explain_order 무변경)=어느 태스크도 functions.py explain_order 안 건드림. ✅
