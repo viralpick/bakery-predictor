@@ -333,13 +333,15 @@ def load_stockouts(xlsx: Path, store_code: str = DEFAULT_STORE_CODE) -> pd.DataF
 
 
 def assign_stockout_fields(df: pd.DataFrame) -> pd.DataFrame:
-    """물리 leftover 기반 진짜 최종소진. is_stockout=(made>0 & waste<=0),
-    stockout_time=마지막 실판매(is_stockout일 때). 재고정보 결측(NaN)→False (NaN 비교가
-    False라 자동). 첫 순간품절 이벤트를 쓰던 버그를 대체한다."""
+    """물리 leftover 기반 진짜 최종소진. is_stockout=(made>0 & waste<=0) [boolean 불변],
+    stockout_time=마지막 실판매(is_stockout일 때). is_stockout_defined=생산기록 존재
+    (inventory 커버). 완제품(made 결측)은 is_stockout=False·is_stockout_defined=False —
+    매진률 측정 시 defined mask로 제외해 검열 희석을 막는다(헌장 2번)."""
     made = pd.to_numeric(df["production_qty"], errors="coerce")
     waste = pd.to_numeric(df["waste_qty"], errors="coerce")
     out = df.copy()
     out["is_stockout"] = ((made > 0) & (waste <= 0)).fillna(False).astype(bool)
+    out["is_stockout_defined"] = made.notna()   # inventory 커버 = 생산기록 있음
     out["stockout_time"] = df["last_sale_ts"].where(out["is_stockout"])
     return out
 

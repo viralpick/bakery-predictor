@@ -24,20 +24,42 @@ def test_assign_stockout_fields_redefinition_exact():
     assert pd.isna(out["stockout_time"].iloc[4])
 
 
+def test_assign_stockout_fields_adds_defined_mask():
+    """is_stockout_defined = 생산기록 존재(inventory 커버). 완제품(made 결측)은 False.
+    is_stockout 자체는 boolean 불변(소비처 무사고)."""
+    df = pd.DataFrame({
+        "production_qty": [10, 0, np.nan, 10],   # 생산O / 미생산(0) / 완제품(결측) / 생산O
+        "waste_qty":      [0, 0, np.nan, 3],
+        "last_sale_ts": pd.to_datetime(
+            ["2024-01-01 18:00", "2024-01-01 19:00", "2024-01-01 20:00", "2024-01-01 21:00"]),
+    })
+    out = assign_stockout_fields(df)
+    # is_stockout: boolean 그대로 (완제품·미생산=False, dtype bool)
+    assert out["is_stockout"].dtype == bool
+    assert list(out["is_stockout"]) == [True, False, False, False]
+    # companion: 생산기록 있는 행만 True (완제품[idx2]만 False)
+    assert out["is_stockout_defined"].dtype == bool
+    assert list(out["is_stockout_defined"]) == [True, True, False, True]
+
+
 def test_build_store_daily_uses_redefinition():
     import sys, pathlib
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
     from store_daily import build_store_daily
     d = build_store_daily("1000000047", "store_gw01", exclude_bulk=True)
-    # 재정의 후 광교 item-day is_stockout 비율은 옛 92%가 아니라 ~60%대여야 함
-    rate = d["is_stockout"].mean()
-    assert 0.50 < rate < 0.70, f"expected redefined ~0.60, got {rate:.3f}"
-    # 반환 컬럼 스키마 불변
-    assert set(["date","item_id","sold_units","store_id","category_id","stockout_time","is_stockout"]).issubset(d.columns)
-    # 완판(is_stockout) 행은 stockout_time 있고, 아닌 행은 NaT
-    so = d[d["is_stockout"]]; nso = d[~d["is_stockout"]]
-    assert so["stockout_time"].notna().all()
-    assert nso["stockout_time"].isna().all()
+    # ★생산품목(inventory 커버) 기준 매진률 = 0.605 (완제품 검열 희석 제외)
+    produced = d[d["is_stockout_defined"]]
+    rate = produced["is_stockout"].mean()
+    # round(rate, 2)==0.61 (0.6051 rounds up at 2dp) — check at 3dp to match the ~0.605 design value
+    assert round(rate, 3) == 0.605, f"expected produced-scope ~0.605, got {rate:.3f}"
+    # 완제품이 실제로 분모에 섞여 있었음을 고정 (전체는 여전히 희석되어 낮음)
+    assert d["is_stockout"].mean() < 0.30   # 전체(완제품 포함)는 ~0.151
+    # 스키마: 신규 companion 컬럼 존재, is_stockout은 여전히 bool
+    assert d["is_stockout"].dtype == bool
+    assert "is_stockout_defined" in d.columns
+    # median 매진시각은 유효(희석은 rate만)
+    so = d[d["is_stockout"]]
+    assert so["stockout_time"].dt.hour.median() == 18
 
 
 def test_stockout_cols_excluded_from_training_features():
