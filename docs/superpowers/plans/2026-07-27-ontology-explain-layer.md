@@ -148,7 +148,12 @@ BATCH_ROUND_UNIT = 3  # 라벨된 가정: 아띠제 배수생산(3/6/9). 품목�
 
 
 def _forward_at_date(store_id, daily, date, horizon_days, use_forecast):
-    """forecast_forward를 돌려 요청 date의 category_totals 1행 + item_quantities 슬라이스."""
+    """forecast_forward를 돌려 요청 date의 category_totals 1행 + item_quantities 슬라이스.
+
+    daily가 다중 store면 store_id로 필터(forecast_forward=단일-store 가정, synthetic 안전).
+    """
+    if "store_id" in daily.columns and daily["store_id"].nunique() > 1:
+        daily = daily[daily["store_id"] == store_id].copy()
     ff = forecast_forward(store_id, daily=daily, horizon_days=horizon_days, use_forecast=use_forecast)
     ts = pd.Timestamp(date)
     ct = ff.category_totals[pd.to_datetime(ff.category_totals["date"]) == ts]
@@ -235,45 +240,53 @@ git commit -m "feat(ontology): explain_category_total/explain_item_order 2층 �
 - Consumes: `explain.explain_category_total`, `explain.explain_item_order` (Task 1). `DailyDataset.daily` (dispatch가 주입).
 - Produces: TOOL_SPECS에 `explain_category_total`·`explain_item_order` 항목; `_call`이 두 이름 처리.
 
+⚠️ **데이터셋 = synthetic**: grounding 하니스는 `load_dataset("synthetic")`(store_A/B/C) 기반이다(기존 `tests/test_grounding_tools.py` fixture `dataset`). forecast_forward는 synthetic daily 주입에서도 정상 동작함을 확인했다(`build_category_daily(daily_raw=)`가 adjusted_demand_unit 내부 계산). 따라서 신규 테스트도 **기존 synthetic `dataset` fixture**를 쓰고 store는 그 fixture에서 파생한다(store_gw01/real 아님).
+
 - [ ] **Step 1: 실패 테스트 작성**
 
-`tests/test_grounding_tools.py`에 추가(기존 dispatch 테스트 패턴 따름):
+`tests/test_grounding_tools.py`에 추가(기존 `dataset` fixture·store 파생 패턴 따름):
 
 ```python
-def test_dispatch_explain_category_total(real_dataset):
+def _forward_date(ds, store):
+    """store의 마지막 관측일 다음날 (forward horizon 첫날)."""
+    dd = pd.to_datetime(ds.daily.loc[ds.daily["store_id"] == store, "date"])
+    return str((dd.max() + pd.Timedelta(days=1)).date())
+
+
+def test_dispatch_explain_category_total(dataset):
     """explain_category_total 도구가 dispatch되어 분해 행을 JSON으로 반환."""
     import json
     from bakery.ontology.grounding.llm import ToolCall
     from bakery.ontology.grounding.tools import dispatch
-    ds = real_dataset
-    date = _forward_date(ds)   # 헬퍼: 마지막 관측일 다음날 (아래 정의 또는 fixture)
+    store = str(dataset.daily["store_id"].iloc[0])
+    date = _forward_date(dataset, store)
     call = ToolCall(id="c1", name="explain_category_total",
-                    arguments={"store_id": "store_gw01", "date": date})
-    res = dispatch(call, ds)
+                    arguments={"store_id": store, "date": date})
+    res = dispatch(call, dataset)
     rows = json.loads(res.content)
-    steps = [r["step"] for r in rows]
-    assert steps == ["base_median", "event_prior", "prior_median", "quantile_buffer", "prior_prod"]
+    assert [r["step"] for r in rows] == ["base_median", "event_prior", "prior_median", "quantile_buffer", "prior_prod"]
 
 
-def test_dispatch_explain_item_order(real_dataset):
+def test_dispatch_explain_item_order(dataset):
     import json
+    from bakery.forecast.forward import forecast_forward
     from bakery.ontology.grounding.llm import ToolCall
     from bakery.ontology.grounding.tools import dispatch
-    ds = real_dataset
-    date = _forward_date(ds)
-    # forward our_order 최대 품목을 결정론 선택
-    from bakery.forecast.forward import forecast_forward
-    iq = forecast_forward("store_gw01", daily=ds.daily, horizon_days=7, use_forecast=False).item_quantities
-    iq_d = iq[iq["date"].astype(str).str.startswith(date)]
-    item = str(iq_d.sort_values("our_order", ascending=False).iloc[0]["item_id"])
+    store = str(dataset.daily["store_id"].iloc[0])
+    date = _forward_date(dataset, store)
+    iq = forecast_forward(store, daily=dataset.daily[dataset.daily["store_id"] == store].copy(),
+                          horizon_days=7, use_forecast=False).item_quantities
+    iq_d = iq[iq["date"].astype(str).str.startswith(date)].copy()
+    iq_d["item_id"] = iq_d["item_id"].astype(str)
+    item = str(iq_d.sort_values(["our_order", "item_id"], ascending=[False, True]).iloc[0]["item_id"])
     call = ToolCall(id="c2", name="explain_item_order",
-                    arguments={"store_id": "store_gw01", "item_id": item, "date": date})
-    res = dispatch(call, ds)
+                    arguments={"store_id": store, "item_id": item, "date": date})
+    res = dispatch(call, dataset)
     rows = json.loads(res.content)
     assert [r["step"] for r in rows] == ["category_total", "proportion", "item_order", "final"]
 ```
 
-(`real_dataset` fixture·`_forward_date` 헬퍼는 기존 grounding 테스트의 real dataset 로딩 패턴 재사용. 없으면 `DailyDataset` real 로드 + 마지막 관측일+1로 정의.)
+참고: dispatch는 `dataset.daily`(다중 store) 전체를 넘긴다. Task 1의 `_forward_at_date`가 store_id로 내부 필터하므로 dispatch는 필터 없이 그대로 넘기면 된다(explain 함수가 처리).
 
 - [ ] **Step 2: 실패 확인**
 
@@ -351,29 +364,28 @@ git commit -m "feat(grounding): explain_category_total/explain_item_order 도구
 `tests/test_grounding_questions.py`에 추가:
 
 ```python
-def test_gold_explain_total_matches_function(real_dataset):
+def test_gold_explain_total_matches_function(dataset):
     """q_explain_total gold == explain_category_total prior_prod (결정론)."""
-    from bakery.ontology.grounding.questions import QUESTIONS, build_gold
+    from bakery.ontology.grounding.questions import QUESTIONS, build_gold, _forward_ctx
     from bakery.ontology import explain
-    from bakery.ontology.grounding.questions import _forward_ctx
     q = next(q for q in QUESTIONS if q.id == "q_explain_total")
-    gold = build_gold(q, real_dataset)
-    store, date = _forward_ctx(real_dataset)
-    rows = explain.explain_category_total(store, daily=real_dataset.daily, date=date, use_forecast=False)
+    gold = build_gold(q, dataset)
+    store, date = _forward_ctx(dataset)
+    rows = explain.explain_category_total(store, daily=dataset.daily, date=date, use_forecast=False)
     expected = float(rows.set_index("step")["value"]["prior_prod"])
     assert gold["answer_value"] == pytest.approx(expected, rel=1e-9)
 
 
-def test_gold_explain_item_matches_function(real_dataset):
+def test_gold_explain_item_matches_function(dataset):
     """q_explain_item gold == explain_item_order final for the deterministic item."""
     from bakery.ontology.grounding.questions import QUESTIONS, build_gold
     q = next(q for q in QUESTIONS if q.id == "q_explain_item")
-    gold = build_gold(q, real_dataset)
+    gold = build_gold(q, dataset)
     assert "item_id" in gold and "order_qty" in gold
     assert gold["order_qty"] > 0
 ```
 
-(`real_dataset` fixture = 기존 grounding 테스트 재사용.)
+(`dataset` fixture = 기존 grounding 테스트의 `load_dataset("synthetic")` 재사용. 파일에 없으면 추가.)
 
 - [ ] **Step 2: 실패 확인**
 
