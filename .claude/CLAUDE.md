@@ -35,6 +35,10 @@ uv run bakery ingest-calendar / ingest-weather                # 실 API 백필 (
 uv run bakery ingest-forecast                                 # 단기+중기 예보 (운영 시 사용)
 uv run bakery backtest --source real --variants v0,v1,v2      # 3종 LGBM + baselines 동시 비교 (real: v2/v3는 adjusted_demand로 학습, --closing-alpha 기본 0.5; 출력 predictions.csv 컬럼은 yhat/sold_units 그대로)
 uv run bakery predict-next-week --source real --model lightgbm_v2 --use-forecast --production-quantile 0.85  # real: yhat_adjusted_demand 출력, --closing-alpha 기본 0.5
+uv run bakery build-data --diagnose                          # raw→processed 재빌드 + 동등성 rtol=1e-9 진단 (무결성 1)
+uv run bakery refresh-external --source all                  # 외부 8종 갱신 + 커버리지 보존 가드 (무결성 2)
+uv run bakery check-integrity                                # 신규 데이터 무결성 게이트: 타깃누락/스왑=fail·나머지=drift CSV (무결성 3, @docs/data_integrity.md)
+uv run bakery check-conflict                                 # 옛/새 마스터 값 충돌 진단(vintage, 편입 시점)
 uv run pytest                                                 # 테스트
 ```
 
