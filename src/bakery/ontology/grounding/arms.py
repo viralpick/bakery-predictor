@@ -12,10 +12,15 @@ from ..schema import BAKERY_ONTOLOGY
 from ...data.loader import DailyDataset
 from .constants import DECOMPOSITION, NUMERIC, RANKING
 from .llm import LLMClient, Message
-from .questions import Question, resolve_eval_context
+from .questions import Question, _forward_ctx, resolve_eval_context
 from .tools import TOOL_SPECS, dispatch
 
 MAX_TOOL_TURNS = 6
+
+# explain_category_total/explain_item_order take a forward `date`, not a
+# historical `period` — these two source_fns need the forward-context line.
+# The other 11 (pre-existing) questions keep the historical period line unchanged.
+_EXPLAIN_SOURCE_FNS = frozenset({"explain_category_total", "explain_item_order"})
 
 OUTPUT_SCHEMAS: dict[str, dict] = {
     NUMERIC: {"type": "object", "properties": {"answer_value": {"type": "number"}},
@@ -46,7 +51,15 @@ _RAG_SYS = (
 )
 
 
-def _context_line(dataset) -> str:
+def _context_line(dataset, question: Question) -> str:
+    """Question-aware eval context. explain_category_total/explain_item_order
+    resolve to the same forward (store, date) that build_gold uses (single
+    source: questions._forward_ctx) so the grounded arm's tool call and the
+    gold answer target identical inputs. All other questions are unaffected —
+    they still get the historical (store, period) line."""
+    if question.source_fn in _EXPLAIN_SOURCE_FNS:
+        store, date = _forward_ctx(dataset)
+        return f"분석 대상 — 매장(store_id): {store}, 예측 대상일(date): {date}. 도구 호출 시 store_id={store}, date={date}를 사용하라."
     store, (start, end) = resolve_eval_context(dataset)
     return f"분석 대상 — 매장(store_id): {store}, 기간: {start} ~ {end}. 도구를 호출할 때 이 store_id와 period=[{start}, {end}]를 사용하라."
 
@@ -54,7 +67,7 @@ def _context_line(dataset) -> str:
 def run_grounded(client: LLMClient, question: Question, dataset: DailyDataset) -> dict:
     schema = OUTPUT_SCHEMAS[question.grader_type]
     messages = [Message(role="system", content=_GROUNDED_SYS),
-                Message(role="user", content=f"{_context_line(dataset)}\n\n{question.text}")]
+                Message(role="user", content=f"{_context_line(dataset, question)}\n\n{question.text}")]
     for _ in range(MAX_TOOL_TURNS):
         resp = client.generate(messages, tools=TOOL_SPECS, output_schema=schema)
         if not resp.tool_calls:
@@ -70,7 +83,7 @@ def run_grounded(client: LLMClient, question: Question, dataset: DailyDataset) -
 def run_rag_only(client: LLMClient, question: Question, dataset: DailyDataset) -> dict:
     schema = OUTPUT_SCHEMAS[question.grader_type]
     messages = [Message(role="system", content=_RAG_SYS),
-                Message(role="user", content=f"{_context_line(dataset)}\n\n{question.text}")]
+                Message(role="user", content=f"{_context_line(dataset, question)}\n\n{question.text}")]
     return client.generate(messages, output_schema=schema).parsed or {}
 
 

@@ -81,6 +81,28 @@ def test_run_grounded_injects_store_id_period(dataset):
     assert "top items?" in first_user_msg.content
 
 
+def test_context_line_explain_question_uses_forward_date(dataset):
+    """explain 질문(q_explain_total/item)은 historical period가 아니라 forward date를 안내해야
+    grounded arm이 explain_category_total/explain_item_order를 올바른 date로 호출한다."""
+    from bakery.ontology.grounding.questions import Question, _forward_ctx
+    store, date = _forward_ctx(dataset)
+    q = Question(id="q_explain_total", text="", grader_type="numeric",
+                 source_fn="explain_category_total", fn_kwargs={})
+    line = arms._context_line(dataset, q)
+    assert f"매장(store_id): {store}" in line
+    assert date in line
+
+
+def test_context_line_historical_question_unchanged(dataset):
+    """기존 11개 질문(예: q_waste)은 여전히 historical period를 안내해야 한다(무회귀)."""
+    from bakery.ontology.grounding.questions import Question, resolve_eval_context
+    store, (start, end) = resolve_eval_context(dataset)
+    q = Question(id="q_waste", text="", grader_type="numeric", source_fn="waste_cost", fn_kwargs={})
+    line = arms._context_line(dataset, q)
+    assert f"매장(store_id): {store}" in line
+    assert start in line and end in line
+
+
 def test_run_rag_only_injects_store_id_period(dataset):
     from bakery.ontology.grounding.questions import resolve_eval_context
     store, (start, end) = resolve_eval_context(dataset)
