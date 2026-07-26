@@ -88,3 +88,39 @@ def check_date_contiguity(sales: pd.DataFrame, max_gap_days: int = 45) -> list[V
         return []
     return [Violation("date_contiguity", "drift",
                       f"max date gap {max_gap}d > {max_gap_days}d", max_gap)]
+
+
+def check_target_items_resolve(sale_item_codes: set[str], master_item_codes: set[str],
+                               target_items: set[str]) -> list[Violation]:
+    """알려진 타깃 품목이 마스터에서 resolve 안 되면 fail(타깃 유실 = 마스터 갱신 누락).
+    ★orphan을 타깃으로 분류하는 게 아니라, 이미 아는 타깃 집합의 회귀를 본다."""
+    missing = (target_items & sale_item_codes) - master_item_codes
+    if not missing:
+        return []
+    sample = ", ".join(sorted(missing)[:5])
+    return [Violation("target_items_resolve", "fail",
+                      f"target items missing from master: {sample}", len(missing))]
+
+
+def check_used_discounts_resolve(used_disc: set[str], master_disc: set[str]) -> list[Violation]:
+    """판매에서 사용된 할인코드가 마스터에 없음 → drift(fail 아님).
+    ★코드 체계 3/4자리 혼재로 정규화 규칙 미확정(advisor #1 실측: '357' 1종, zero-pad하면
+    28종으로 깨짐) → 오탐 방지 위해 drift로 보고, 정규화는 아티제 확인. CSV로 문의."""
+    missing = used_disc - master_disc
+    if not missing:
+        return []
+    sample = ", ".join(sorted(missing)[:5])
+    return [Violation("used_discounts_resolve", "drift",
+                      f"used discounts unresolved (정규화 미확정): {sample}", len(missing))]
+
+
+def find_missing_codes(sale_codes: set[str], master_codes: set[str], kind: str,
+                       target_codes: set[str], used_codes: set[str]) -> pd.DataFrame:
+    """마스터에 없는 판매 코드 표. is_target_scope=타깃 품목 or 사용된 코드(fail 대상)."""
+    missing = sorted(sale_codes - master_codes)
+    scope = target_codes | used_codes
+    return pd.DataFrame({
+        "code": missing,
+        "kind": kind,
+        "is_target_scope": [c in scope for c in missing],
+    })
