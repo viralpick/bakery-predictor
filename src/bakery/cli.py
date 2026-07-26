@@ -15,8 +15,11 @@ from rich.table import Table
 from .data import paths
 from .data.loader import DailyDataset, load_dataset
 from .decision import PolicyParams, RiskParams, build_recommendation, lineage_to_frame
+from .forecast.loaders import (
+    load_forecast_weather as _load_forecast_weather,
+    load_real_daily as _load_real_daily,
+)
 from .data.synthetic import generate_synthetic_bundle
-from .data.weather import load_weather_forecast_from_local
 from .evaluation.backtest import aggregate_by_model, per_category_wape, run_backtest
 from .evaluation.business_metrics import CostParams, asymmetric_loss, simulate_profit
 from .evaluation.classifier_metrics import base_rate, precision_at_k, recall_at_k, roc_auc
@@ -34,7 +37,7 @@ from .evaluation.prospective import (
 from .evaluation.split import SplitWindow, apply_split, generate_time_splits
 from .features.calendar_features import add_calendar_features
 from .features.category_aggregate import (
-    DEFAULT_ALPHA, EVENTS, LUNAR_EVENTS, TARGET_CATEGORIES, CategoryDaily,
+    DEFAULT_ALPHA, EVENTS, LUNAR_EVENTS, CategoryDaily,
     build_category_daily, build_features, build_item_adjusted_demand, fill_forecast_weather,
 )
 from .features.competitor_features import (
@@ -494,31 +497,6 @@ def _enrich_target(
         cons_static = compute_store_consumption_features(ds.consumption, mapping)
         target = add_consumption_features(target, cons_static)
     return target
-
-
-def _load_forecast_weather(horizon: pd.DatetimeIndex) -> pd.DataFrame | None:
-    """Long-form horizon weather frame keyed by (store_id, date), one row per
-    (store, day) — each store's nx/ny/mid_reg from the store mapping is
-    matched against the latest forecast parquet, falling back to recent
-    observed averages when the forecast is missing.
-    """
-    short_p = paths.dataset("forecast_short_term_daily")
-    mid_p = paths.dataset("forecast_mid_term_daily")
-    observed_p = paths.dataset("weather_observed")
-    if not short_p.exists() and not mid_p.exists():
-        console.print(
-            "[yellow]forecast[/] parquet 없음 — `bakery ingest-forecast` 먼저 실행. "
-            "이번엔 fallback (최근 28일 평균)으로 horizon 채움."
-        )
-    mapping = load_store_mapping()
-    return load_weather_forecast_from_local(
-        short_daily_path=short_p,
-        mid_daily_path=mid_p,
-        observed_parquet_path=observed_p,
-        mapping=mapping,
-        horizon_start=horizon[0],
-        horizon_end=horizon[-1],
-    )
 
 
 def _build_forecasters(variants: list[str], *, include_production: bool = False,
@@ -2074,7 +2052,6 @@ def _synthetic_prospective_inputs() -> tuple[pd.DataFrame, pd.DataFrame, dict[st
 
 # 실데이터 진입점 — 재고정보 시트가 있는 파일만 생산량/폐기량/품목단가를 갖는다.
 REAL_INVENTORY_XLSX_PATH = str(paths.dataset("master_xlsx"))
-REAL_DAILY_PARQUET_PATH = str(paths.dataset("bonavi_daily"))
 REAL_RECEIPTS_PARQUET_PATH = str(paths.dataset("bonavi_receipts"))
 
 REAL_ROWS_COLUMNS = [
@@ -2147,18 +2124,6 @@ def _real_bulk_qty() -> pd.DataFrame:
     return rec.groupby(["item_id", "date"], as_index=False)["qty"].sum().rename(
         columns={"qty": "bulk_qty"}
     )
-
-
-def _load_real_daily(store_id: str) -> pd.DataFrame:
-    """bonavi_daily.parquet을 store_id + TARGET_CATEGORIES로 필터."""
-    daily = pd.read_parquet(REAL_DAILY_PARQUET_PATH)
-    n_stores = daily["store_id"].nunique()
-    if n_stores != 1:
-        raise ValueError(f"real path assumes single-store data; found {n_stores} stores. Multi-store needs store-qualified receipts/merge wiring.")
-    daily["item_id"] = daily["item_id"].astype(str)
-    daily = daily[daily["store_id"] == store_id]
-    daily = daily[daily["category_id"].isin(TARGET_CATEGORIES)]
-    return daily.reset_index(drop=True)
 
 
 def _receipts_profile_frame(receipts: pd.DataFrame, item_ids: set[str]) -> pd.DataFrame:
