@@ -15,8 +15,16 @@ from rich.table import Table
 from .data import paths
 from .data.loader import DailyDataset, load_dataset
 from .decision import PolicyParams, RiskParams, build_recommendation, lineage_to_frame
+from .forecast.forward import (
+    _blend_event_prior,
+    _category_base_predict,
+    forecast_forward,
+)
+from .forecast.loaders import (
+    load_forecast_weather as _load_forecast_weather,
+    load_real_daily as _load_real_daily,
+)
 from .data.synthetic import generate_synthetic_bundle
-from .data.weather import load_weather_forecast_from_local
 from .evaluation.backtest import aggregate_by_model, per_category_wape, run_backtest
 from .evaluation.business_metrics import CostParams, asymmetric_loss, simulate_profit
 from .evaluation.classifier_metrics import base_rate, precision_at_k, recall_at_k, roc_auc
@@ -34,8 +42,8 @@ from .evaluation.prospective import (
 from .evaluation.split import SplitWindow, apply_split, generate_time_splits
 from .features.calendar_features import add_calendar_features
 from .features.category_aggregate import (
-    DEFAULT_ALPHA, EVENTS, LUNAR_EVENTS, TARGET_CATEGORIES, CategoryDaily,
-    build_category_daily, build_features, build_item_adjusted_demand, fill_forecast_weather,
+    DEFAULT_ALPHA,
+    build_category_daily, build_features, build_item_adjusted_demand,
 )
 from .features.competitor_features import (
     add_competitor_features,
@@ -69,9 +77,6 @@ from .ingest import (
 from .ingest.inventory import load_inventory, handle_negative_waste
 from .ingest.store_mapping import load_store_mapping
 from .models.artisee_baseline import ArtiseeBaseline
-from .models.category_total import fit_category_total
-from .models.distributional_total import fit_distributional_total
-from .models.event_prior import EventLevelPrior
 from .models.conformal_order import ConformalOrderCalibrator, DEFAULT_SERVICE_LEVEL
 from .models.item_proportion import distribute_total
 from .models.lightgbm_regressor import (
@@ -494,31 +499,6 @@ def _enrich_target(
         cons_static = compute_store_consumption_features(ds.consumption, mapping)
         target = add_consumption_features(target, cons_static)
     return target
-
-
-def _load_forecast_weather(horizon: pd.DatetimeIndex) -> pd.DataFrame | None:
-    """Long-form horizon weather frame keyed by (store_id, date), one row per
-    (store, day) — each store's nx/ny/mid_reg from the store mapping is
-    matched against the latest forecast parquet, falling back to recent
-    observed averages when the forecast is missing.
-    """
-    short_p = paths.dataset("forecast_short_term_daily")
-    mid_p = paths.dataset("forecast_mid_term_daily")
-    observed_p = paths.dataset("weather_observed")
-    if not short_p.exists() and not mid_p.exists():
-        console.print(
-            "[yellow]forecast[/] parquet 없음 — `bakery ingest-forecast` 먼저 실행. "
-            "이번엔 fallback (최근 28일 평균)으로 horizon 채움."
-        )
-    mapping = load_store_mapping()
-    return load_weather_forecast_from_local(
-        short_daily_path=short_p,
-        mid_daily_path=mid_p,
-        observed_parquet_path=observed_p,
-        mapping=mapping,
-        horizon_start=horizon[0],
-        horizon_end=horizon[-1],
-    )
 
 
 def _build_forecasters(variants: list[str], *, include_production: bool = False,
@@ -2074,7 +2054,6 @@ def _synthetic_prospective_inputs() -> tuple[pd.DataFrame, pd.DataFrame, dict[st
 
 # 실데이터 진입점 — 재고정보 시트가 있는 파일만 생산량/폐기량/품목단가를 갖는다.
 REAL_INVENTORY_XLSX_PATH = str(paths.dataset("master_xlsx"))
-REAL_DAILY_PARQUET_PATH = str(paths.dataset("bonavi_daily"))
 REAL_RECEIPTS_PARQUET_PATH = str(paths.dataset("bonavi_receipts"))
 
 REAL_ROWS_COLUMNS = [
@@ -2149,18 +2128,6 @@ def _real_bulk_qty() -> pd.DataFrame:
     )
 
 
-def _load_real_daily(store_id: str) -> pd.DataFrame:
-    """bonavi_daily.parquet을 store_id + TARGET_CATEGORIES로 필터."""
-    daily = pd.read_parquet(REAL_DAILY_PARQUET_PATH)
-    n_stores = daily["store_id"].nunique()
-    if n_stores != 1:
-        raise ValueError(f"real path assumes single-store data; found {n_stores} stores. Multi-store needs store-qualified receipts/merge wiring.")
-    daily["item_id"] = daily["item_id"].astype(str)
-    daily = daily[daily["store_id"] == store_id]
-    daily = daily[daily["category_id"].isin(TARGET_CATEGORIES)]
-    return daily.reset_index(drop=True)
-
-
 def _receipts_profile_frame(receipts: pd.DataFrame, item_ids: set[str]) -> pd.DataFrame:
     """receipts 프레임 → arrival profile 입력(item_id/date/hour/qty).
 
@@ -2201,41 +2168,6 @@ def _load_unit_prices(xlsx_path: str) -> dict[str, float]:
     items["item_id"] = items["품목코드"].astype(str)
     items["판매단가"] = pd.to_numeric(items["판매단가"], errors="coerce")
     return items.set_index("item_id")["판매단가"].fillna(4000.0).to_dict()
-
-
-def _category_base_predict(
-    train: pd.DataFrame, test: pd.DataFrame, *,
-    target_col: str, total_model: str, production_quantile: float,
-) -> tuple:
-    """train으로 카테고리 총량 모델 fit → test의 (base_median, base_prod) 반환(clip≥0).
-
-    total_model 분기: lightgbm(production_q fit 고정) | distributional(production_q predict 시).
-    fold backtest·future 예측 공용(중복 제거)."""
-    import numpy as np
-
-    if total_model == "distributional":
-        model = fit_distributional_total(train, target_col=target_col)
-        base_prod = np.clip(model.predict_production(test, production_q=production_quantile), 0.0, None)
-    elif total_model == "lightgbm":
-        model = fit_category_total(train, target_col=target_col, production_q=production_quantile)
-        base_prod = np.clip(model.predict_production(test), 0.0, None)
-    else:
-        raise ValueError(f"unknown total_model: {total_model!r} (expected 'lightgbm' or 'distributional')")
-    base_median = np.clip(model.predict_expected(test), 0.0, None)
-    return base_median, base_prod
-
-
-def _blend_event_prior(
-    train: pd.DataFrame, dates, base_median, base_prod, *, target_col: str,
-) -> tuple:
-    """EventLevelPrior를 train(pre-test history)으로 fit 후 이벤트일만 레벨-앵커 블렌드.
-
-    leakage-safe: prior는 예측창 이전 데이터로만 fit, level_for는 ed<date 엄격 필터."""
-    import numpy as np
-
-    prior = EventLevelPrior(events=EVENTS, lunar_events=LUNAR_EVENTS).fit(train, target_col=target_col)
-    base_median, base_prod = prior.blend(dates, base_median, base_prod)
-    return np.clip(base_median, 0.0, None), np.clip(base_prod, 0.0, None)
 
 
 def _category_total_fold_predictions(
@@ -2397,47 +2329,6 @@ def _category_order_predictions(
     return preds
 
 
-# item-schema 예보 → category weather 스키마 부분 매핑(기온/강수/습도만; 구름/풍속 미대응).
-_FORECAST_TO_CATEGORY_WEATHER = {
-    "avg_temp": "avgTa", "max_temp": "maxTa", "min_temp": "minTa",
-    "precipitation_mm": "sumRn", "humidity": "avgRhm",
-}
-
-
-def _forecast_to_category_weather(forecast_weather: pd.DataFrame, store_id: str) -> pd.DataFrame | None:
-    """_load_forecast_weather의 (store_id,date) 프레임 → category weather 스키마(date-keyed).
-
-    기온/강수/습도만 매핑하고 rain_level은 sumRn에서 재계산. 구름(avgTca)·풍속(avgWs)·
-    apparent_temp는 예보에 없어 미제공(fill_forecast_weather가 NaN 유지). store 미매칭이면 None."""
-    fw = forecast_weather[forecast_weather["store_id"] == store_id]
-    if fw.empty:
-        return None
-    out = pd.DataFrame({"date": pd.to_datetime(fw["date"].to_numpy())})
-    for src_col, dst_col in _FORECAST_TO_CATEGORY_WEATHER.items():
-        if src_col in fw.columns:
-            out[dst_col] = fw[src_col].to_numpy()
-    if "sumRn" in out.columns:
-        out["rain_level"] = pd.cut(
-            out["sumRn"].fillna(0), bins=[-1, 0, 5, 20, 1e9], labels=[0, 1, 2, 3]
-        ).astype(int)
-    return out
-
-
-def _extend_category_features(
-    hist: pd.DataFrame, *, horizon_days: int, alpha: float, target_col: str,
-) -> tuple[pd.DataFrame, pd.DatetimeIndex]:
-    """history 카테고리 daily에 미래 horizon_days 행(target=NaN)을 append 후 build_features.
-
-    미래 행의 target이 NaN이라 lag=shift가 미래-reaching 구간에서 NaN이 된다(leakage 차단).
-    (feats, horizon) 반환. build_features와 분리해 leakage 회귀 테스트가 붙는 지점."""
-    hist = hist.sort_values("date").reset_index(drop=True)
-    last = hist["date"].max()
-    horizon = pd.date_range(last + pd.Timedelta(days=1), periods=horizon_days, freq="D")
-    ext = pd.concat([hist, pd.DataFrame({"date": horizon})], ignore_index=True)
-    feats = build_features(CategoryDaily(df=ext, alpha=alpha), target_col=target_col)
-    return feats.sort_values("date").reset_index(drop=True), horizon
-
-
 def _category_future_order_predictions(
     store_id: str, *, horizon_days: int = 7, production_quantile: float = 0.85,
     total_model: str = "lightgbm", event_prior: bool = True,
@@ -2445,58 +2336,23 @@ def _category_future_order_predictions(
 ) -> pd.DataFrame:
     """미래 horizon_days일 카테고리 총량 예측 → item 배분.
 
+    forecast_forward seam을 소비(단일 출처). 반환 스키마·leakage 규칙은 seam이 보장.
     [store_id, item_id, category_id, date, demand_point, our_order] 반환.
-    demand_point=median 배분(점추정), our_order=production 분위수 배분(발주). 동일 비율로
-    배분해 두 컬럼이 정합한다(demand_point는 c-2b decision·미리보기가 소비).
-
-    leakage-safe: 미래 카테고리 행을 target=NaN으로 append하면 build_features의 lag가 seam
-    너머 계산돼 미래-reaching lag는 NaN이 된다(미래 실측 원천 차단, item _join_history와 동일
-    원리). fit은 관측 history(dropna)만 사용하고 미래 행은 예측 대상이다. 날씨는 부분 예보
-    주입(기온/강수/습도; 구름/풍속 NaN). production은 total_model(lightgbm|distributional)·
-    event_prior 재사용(PR#49 배선)."""
-    target_col = "adjusted_demand_unit"
-    hist = build_category_daily(alpha=alpha).df
-    feats, horizon = _extend_category_features(
-        hist, horizon_days=horizon_days, alpha=alpha, target_col=target_col,
+    """
+    ff = forecast_forward(
+        store_id, horizon_days=horizon_days, total_model=total_model,
+        event_prior=event_prior, production_quantile=production_quantile,
+        alpha=alpha, use_forecast=use_forecast,
     )
-    if use_forecast:
-        fw = _load_forecast_weather(horizon)
-        cat_fw = _forecast_to_category_weather(fw, store_id) if fw is not None else None
-        if cat_fw is not None:
-            feats = fill_forecast_weather(feats, cat_fw)
-        else:
-            console.print(f"[yellow]forecast[/] {store_id} 미매칭 — 미래 날씨 NaN 유지")
-    feats = feats.sort_values("date").reset_index(drop=True)
-    is_future = feats["date"].isin(horizon)
-    train = feats[~is_future].dropna(subset=[target_col])
-    test = feats[is_future]
-    base_median, base_prod = _category_base_predict(
-        train, test, target_col=target_col,
-        total_model=total_model, production_quantile=production_quantile,
-    )
-    if event_prior:
-        base_median, base_prod = _blend_event_prior(
-            train, test["date"], base_median, base_prod, target_col=target_col,
-        )
-    dates = test["date"].to_numpy()
-    daily = _load_real_daily(store_id)          # 배분 비율 history (compute_proportions가 <date만)
-    order = distribute_total(daily, pd.Series(base_prod, index=dates)).quantities.rename(
-        columns={"qty": "our_order"})
-    point = distribute_total(daily, pd.Series(base_median, index=dates)).quantities.rename(
-        columns={"qty": "demand_point"})
-    preds = order.merge(point, on=["item_id", "date"], how="left")
-    preds["item_id"] = preds["item_id"].astype(str)
-    cat_src = daily.drop_duplicates("item_id").assign(item_id=lambda d: d["item_id"].astype(str))
-    cat_map = cat_src.set_index("item_id")["category_id"]
-    preds["store_id"] = store_id
-    preds["category_id"] = preds["item_id"].map(cat_map)
+    preds = ff.item_quantities
     console.print(
-        f"[cyan]category future order[/] {horizon[0].date()}~{horizon[-1].date()}, "
+        f"[cyan]category future order[/] "
+        f"{pd.Timestamp(preds['date'].min()).date()}~{pd.Timestamp(preds['date'].max()).date()}, "
         f"model={total_model}, event_prior={'on' if event_prior else 'off'}, "
         f"forecast={'on' if use_forecast else 'off'}, "
         f"{preds['date'].nunique()} dates × {preds['item_id'].nunique()} items"
     )
-    return preds[["store_id", "item_id", "category_id", "date", "demand_point", "our_order"]]
+    return preds
 
 
 def _quantile_backtest_predictions(

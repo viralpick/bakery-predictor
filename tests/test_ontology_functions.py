@@ -33,7 +33,26 @@ def store_period(dataset):
     return store_id, (str(dates.min().date()), str(dates.max().date()))
 
 
+@pytest.fixture(scope="module")
+def real_daily_fixture():
+    """forward 예측 경로용 real 소스 fixture: (daily, store_id, period).
+
+    period = 마지막 관측일 다음 3일 — forecast_forward의 default horizon_days=7
+    안에 드는 forward 대상(_is_forward_period가 forward로 판정하는 경계 조건).
+    """
+    from bakery.forecast.loaders import load_real_daily
+
+    store_id = "store_gw01"
+    daily = load_real_daily(store_id)
+    last = pd.to_datetime(daily["date"]).max()
+    start = last + pd.Timedelta(days=1)
+    end = last + pd.Timedelta(days=3)
+    return daily, store_id, (str(start.date()), str(end.date()))
+
+
 def test_rank_stockout_risk_returns_topk(dataset, store_period):
+    """historical period(그라운딩 eval-gold 소비처와 동일 형태) — 기존 컬럼평균
+    폴백 경로(_is_forward_period=False) 무변경 검증."""
     store_id, period = store_period
     ranked = rank_stockout_risk(dataset.daily, store_id, period, k=5)
     assert len(ranked) <= 5
@@ -43,7 +62,30 @@ def test_rank_stockout_risk_returns_topk(dataset, store_period):
     assert (ranked["p_stockout"].between(0.0, 1.0)).all()
 
 
+def test_rank_stockout_risk_uses_forward_forecast(real_daily_fixture):
+    """demand_point가 과거 평균이 아니라 forward 예측이어야 한다(의도적 변경, forward
+    period에 한함). ranked 각 item의 demand_point가 forecast_forward item_quantities에서
+    파생한 기대값과 정확히 일치해야 한다(code-quality 규칙 8, 정확값 비교)."""
+    from bakery.forecast.forward import forecast_forward
+
+    daily, store_id, period = real_daily_fixture
+    ff = forecast_forward(store_id, daily=daily, use_forecast=False,
+                          horizon_days=7).item_quantities
+    ff["item_id"] = ff["item_id"].astype(str)
+    dates = pd.to_datetime(ff["date"])
+    mask = (dates >= pd.Timestamp(period[0])) & (dates <= pd.Timestamp(period[1]))
+    expected_by_item = ff.loc[mask].groupby("item_id")["demand_point"].mean()
+
+    ranked = rank_stockout_risk(daily, store_id, period, k=3)
+    assert len(ranked) == 3
+    for _, row in ranked.iterrows():
+        item_id = str(row["item_id"])
+        assert item_id in expected_by_item.index
+        assert float(row["demand_point"]) == pytest.approx(expected_by_item[item_id], rel=1e-9)
+
+
 def test_explain_order_lineage_conserved(dataset, store_period):
+    """historical period — 기존 컬럼평균 폴백 경로(_is_forward_period=False) 무변경 검증."""
     store_id, period = store_period
     item_id = dataset.daily.loc[dataset.daily["store_id"] == store_id, "item_id"].iloc[0]
     lineage = explain_order(dataset.daily, store_id, item_id, period)
@@ -54,6 +96,28 @@ def test_explain_order_lineage_conserved(dataset, store_period):
     base = float(lineage.loc[lineage["step"] == "base", "contribution"].iloc[0])
     expected_order, _ = apply_policy(item_id, base, PolicyParams())
     assert lineage["contribution"].sum() == pytest.approx(expected_order)
+
+
+def test_explain_order_uses_forward_demand_point(real_daily_fixture):
+    """forward period에서 explain_order의 base(demand_point)는 forecast_forward
+    item_quantities에서 파생한 기대값과 정확히 일치해야 한다(의도적 변경, 정확값 비교
+    — code-quality 규칙 8)."""
+    from bakery.forecast.forward import forecast_forward
+
+    daily, store_id, period = real_daily_fixture
+    ff = forecast_forward(store_id, daily=daily, use_forecast=False,
+                          horizon_days=7).item_quantities
+    ff["item_id"] = ff["item_id"].astype(str)
+    item_id = ff["item_id"].iloc[0]
+
+    lineage = explain_order(daily, store_id, item_id, period)
+    base = float(lineage.loc[lineage["step"] == "base", "contribution"].iloc[0])
+
+    dates = pd.to_datetime(ff["date"])
+    mask = (ff["item_id"] == item_id) & \
+        (dates >= pd.Timestamp(period[0])) & (dates <= pd.Timestamp(period[1]))
+    expected_demand_point = float(ff.loc[mask, "demand_point"].mean())
+    assert base == pytest.approx(expected_demand_point)
 
 
 def test_what_if_more_order_lowers_stockout_risk():
