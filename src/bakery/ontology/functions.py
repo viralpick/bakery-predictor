@@ -100,6 +100,25 @@ def _is_forward_period(daily: pd.DataFrame, store_id: str, period: tuple[str, st
     return pd.notna(last_observed) and pd.Timestamp(period[0]) > last_observed
 
 
+def _resolve_demand_points(
+    daily: pd.DataFrame,
+    store_id: str,
+    period: tuple[str, str],
+    *,
+    demand_col: str | None = None,
+) -> pd.DataFrame:
+    """forward period면 forecast_forward 예측, 아니면 컬럼평균(historical fallback).
+
+    ⚠️ demand_col은 historical 경로에만 적용된다(forward 경로는 forecast_forward가
+    산출). ⚠️ period가 관측경계를 걸치면(시작<관측 last<끝) historical로 분류돼
+    과거 부분만 요약된다.
+    """
+    if _is_forward_period(daily, store_id, period):
+        return _forward_demand_points(daily, store_id, period)
+    demand_col = demand_col or _resolve_demand_proxy(daily)
+    return _item_demand_points(_period_slice(daily, store_id, *period), demand_col)
+
+
 def rank_stockout_risk(
     daily: pd.DataFrame,
     store_id: str,
@@ -116,11 +135,7 @@ def rank_stockout_risk(
     _forward_demand_points(5a 의도적 변경), historical이면 기존 컬럼-평균
     _item_demand_points로 폴백(그라운딩 eval-gold 등 과거 period 호환).
     """
-    if _is_forward_period(daily, store_id, period):
-        items = _forward_demand_points(daily, store_id, period)
-    else:
-        demand_col = demand_col or _resolve_demand_proxy(daily)
-        items = _item_demand_points(_period_slice(daily, store_id, *period), demand_col)
+    items = _resolve_demand_points(daily, store_id, period, demand_col=demand_col)
     rec = build_recommendation(items, policy=policy, risk=risk)
     ranked = rec.table.sort_values("p_stockout", ascending=False).head(k)
     return ranked.reset_index(drop=True)
@@ -175,11 +190,7 @@ def explain_order(
     demand_point: rank_stockout_risk와 동일한 forward/historical 분기(모듈
     docstring·rank_stockout_risk 참조).
     """
-    if _is_forward_period(daily, store_id, period):
-        items = _forward_demand_points(daily, store_id, period)
-    else:
-        demand_col = demand_col or _resolve_demand_proxy(daily)
-        items = _item_demand_points(_period_slice(daily, store_id, *period), demand_col)
+    items = _resolve_demand_points(daily, store_id, period, demand_col=demand_col)
     match = items.loc[items["item_id"] == item_id, "demand_point"]
     if match.empty:
         raise ValueError(f"item {item_id} not sold at {store_id} in {period}")

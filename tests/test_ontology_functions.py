@@ -64,16 +64,24 @@ def test_rank_stockout_risk_returns_topk(dataset, store_period):
 
 def test_rank_stockout_risk_uses_forward_forecast(real_daily_fixture):
     """demand_point가 과거 평균이 아니라 forward 예측이어야 한다(의도적 변경, forward
-    period에 한함). forecast_forward로 계산한 값과 일치."""
+    period에 한함). ranked 각 item의 demand_point가 forecast_forward item_quantities에서
+    파생한 기대값과 정확히 일치해야 한다(code-quality 규칙 8, 정확값 비교)."""
     from bakery.forecast.forward import forecast_forward
 
     daily, store_id, period = real_daily_fixture
     ff = forecast_forward(store_id, daily=daily, use_forecast=False,
                           horizon_days=7).item_quantities
+    ff["item_id"] = ff["item_id"].astype(str)
+    dates = pd.to_datetime(ff["date"])
+    mask = (dates >= pd.Timestamp(period[0])) & (dates <= pd.Timestamp(period[1]))
+    expected_by_item = ff.loc[mask].groupby("item_id")["demand_point"].mean()
+
     ranked = rank_stockout_risk(daily, store_id, period, k=3)
-    # 예측 기반 demand_point가 rank 입력으로 흘러갔는지: 상위 item이 예측 프레임에 존재
-    assert set(ranked["item_id"]).issubset(set(ff["item_id"].astype(str)))
     assert len(ranked) == 3
+    for _, row in ranked.iterrows():
+        item_id = str(row["item_id"])
+        assert item_id in expected_by_item.index
+        assert float(row["demand_point"]) == pytest.approx(expected_by_item[item_id], rel=1e-9)
 
 
 def test_explain_order_lineage_conserved(dataset, store_period):
