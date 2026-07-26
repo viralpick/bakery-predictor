@@ -7,6 +7,8 @@
 "크리스마스=고정 N개 룰"이 아니다(레벨-앵커 블렌드). apply_policy 퍼센트 safety를
 얹지 않는다 — seam our_order가 이미 분위수 버퍼(q0.85)를 총량 레벨에 포함하므로
 이중계상이 된다. 기존 explain_order(v6 apply_policy)는 다른 발주 철학, 무변경.
+
+See docs/superpowers/specs/2026-07-27-ontology-explain-layer-design.md.
 """
 
 from __future__ import annotations
@@ -51,7 +53,9 @@ def explain_category_total(store_id, *, daily, date, horizon_days=7, use_forecas
         ("base_median", base_median, "Stage1 카테고리 수요 예측 (event_prior 이전)"),
         ("event_prior", event_prior, "특수일 레벨-앵커 블렌드 보정 (prior_median − base_median)"),
         ("prior_median", prior_median, "보정된 카테고리 수요 (q0.5)"),
-        ("quantile_buffer", buffer, "생산 분위수 버퍼 (q0.85 − q0.5)"),
+        ("quantile_buffer", buffer,
+         "생산 버퍼 (prior_prod − prior_median; 비이벤트일=순수 q0.85−q0.5 spread, "
+         "이벤트일=event 보정이 spread에도 곱셈 적용됨)"),
         ("prior_prod", prior_prod, "카테고리 생산총량"),
     ]
     return pd.DataFrame(

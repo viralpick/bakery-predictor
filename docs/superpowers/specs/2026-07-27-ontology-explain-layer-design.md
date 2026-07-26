@@ -49,11 +49,12 @@ explain_item_order(store, item, horizon):
   = prior_prod  (카테고리 생산총량)                 300
   × proportion_i (품목 비중)                        0.20    ← base_sold×adj_trend×adj_stockout×adj_closing×adj_new / Σ
   = our_order_i (품목 생산량)                        60      ← ForwardForecast.item_quantities.our_order
-  × round_unit=3 ceil (배수 라운딩)                  →60     ← 3/6/9 생산제약 (아띠제 배수생산)
+  × round_unit=3 ceil (배수 라운딩, final 단계 detail로 표현) →60  ← 3/6/9 생산제약 (아띠제 배수생산)
   = final_item_order                                60
 ```
 - 보존식: 체인 각 단계 재구성 == 최종. (총량 레벨은 `prior_median + 버퍼 = prior_prod`, 품목 레벨은 `prior_prod × proportion = our_order`, `ceil_3(our_order) = final`.)
-- 배수 라운딩: 기존 `decision/policy.py::_round_up_to_unit(qty, unit)` 재사용, `round_unit=3`(3/6/9). 라운딩은 마지막 단계.
+- 배수 라운딩: 기존 `decision/policy.py::_round_up_to_unit(qty, unit)` 재사용, `round_unit=3`(3/6/9). 별도 step이 아니라 **`final` 단계 하나에 라운딩 결과값+detail로 표현**(구현 4-step: category_total/proportion/item_order/final).
+- ⚠️ **이벤트일 buffer caveat**: `EventLevelPrior.blend()`(`models/event_prior.py`)는 median 보정비율(`correction = blended_exp/exp`)을 median·production 양쪽에 곱셈 적용한다. 따라서 이벤트일(크리스마스/설/추석 등)엔 `분위수 버퍼(prior_prod − prior_median)`가 event 보정을 흡수해 **순수 통계 spread가 아니다** — event 보정이 median과 spread 양쪽에 곱셈으로 섞인다. 비이벤트일만 순수 q0.85−q0.5.
 
 ### 3.2 explain_category_total
 ```
@@ -64,6 +65,7 @@ explain_category_total(store, horizon):
   + 분위수 버퍼 (prior_prod − prior_median)
   = prior_prod  (카테고리 생산총량)
 ```
+- ⚠️ 이벤트일 buffer caveat: `EventLevelPrior.blend()`의 median 보정비율(`correction`)이 median·production 양쪽에 곱셈 적용되므로, 이벤트일엔 `분위수 버퍼(prior_prod − prior_median)`가 순수 통계 spread(q0.85−q0.5)가 아니라 event 보정을 흡수한 값이다(§3.4 caveat 동일).
 
 ### 3.3 ★faithfulness — 실제 블렌드값, "룰" 금지 (advisor 원칙 계승)
 `event_prior` 기여는 `prior_median − base_median`(엔진이 실제 낸 blend 차이)이지 **"크리스마스=고정 N개 룰"이 아니다**. event_prior는 pre-test 히스토리로 fit한 레벨-앵커 블렌드다. 설명 함수는 이 차이를 **실제 수치**로 서술하며, "룰은 N"이라는 이상화 라벨을 만들지 않는다. (5a §3.4·§5.3 계승 — grounding이 없애려는 fabrication을 설명 레이어가 만들면 안 됨.)
@@ -72,7 +74,7 @@ explain_category_total(store, horizon):
 - 신규 `src/bakery/ontology/explain.py` (functions.py ~200줄이라 설명 책임 분리).
 - 반환 = lineage 스타일 DataFrame(단계별 행: `step`, `value`/`contribution`, `detail`) — 기존 `DecisionLineage.to_records()`와 유사 형태로 CSV/드릴다운·LLM 서술 친화.
   - `explain_category_total` → [store_id, date, step, value, detail] (step: base_median / event_prior / prior_median / quantile_buffer / prior_prod)
-  - `explain_item_order` → [store_id, item_id, date, step, value, detail] (step: category_total / proportion / item_order / batch_rounding / final)
+  - `explain_item_order` → [store_id, item_id, date, step, value, detail] (step: category_total / proportion / item_order / final — 배수 라운딩은 별도 step이 아니라 `final`의 값+detail로 표현, 4-step)
 - horizon: forward 대상(다가오는 K일). 함수가 `forecast_forward(store, horizon_days=...)`를 호출하고 요청 date로 슬라이스.
 
 ---
