@@ -32,6 +32,20 @@ def test_sales_time_format_catches_swap():
     assert len(v) == 1 and v[0].severity == "fail" and v[0].count == 3
 
 
+def test_sales_fg_domain_accepts_float_coded():
+    # float64로 로드되면 0.0/1.0처럼 ".0"이 붙음 — 정상 데이터로 취급해야 함
+    floaty = _good_sales()
+    floaty["SALES_FG"] = [0.0, 1.0, 0.0]
+    assert integrity.check_sales_fg_domain(floaty) == []
+
+
+def test_sales_time_format_accepts_float_timestamp():
+    # float64로 로드되면 "20260101120000.0"처럼 ".0"이 붙음 — 정상 데이터로 취급해야 함
+    floaty = _good_sales()
+    floaty["SALES_TIME"] = ["20260101120000.0", "20260101130000.0", "20260102090000.0"]
+    assert integrity.check_sales_time_format(floaty) == []
+
+
 def test_line_uniqueness_catches_dup():
     dup = _good_sales()
     dup.loc[2, ["NO_POS", "SLIP_NO", "SLIP_LINE"]] = ["1", "10", "1"]  # row0 중복

@@ -16,8 +16,12 @@ class Violation:
 
 
 def check_sales_fg_domain(sales: pd.DataFrame) -> list[Violation]:
-    """SALES_FG는 '0'(정상)/'1'(반품)만. sheet-2 스왑이면 타임스탬프가 들어와 위반."""
-    bad = ~sales["SALES_FG"].astype(str).isin({"0", "1"})
+    """SALES_FG는 '0'(정상)/'1'(반품)만. sheet-2 스왑이면 타임스탬프가 들어와 위반.
+
+    float64로 로드되면 0.0/1.0처럼 ".0"이 붙어 문자열 비교가 깨지므로 정규화한다.
+    """
+    norm = sales["SALES_FG"].astype(str).str.replace(r"\.0$", "", regex=True)
+    bad = ~norm.isin({"0", "1"})
     if not bad.any():
         return []
     return [Violation("sales_fg_domain", "fail",
@@ -25,9 +29,12 @@ def check_sales_fg_domain(sales: pd.DataFrame) -> list[Violation]:
 
 
 def check_sales_time_format(sales: pd.DataFrame) -> list[Violation]:
-    """SALES_TIME은 14자리 숫자(YYYYMMDDHHMMSS). 스왑이면 0/1이 들어와 위반."""
-    s = sales["SALES_TIME"].astype(str)
-    bad = ~s.str.fullmatch(r"\d{14}")
+    """SALES_TIME은 14자리 숫자(YYYYMMDDHHMMSS). 스왑이면 0/1이 들어와 위반.
+
+    float64로 로드되면 "20260101120000.0"처럼 ".0"이 붙으므로 정규화 후 검사한다.
+    """
+    norm = sales["SALES_TIME"].astype(str).str.replace(r"\.0$", "", regex=True)
+    bad = ~norm.str.fullmatch(r"\d{14}")
     if not bad.any():
         return []
     return [Violation("sales_time_format", "fail",
