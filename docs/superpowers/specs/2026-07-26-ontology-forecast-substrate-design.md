@@ -134,6 +134,11 @@ class ForwardForecast:
 - **의도적 변경(라벨)**: 온톨로지 demand_point = 과거 평균 → forward 예측. 게이트 대상 아님, docstring·리뷰에 명시.
 - 테스트: functions 테스트의 fixture가 forward 경로(다가오는 horizon 예측)를 태우도록 마이그레이션. 과거 period 슬라이스 fixture → forward 대상으로 교체. real-source fixture 필요.
 
+### 5.3 guarded fallback — 무조건 교체가 아니라 period-타입 분기 (architect 승인 2026-07-26)
+⚠️ **구현 중 발견**: 무조건 forward 교체는 `grounding/questions.py::_ctx`를 깨뜨린다 — 그건 rank_stockout_risk/explain_order를 **항상 과거(historical) period**(eval-gold, `dd.min()~dd.max()`)로 호출하는데, forward 예측은 미래 horizon만 산출해 과거 period와 겹치지 않아 ValueError가 난다(미래는 정답이 없으므로 gold를 과거로 만드는 게 옳다).
+→ **guarded fallback** 채택: `_resolve_demand_points`가 `_is_forward_period`(period 시작 > 마지막 관측일)로 분기 — **forward면 forecast_forward, historical면 기존 컬럼평균**. architect의 "왜 K개 생산"(미래) 질문은 예측 경로로 정상 답하고, grounding eval-gold(과거 관측 요약)는 무변경으로 유지된다. scope=functions.py만, grounding 미변경. (advisor·리뷰어 지지, architect 확정.)
+- 알려진 caveat(docstring 라벨): `demand_col`은 historical 경로에만 적용(forward는 forecast_forward 산출), period가 관측경계를 걸치면 historical로 분류돼 과거 부분만 요약. per-call LightGBM refit(캐시 없음)=5b 최적화 후보.
+
 ---
 
 ## 6. Acceptance 기준
