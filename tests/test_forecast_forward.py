@@ -72,6 +72,16 @@ def test_proportions_factor_columns(result):
         assert g["proportion"].sum() == pytest.approx(1.0, rel=1e-9)
 
 
+def test_cli_wrapper_byte_equal():
+    """cli 래퍼화 후에도 _category_future_order_predictions 출력 불변."""
+    got = _category_future_order_predictions(
+        STORE, horizon_days=7, production_quantile=0.85,
+        total_model="lightgbm", event_prior=True, use_forecast=False,
+    ).reset_index(drop=True)
+    ref = forecast_forward(STORE, **KW).item_quantities.reset_index(drop=True)
+    pd.testing.assert_frame_equal(got[ref.columns], ref, check_dtype=False)
+
+
 def test_daily_injection_branch():
     """daily=<주입 프레임>이면 build_category_daily(daily_raw=...) 분기를 탄다.
 

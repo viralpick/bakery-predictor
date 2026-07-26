@@ -18,8 +18,7 @@ from .decision import PolicyParams, RiskParams, build_recommendation, lineage_to
 from .forecast.forward import (
     _blend_event_prior,
     _category_base_predict,
-    _extend_category_features,
-    _forecast_to_category_weather,
+    forecast_forward,
 )
 from .forecast.loaders import (
     load_forecast_weather as _load_forecast_weather,
@@ -44,7 +43,7 @@ from .evaluation.split import SplitWindow, apply_split, generate_time_splits
 from .features.calendar_features import add_calendar_features
 from .features.category_aggregate import (
     DEFAULT_ALPHA,
-    build_category_daily, build_features, build_item_adjusted_demand, fill_forecast_weather,
+    build_category_daily, build_features, build_item_adjusted_demand,
 )
 from .features.competitor_features import (
     add_competitor_features,
@@ -2337,58 +2336,23 @@ def _category_future_order_predictions(
 ) -> pd.DataFrame:
     """미래 horizon_days일 카테고리 총량 예측 → item 배분.
 
+    forecast_forward seam을 소비(단일 출처). 반환 스키마·leakage 규칙은 seam이 보장.
     [store_id, item_id, category_id, date, demand_point, our_order] 반환.
-    demand_point=median 배분(점추정), our_order=production 분위수 배분(발주). 동일 비율로
-    배분해 두 컬럼이 정합한다(demand_point는 c-2b decision·미리보기가 소비).
-
-    leakage-safe: 미래 카테고리 행을 target=NaN으로 append하면 build_features의 lag가 seam
-    너머 계산돼 미래-reaching lag는 NaN이 된다(미래 실측 원천 차단, item _join_history와 동일
-    원리). fit은 관측 history(dropna)만 사용하고 미래 행은 예측 대상이다. 날씨는 부분 예보
-    주입(기온/강수/습도; 구름/풍속 NaN). production은 total_model(lightgbm|distributional)·
-    event_prior 재사용(PR#49 배선)."""
-    target_col = "adjusted_demand_unit"
-    hist = build_category_daily(alpha=alpha).df
-    feats, horizon = _extend_category_features(
-        hist, horizon_days=horizon_days, alpha=alpha, target_col=target_col,
+    """
+    ff = forecast_forward(
+        store_id, horizon_days=horizon_days, total_model=total_model,
+        event_prior=event_prior, production_quantile=production_quantile,
+        alpha=alpha, use_forecast=use_forecast,
     )
-    if use_forecast:
-        fw = _load_forecast_weather(horizon)
-        cat_fw = _forecast_to_category_weather(fw, store_id) if fw is not None else None
-        if cat_fw is not None:
-            feats = fill_forecast_weather(feats, cat_fw)
-        else:
-            console.print(f"[yellow]forecast[/] {store_id} 미매칭 — 미래 날씨 NaN 유지")
-    feats = feats.sort_values("date").reset_index(drop=True)
-    is_future = feats["date"].isin(horizon)
-    train = feats[~is_future].dropna(subset=[target_col])
-    test = feats[is_future]
-    base_median, base_prod = _category_base_predict(
-        train, test, target_col=target_col,
-        total_model=total_model, production_quantile=production_quantile,
-    )
-    if event_prior:
-        base_median, base_prod = _blend_event_prior(
-            train, test["date"], base_median, base_prod, target_col=target_col,
-        )
-    dates = test["date"].to_numpy()
-    daily = _load_real_daily(store_id)          # 배분 비율 history (compute_proportions가 <date만)
-    order = distribute_total(daily, pd.Series(base_prod, index=dates)).quantities.rename(
-        columns={"qty": "our_order"})
-    point = distribute_total(daily, pd.Series(base_median, index=dates)).quantities.rename(
-        columns={"qty": "demand_point"})
-    preds = order.merge(point, on=["item_id", "date"], how="left")
-    preds["item_id"] = preds["item_id"].astype(str)
-    cat_src = daily.drop_duplicates("item_id").assign(item_id=lambda d: d["item_id"].astype(str))
-    cat_map = cat_src.set_index("item_id")["category_id"]
-    preds["store_id"] = store_id
-    preds["category_id"] = preds["item_id"].map(cat_map)
+    preds = ff.item_quantities
     console.print(
-        f"[cyan]category future order[/] {horizon[0].date()}~{horizon[-1].date()}, "
+        f"[cyan]category future order[/] "
+        f"{pd.Timestamp(preds['date'].min()).date()}~{pd.Timestamp(preds['date'].max()).date()}, "
         f"model={total_model}, event_prior={'on' if event_prior else 'off'}, "
         f"forecast={'on' if use_forecast else 'off'}, "
         f"{preds['date'].nunique()} dates × {preds['item_id'].nunique()} items"
     )
-    return preds[["store_id", "item_id", "category_id", "date", "demand_point", "our_order"]]
+    return preds
 
 
 def _quantile_backtest_predictions(
