@@ -6,12 +6,16 @@ layer (commit 8d13157) — no new modeling logic. The numbers come from the
 deterministic engine; the agent's job is only to call + interpret (docs §2,
 "수치 = 엔진, 해석 = LLM").
 
-Demand point estimate: historical demand proxy, auto-resolved per call via
-`_resolve_demand_proxy` — `adjusted_demand` when present (real data, enriched
-by grounding/run.py's real-source path), else `potential_demand` (synthetic,
-or a raw frame without the fix). Swap `demand_col`/inject a live forecast when
-LayerA lands — the function signatures don't change. Labeled, not hidden
-(fairness contract §7).
+Demand point estimate: **forward forecast for forward periods, historical
+proxy fallback for historical periods** (5a 의도적 변경, commit 이후). When
+`period` starts after the store's last observed date, `rank_stockout_risk`/
+`explain_order` call `_forward_demand_points` → `forecast_forward` (Task
+1-4의 forward 2층 예측), which is what lets the architect ask "왜 K개
+생산?" against a real forecast instead of a backward-looking mean. When
+`period` is historical (e.g. grounding/eval-gold's full observed range),
+they fall back to the original `_item_demand_points` column-mean path via
+`_resolve_demand_proxy` — `adjusted_demand` when present (real data), else
+`potential_demand` (synthetic). Labeled, not hidden (fairness contract §7).
 
 All functions are *read-only* over the ontology (AOS rule). Writeback lives in
 writeback.py (S4) behind a human-approval gate.
@@ -64,6 +68,38 @@ def _item_demand_points(period: pd.DataFrame, demand_col: str) -> pd.DataFrame:
     return grouped.reset_index(name="demand_point")
 
 
+def _forward_demand_points(
+    daily: pd.DataFrame, store_id: str, period: tuple[str, str], *, horizon_days: int = 7,
+) -> pd.DataFrame:
+    """forward 예측 demand_point (과거 평균 _item_demand_points 대체).
+
+    의도적 변경(5a): 온톨로지 수요 = adjusted_demand 컬럼 평균 → forecast_forward.
+    period는 다가오는 horizon 내 대상으로 슬라이스. daily 주입·use_forecast=False로 결정론.
+    """
+    from ..forecast.forward import forecast_forward
+    ff = forecast_forward(store_id, daily=daily, horizon_days=horizon_days,
+                          use_forecast=False).item_quantities
+    dates = pd.to_datetime(ff["date"])
+    mask = (dates >= pd.Timestamp(period[0])) & (dates <= pd.Timestamp(period[1]))
+    sliced = ff.loc[mask]
+    if sliced.empty:
+        raise ValueError(f"forward 예측에 period {period} 대상 없음 (horizon 밖)")
+    return (sliced.groupby("item_id", observed=True)["demand_point"].mean()
+            .reset_index(name="demand_point"))
+
+
+def _is_forward_period(daily: pd.DataFrame, store_id: str, period: tuple[str, str]) -> bool:
+    """period 시작일이 store의 마지막 관측일 이후면 forward(미래) 대상으로 판정.
+
+    forward면 _forward_demand_points(forecast_forward)로, historical이면 기존
+    _item_demand_points(컬럼 평균)로 분기 — 그라운딩 eval-gold(historical
+    min~max period) 등 기존 소비처와의 호환을 위한 폴백 경로(모듈 docstring 참조).
+    """
+    dates = pd.to_datetime(daily.loc[daily["store_id"] == store_id, "date"])
+    last_observed = dates.max()
+    return pd.notna(last_observed) and pd.Timestamp(period[0]) > last_observed
+
+
 def rank_stockout_risk(
     daily: pd.DataFrame,
     store_id: str,
@@ -74,9 +110,17 @@ def rank_stockout_risk(
     policy: PolicyParams = PolicyParams(),
     risk: RiskParams = RiskParams(),
 ) -> pd.DataFrame:
-    """Top-k items by P(stockout) for a store over a period (uses risk.py MC)."""
-    demand_col = demand_col or _resolve_demand_proxy(daily)
-    items = _item_demand_points(_period_slice(daily, store_id, *period), demand_col)
+    """Top-k items by P(stockout) for a store over a period (uses risk.py MC).
+
+    demand_point: period가 forward(마지막 관측일 이후)면 forecast_forward 기반
+    _forward_demand_points(5a 의도적 변경), historical이면 기존 컬럼-평균
+    _item_demand_points로 폴백(그라운딩 eval-gold 등 과거 period 호환).
+    """
+    if _is_forward_period(daily, store_id, period):
+        items = _forward_demand_points(daily, store_id, period)
+    else:
+        demand_col = demand_col or _resolve_demand_proxy(daily)
+        items = _item_demand_points(_period_slice(daily, store_id, *period), demand_col)
     rec = build_recommendation(items, policy=policy, risk=risk)
     ranked = rec.table.sort_values("p_stockout", ascending=False).head(k)
     return ranked.reset_index(drop=True)
@@ -126,9 +170,16 @@ def explain_order(
     demand_col: str | None = None,
     policy: PolicyParams = PolicyParams(),
 ) -> pd.DataFrame:
-    """Decision lineage for one item's order: base → safety → floor → rounding."""
-    demand_col = demand_col or _resolve_demand_proxy(daily)
-    items = _item_demand_points(_period_slice(daily, store_id, *period), demand_col)
+    """Decision lineage for one item's order: base → safety → floor → rounding.
+
+    demand_point: rank_stockout_risk와 동일한 forward/historical 분기(모듈
+    docstring·rank_stockout_risk 참조).
+    """
+    if _is_forward_period(daily, store_id, period):
+        items = _forward_demand_points(daily, store_id, period)
+    else:
+        demand_col = demand_col or _resolve_demand_proxy(daily)
+        items = _item_demand_points(_period_slice(daily, store_id, *period), demand_col)
     match = items.loc[items["item_id"] == item_id, "demand_point"]
     if match.empty:
         raise ValueError(f"item {item_id} not sold at {store_id} in {period}")
