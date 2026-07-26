@@ -1336,6 +1336,70 @@ def cmd_format_bonavi_v2(
     )
 
 
+@app.command("check-integrity")
+def cmd_check_integrity(source: str = "sales_lines_clean", strict: bool = False) -> None:
+    """신규 데이터 forward 무결성 게이트. 타깃 품목 누락=fail(exit non-zero),
+    나머지 미매칭=drift(CSV 보고). reports/integrity/missing_codes.csv 산출.
+    ★conflict(옛vs새 마스터)는 별도 `check-conflict`(vintage 진단)."""
+    import sys
+
+    from .data import bonavi_loader_v2 as v2
+    from .data import integrity
+
+    sales = pd.read_parquet(paths.dataset(source))
+    daily = pd.read_parquet(paths.dataset("bonavi_daily"))
+    target_items = set(daily["item_id"].astype(str))           # canonical 166 타깃
+    items = v2.load_items_v2()
+    master_item_codes = set(items["item_id"].astype(str))
+    used_disc = set(sales["CD_USERDEF1"].replace("", pd.NA).dropna().astype(str))
+    disc = pd.read_parquet(paths.INTERIM_DIR / "v2" / "discount_codes.parquet")
+    master_disc = set(disc["CD_DISC"].astype(str))
+
+    violations, missing = integrity.run_all(
+        sales=sales, master_item_codes=master_item_codes, target_items=target_items,
+        used_discounts=used_disc, master_disc=master_disc,
+    )
+    out_dir = REPORTS_DIR / "integrity"
+    integrity.write_missing(missing, out_dir)
+    for vi in violations:
+        color = "red" if vi.severity == "fail" else "yellow"
+        console.print(f"[{color}]{vi.severity.upper()}[/] {vi.check}: {vi.detail} (n={vi.count})")
+    console.print(f"[dim]missing={len(missing)} → {out_dir}/missing_codes.csv[/]")
+    if integrity.has_fail(violations):
+        console.print("[red]무결성 실패 — 타깃 품목 누락/컬럼 스왑[/]")
+        sys.exit(1)
+    console.print("[green]무결성 통과 (fail 없음, drift는 CSV 참조)[/]")
+
+
+@app.command("check-conflict")
+def cmd_check_conflict() -> None:
+    """옛(0520) vs 새(0526) 마스터 값 충돌 one-shot 진단. 타깃 플래그·할인율 변경=fail.
+    ★vintage 대조라 편입 시점에만 수동 실행(hot-path 아님). 위치기준 헤더 rename은
+    코드열 검증 후 사용(sheet-2 교훈)."""
+    from .data import integrity
+
+    daily = pd.read_parquet(paths.dataset("bonavi_daily"))
+    target_items = set(daily["item_id"].astype(str))
+
+    def _load_items(key):
+        df = pd.read_excel(paths.dataset(key), sheet_name="품목정보", dtype=str)
+        # 위치기준 rename (품목정보에 English placeholder 행 없음) — 0열=코드, 6열=당일폐기여부.
+        # ★가드: 0열이 코드 패턴(숫자 문자열)인지 assert (위치 신뢰 금지, sheet-2 교훈)
+        first = df.iloc[:, 0].dropna().astype(str)
+        assert first.str.fullmatch(r"\d+").mean() > 0.9, f"{key} 0열이 코드 아님 — 헤더 위치 확인"
+        return df.rename(columns={df.columns[0]: "CD_ITEM", df.columns[6]: "CD_USERDEF4"})
+
+    old_im, new_im = _load_items("legacy_xlsx_0520"), _load_items("master_xlsx")
+    violations, conflicting = integrity.run_conflict_diagnostic(
+        old_im[["CD_ITEM", "CD_USERDEF4"]], new_im[["CD_ITEM", "CD_USERDEF4"]],
+        fields=["CD_USERDEF4"], scope_codes=target_items)   # 당일폐기 플래그 변경 우선
+    out_dir = REPORTS_DIR / "integrity"
+    integrity.write_conflicting(conflicting, out_dir)
+    for vi in violations:
+        console.print(f"[{'red' if vi.severity=='fail' else 'yellow'}]{vi.severity.upper()}[/] {vi.check}: {vi.detail}")
+    console.print(f"[dim]conflicting={len(conflicting)} → {out_dir}/conflicting_codes.csv[/]")
+
+
 @app.command("build-data")
 def cmd_build_data(reconvert: bool = False, diagnose: bool = True) -> None:
     """raw → interim → processed/internal 재생성. diagnose면 on-disk와 rtol 진단."""
