@@ -42,14 +42,23 @@ def check_sales_time_format(sales: pd.DataFrame) -> list[Violation]:
                       "SALES_TIME not 14-digit (sheet-swap 의심)", int(bad.sum()))]
 
 
-def check_line_uniqueness(sales: pd.DataFrame) -> list[Violation]:
-    """(NO_POS, SLIP_NO, SLIP_LINE) 라인 유일."""
-    keys = ["NO_POS", "SLIP_NO", "SLIP_LINE"]
-    dup = sales.duplicated(subset=keys, keep=False)
+def check_line_uniqueness(
+    sales: pd.DataFrame,
+    keys: tuple[str, ...] = ("CD_PARTNER", "DT_SALE", "NO_POS", "SLIP_NO", "SLIP_LINE"),
+) -> list[Violation]:
+    """라인 유일성 = (매장, 일자, NO_POS, SLIP_NO, SLIP_LINE) 전체 grain.
+
+    ★실측 발견(Task 5 real-data smoke): NO_POS/SLIP_NO는 매장×일자별로 리셋되므로
+    3열(NO_POS,SLIP_NO,SLIP_LINE)만으로는 다매장·다년 누적 테이블에서 5.7M/5.7M행이
+    거짓양성으로 걸림(DT_SALE만 추가해도 3.1M 잔존, CD_PARTNER+DT_SALE 둘 다 있어야 0건).
+    컬럼 없는 합성 fixture 호환을 위해 존재하는 키만 사용(필터).
+    """
+    key_list = [k for k in keys if k in sales.columns]
+    dup = sales.duplicated(subset=key_list, keep=False)
     if not dup.any():
         return []
     return [Violation("line_uniqueness", "fail",
-                      "duplicate (NO_POS,SLIP_NO,SLIP_LINE)", int(dup.sum()))]
+                      f"duplicate {tuple(key_list)}", int(dup.sum()))]
 
 
 def check_schema(sales: pd.DataFrame, expected: dict[str, str]) -> list[Violation]:

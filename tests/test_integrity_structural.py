@@ -53,6 +53,24 @@ def test_line_uniqueness_catches_dup():
     assert len(v) == 1 and v[0].count == 2   # 중복 그룹 2행
 
 
+def test_line_uniqueness_full_grain_distinguishes_store_and_date():
+    """NO_POS/SLIP_NO는 매장×일자별로 리셋되므로 같은 (NO_POS,SLIP_NO,SLIP_LINE)이
+    다른 매장/다른 날짜에 나오는 건 정상(위반 아님) — CD_PARTNER+DT_SALE까지 키에
+    있어야 진짜 중복만 잡는다(Task 5 real-data 회귀 방지)."""
+    same_line_different_store_and_date = pd.DataFrame({
+        "CD_PARTNER": ["store_a", "store_b"], "DT_SALE": ["20260101", "20260102"],
+        "NO_POS": ["1", "1"], "SLIP_NO": ["10", "10"], "SLIP_LINE": ["1", "1"],
+    })
+    assert integrity.check_line_uniqueness(same_line_different_store_and_date) == []
+
+    true_full_key_dup = pd.DataFrame({
+        "CD_PARTNER": ["store_a", "store_a"], "DT_SALE": ["20260101", "20260101"],
+        "NO_POS": ["1", "1"], "SLIP_NO": ["10", "10"], "SLIP_LINE": ["1", "1"],
+    })
+    v = integrity.check_line_uniqueness(true_full_key_dup)
+    assert len(v) == 1 and v[0].severity == "fail" and v[0].count == 2
+
+
 def test_schema_catches_missing_col_and_dtype():
     df = _good_sales().astype({"SALES_FG": "int64"})  # dtype 위반 유도
     del df["SALES_TIME"]  # 컬럼 누락
