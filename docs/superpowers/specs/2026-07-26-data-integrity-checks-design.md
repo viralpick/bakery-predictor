@@ -42,9 +42,13 @@
 | 반품비율 ≈ 1.88% | **Drift(soft-range 1~3%)** | 새 drop | 비율 invariant. 범위 벗어나면 사람 확인(gate 아님). (실측 0.0188) |
 | 광교 same-item 총량 510,585 | **vintage regression** | 현 raw 재처리만 | 새 drop엔 검사 안 함(false-positive 방지). |
 
-## 4. ★FK / 코드 누락 검사 (사용자 핵심 요구 — 아티제 역문의용)
+## 4. ★FK / 코드 누락·충돌 검사 (사용자 핵심 요구 — 아티제 역문의용)
 
-7월 판매 데이터의 코드가 0520/0526 마스터에 누락되는지 검사. **실측: 판매 품목 1867종 중 1649종(전매장/전품목 기준)이 마스터 미매칭.** 두 층으로 분리한다.
+새 데이터가 들어올 때 기존 마스터와 **매칭 안 되는 코드를 전부 잡아** 보고한다(누락 + 충돌 둘 다, 사용자 확정). **실측: 판매 품목 1867종 중 1649종(전매장/전품목 기준)이 마스터 미매칭.** 두 종류를 구분한다:
+- **누락(missing)**: 새 데이터의 코드가 마스터에 아예 없음.
+- **충돌(conflict)**: 같은 코드가 옛 마스터(0520) vs 새 마스터(0526)에서 **값이 다름**(품목명·할인율·카테고리 등). 실측 확인: 0520·0526 둘 다 품목정보/점포정보/품절정보/할인코드 시트 보유 → 두 vintage 대조 가능.
+
+아래 fail/보고 분리는 누락·충돌 **양쪽에 동일 적용**한다.
 
 ### 4a. Fail 게이트 (well-defined invariant만)
 - **품목 = known-target-set regression** (advisor blocker #1 해결):
@@ -53,11 +57,17 @@
 - **할인코드 = used-code regression** (비대칭, well-defined):
   - 할인코드는 판매의 CD_USERDEF1에서 "사용됨"이 **판매만으로 관측 가능**. → "판매에서 실제 사용된 할인코드가 마스터(discount_codes)에 없음" = **fail**. (품목과 달리 관측 가능하므로 구현 가능.)
 
-### 4b. 보고 층 (drift + 아티제 문의 CSV — 항상 산출)
-- **pass/fail과 무관하게 모든 누락 코드를 CSV export.** 4종 마스터 전부 크로스체크(사용자 확정): 품목(items.CD_ITEM)·할인(discount_codes.CD_DISC)·점포(stores.CD_PARTNER)·품절(stockout).
-- CSV 컬럼: `code / kind(item|discount|store|stockout) / sale_count / date_range / is_target_scope(Y=fail대상·N=drift) / source_sheet`.
+### 4b. 충돌(conflict) 검사 — 같은 코드, 다른 값 (옛 마스터 vs 새 마스터)
+- 4종 마스터의 **공통 코드**에 대해 옛(0520) vs 새(0526) 값 필드를 대조. 다르면 conflict.
+  - 품목: NM_ITEM(품목명)·카테고리·규격. 할인: RT_DISC(할인율)·유효기간. 점포: 매장속성. 품절: 해당 스냅샷 성격상 대조 최소.
+- **fail vs drift**: 타깃 품목·사용중 할인코드의 값이 바뀌면 **fail**(모델 라벨/α에 영향). 그 외 코드 값 변경은 **drift 보고**.
+- 산출물: `reports/integrity/conflicting_codes.csv` — `code / kind / field / old_value / new_value / is_target_scope`.
+
+### 4c. 보고 층 (drift + 아티제 문의 CSV — 항상 산출)
+- **pass/fail과 무관하게 모든 미매칭(누락+충돌) 코드를 CSV export.** 4종 마스터 전부 크로스체크(사용자 확정): 품목(items.CD_ITEM)·할인(discount_codes.CD_DISC)·점포(stores.CD_PARTNER)·품절(stockout).
+- `missing_codes.csv` 컬럼: `code / kind(item|discount|store|stockout) / sale_count / date_range / is_target_scope(Y=fail대상·N=drift) / source_sheet`.
   - 판매건수·기간을 붙여 아티제가 "이 코드 뭔지" 답하기 쉽게. is_target_scope로 우선순위.
-- 산출물: `reports/integrity/missing_codes.csv` (gitignored). 이게 **아티제 데이터 요청서 근거**([[project_new_data_20260721]] 갱신마스터 요청).
+- 산출물: `reports/integrity/{missing,conflicting}_codes.csv` (gitignored). 이게 **아티제 데이터 요청서 근거**([[project_new_data_20260721]] 갱신마스터 요청).
 - **신규 orphan(타깃일 수도, 판별 불가)** = 자동 분류 불가 → CSV로 벤더 왕복이 유일 해결(게이트가 커버하는 척 안 함).
 
 ### 4c. Drift baseline 분모 고정 (advisor #3)
@@ -75,7 +85,8 @@
 - [ ] `bakery check-integrity`가 현 clean 데이터로 구동: 구조 invariant 전부 pass(현 데이터 정상), 반품비율 soft-range pass, known-target 166 resolve pass.
 - [ ] sheet-2 스왑 **재현 fixture**(SALES_FG에 타임스탬프)로 값 판별 체크가 **fail**함을 테스트로 고정(회귀 방지 = 이 프로젝트 최고비용 실패).
 - [ ] `missing_codes.csv` 생성: 품목·할인·점포·품절 4종 누락 코드 + 판매건수/기간/타깃여부. 실측(품목 ~1649 누락) 반영.
-- [ ] exit code: fail 위반 시 non-zero, drift만이면 0.
+- [ ] `conflicting_codes.csv` 생성: 옛(0520) vs 새(0526) 마스터 공통코드 값 대조(품목명·할인율 등) + field/old/new/타깃여부.
+- [ ] exit code: fail 위반(타깃/사용중 코드의 누락 or 충돌) 시 non-zero, drift만이면 0.
 - [ ] `build-data --diagnose`·refresh 가드를 "무결성 3메커니즘"으로 문서 통합(우산).
 
 ## 7. 범위 밖
