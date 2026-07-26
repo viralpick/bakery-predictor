@@ -6,7 +6,7 @@ fit은 미래 행 제외. 실데이터 IO 없이 합성 history로 검증한다(
 import numpy as np
 import pandas as pd
 
-from bakery.cli import _extend_category_features
+from bakery.forecast.forward import _extend_category_features
 from bakery.features.category_aggregate import fill_forecast_weather
 
 TARGET = "adjusted_demand_unit"
