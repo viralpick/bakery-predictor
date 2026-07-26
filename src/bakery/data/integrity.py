@@ -3,6 +3,7 @@ coverage.py(surface 층, 안 실패)와 별개의 checks 층. detect-only 아님
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import pandas as pd
 
@@ -156,3 +157,54 @@ def check_scope_conflicts(conflicts: pd.DataFrame) -> list[Violation]:
     sample = ", ".join(scoped["code"].astype(str).unique()[:5])
     return [Violation("scope_conflicts", "fail",
                       f"target/used codes changed value: {sample}", len(scoped))]
+
+
+_SALES_SCHEMA = {  # clean parquet 계약 (실측: DT_SALE/CD_ITEM string, SALES_FG string ...)
+    "CD_ITEM": "string", "SALES_FG": "string", "SALES_TIME": "string", "DT_SALE": "string",
+}
+
+
+def has_fail(violations: list[Violation]) -> bool:
+    return any(v.severity == "fail" for v in violations)
+
+
+def run_all(sales, master_item_codes, target_items, used_discounts, master_disc,
+            schema=None) -> tuple:
+    """구조/FK 체크(새 drop에 매번 도는 forward 게이트) → (violations, missing_df).
+    ★conflict(옛vs새 마스터)는 vintage 대조라 run_all에 없음 — run_conflict_diagnostic 분리
+    (advisor #3: 하드코딩 0520vs0526은 one-shot, hot-path xlsx 재파싱 금지)."""
+    schema = schema if schema is not None else _SALES_SCHEMA
+    sale_items = set(sales["CD_ITEM"].dropna().astype(str))
+    v: list[Violation] = []
+    v += check_sales_fg_domain(sales)
+    v += check_sales_time_format(sales)
+    v += check_line_uniqueness(sales)
+    v += check_schema(sales, schema)
+    v += check_return_ratio(sales)
+    v += check_date_contiguity(sales)
+    v += check_target_items_resolve(sale_items, master_item_codes, target_items)  # fail 게이트
+    v += check_used_discounts_resolve(used_discounts, master_disc)                # drift
+    missing = find_missing_codes(sale_items, master_item_codes, "item",
+                                 target_items, used_discounts)
+    return v, missing
+
+
+def run_conflict_diagnostic(old_item_master, new_item_master, fields, scope_codes) -> tuple:
+    """옛 vs 새 마스터 값 충돌 대조 (one-shot 진단, 새 drop 편입 시점에만).
+    → (violations, conflicting_df). CD_USERDEF4(타깃플래그)·카테고리 등 모델영향 필드 우선.
+    ★마스터 키 중복이면 .loc[common]이 다중행 반환→오정렬(Task-4 리뷰 지적) — dedup 후 대조."""
+    old_item_master = old_item_master.drop_duplicates(subset="CD_ITEM")
+    new_item_master = new_item_master.drop_duplicates(subset="CD_ITEM")
+    conflicting = find_conflicting_codes(old_item_master, new_item_master, "CD_ITEM",
+                                         fields, "item", scope_codes)
+    return check_scope_conflicts(conflicting), conflicting
+
+
+def write_missing(missing_df, out_dir: Path) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    missing_df.to_csv(out_dir / "missing_codes.csv", index=False)
+
+
+def write_conflicting(conflicting_df, out_dir: Path) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    conflicting_df.to_csv(out_dir / "conflicting_codes.csv", index=False)
