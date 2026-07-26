@@ -61,3 +61,30 @@ def check_schema(sales: pd.DataFrame, expected: dict[str, str]) -> list[Violatio
             out.append(Violation("schema", "fail",
                                   f"dtype: {col} is {sales[col].dtype}, want {dtype}", 1))
     return out
+
+
+def check_return_ratio(sales: pd.DataFrame, lo: float = 0.01, hi: float = 0.03) -> list[Violation]:
+    """반품비율(SALES_FG=='1')은 사업 비율이라 soft-range. 벗어나면 drift(gate 아님).
+    현 clean 실측 1.88%. 범위는 아티제 새 데이터로 재보정 여지."""
+    total = len(sales)
+    if total == 0:
+        return []
+    ratio = float((sales["SALES_FG"].astype(str) == "1").mean())
+    if lo <= ratio <= hi:
+        return []
+    return [Violation("return_ratio", "drift",
+                      f"return ratio {ratio:.4f} outside [{lo},{hi}]", total)]
+
+
+def check_date_contiguity(sales: pd.DataFrame, max_gap_days: int = 45) -> list[Violation]:
+    """DT_SALE 정렬 후 연속 날짜 간 최대 갭이 max_gap_days 초과면 drift(조용한 누락)."""
+    dates = pd.to_datetime(sales["DT_SALE"].astype(str), format="%Y%m%d", errors="coerce").dropna()
+    if len(dates) < 2:
+        return []
+    uniq = pd.Series(sorted(dates.unique()))
+    gaps = uniq.diff().dt.days.dropna()
+    max_gap = int(gaps.max()) if len(gaps) else 0
+    if max_gap <= max_gap_days:
+        return []
+    return [Violation("date_contiguity", "drift",
+                      f"max date gap {max_gap}d > {max_gap_days}d", max_gap)]
