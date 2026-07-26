@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+from rich.console import Console
 
 from ..features.category_aggregate import (
     DEFAULT_ALPHA,
@@ -25,6 +26,8 @@ from ..models.distributional_total import fit_distributional_total
 from ..models.event_prior import EventLevelPrior
 from ..models.item_proportion import distribute_total
 from .loaders import load_forecast_weather, load_real_daily
+
+console = Console()
 
 
 def _category_base_predict(
@@ -143,6 +146,8 @@ def forecast_forward(
         cat_fw = _forecast_to_category_weather(fw, store_id) if fw is not None else None
         if cat_fw is not None:
             feats = fill_forecast_weather(feats, cat_fw)
+        else:
+            console.print(f"[yellow]forecast[/] {store_id} 미매칭 — 미래 날씨 NaN 유지")
     feats = feats.sort_values("date").reset_index(drop=True)
     is_future = feats["date"].isin(horizon)
     train = feats[~is_future].dropna(subset=[target_col])

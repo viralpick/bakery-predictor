@@ -79,7 +79,8 @@ def test_cli_wrapper_byte_equal():
         total_model="lightgbm", event_prior=True, use_forecast=False,
     ).reset_index(drop=True)
     ref = forecast_forward(STORE, **KW).item_quantities.reset_index(drop=True)
-    pd.testing.assert_frame_equal(got[ref.columns], ref, check_dtype=False)
+    assert list(got.columns) == list(ref.columns)
+    pd.testing.assert_frame_equal(got, ref, check_dtype=False, check_exact=True)
 
 
 def test_daily_injection_branch():
