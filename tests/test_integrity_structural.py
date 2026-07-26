@@ -53,21 +53,34 @@ def test_line_uniqueness_catches_dup():
     assert len(v) == 1 and v[0].count == 2   # 중복 그룹 2행
 
 
-def test_line_uniqueness_full_grain_distinguishes_store_and_date():
-    """NO_POS/SLIP_NO는 매장×일자별로 리셋되므로 같은 (NO_POS,SLIP_NO,SLIP_LINE)이
-    다른 매장/다른 날짜에 나오는 건 정상(위반 아님) — CD_PARTNER+DT_SALE까지 키에
-    있어야 진짜 중복만 잡는다(Task 5 real-data 회귀 방지)."""
-    same_line_different_store_and_date = pd.DataFrame({
-        "CD_PARTNER": ["store_a", "store_b"], "DT_SALE": ["20260101", "20260102"],
-        "NO_POS": ["1", "1"], "SLIP_NO": ["10", "10"], "SLIP_LINE": ["1", "1"],
+def test_line_uniqueness_same_date_different_store_ok():
+    """NO_POS/SLIP_NO는 매장별로 리셋되므로 같은 날짜·같은 (NO_POS,SLIP_NO,SLIP_LINE)이
+    다른 매장에 나오는 건 정상(위반 아님) — CD_PARTNER를 키에서 빼면 이 케이스가 깨진다
+    (실측: CD_PARTNER 없이 DT_SALE만 있어도 3.1M 거짓양성 잔존, Task 5 회귀 방지)."""
+    df = pd.DataFrame({
+        "CD_PARTNER": ["store_a", "store_b"], "DT_SALE": ["20260101", "20260101"],
+        "NO_POS": ["1", "1"], "SLIP_NO": ["1", "1"], "SLIP_LINE": ["1", "1"],
     })
-    assert integrity.check_line_uniqueness(same_line_different_store_and_date) == []
+    assert integrity.check_line_uniqueness(df) == []
 
-    true_full_key_dup = pd.DataFrame({
+
+def test_line_uniqueness_same_store_different_date_ok():
+    """같은 매장·같은 (NO_POS,SLIP_NO,SLIP_LINE)이 다른 날짜에 나오는 건 정상(위반 아님)
+    — DT_SALE을 키에서 빼면 이 케이스가 깨진다(Task 5 회귀 방지)."""
+    df = pd.DataFrame({
+        "CD_PARTNER": ["store_a", "store_a"], "DT_SALE": ["20260101", "20260102"],
+        "NO_POS": ["1", "1"], "SLIP_NO": ["1", "1"], "SLIP_LINE": ["1", "1"],
+    })
+    assert integrity.check_line_uniqueness(df) == []
+
+
+def test_line_uniqueness_full_key_true_dup_fails():
+    """CD_PARTNER·DT_SALE·NO_POS·SLIP_NO·SLIP_LINE 전부 동일 = 진짜 중복 → fail."""
+    df = pd.DataFrame({
         "CD_PARTNER": ["store_a", "store_a"], "DT_SALE": ["20260101", "20260101"],
         "NO_POS": ["1", "1"], "SLIP_NO": ["10", "10"], "SLIP_LINE": ["1", "1"],
     })
-    v = integrity.check_line_uniqueness(true_full_key_dup)
+    v = integrity.check_line_uniqueness(df)
     assert len(v) == 1 and v[0].severity == "fail" and v[0].count == 2
 
 
