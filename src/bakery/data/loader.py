@@ -17,6 +17,7 @@ import pandas as pd
 
 from ..config import EXTERNAL_DATA_DIR
 from ..ingest.store_mapping import load_store_mapping
+from . import paths
 from .calendar import load_calendar_from_local, validate_calendar
 from .competitor import (
     build_synthetic_competitor,
@@ -111,11 +112,11 @@ def load_dataset(
     raise ValueError(f"unknown source: {source}")
 
 
-_INTERNAL_DAILY_PATH = Path("data/internal/bonavi_daily.parquet")
+_INTERNAL_DAILY_PATH = paths.dataset("bonavi_daily")
 
 
 def _load_real_dataset(*, external_dir: Path, mapping_path: Path | None) -> DailyDataset:
-    """Sales come from `data/internal/bonavi_daily.parquet` when present; otherwise
+    """Sales come from the `bonavi_daily` dataset (see `data/paths.py`) when present; otherwise
     fall back to synthetic-but-DGP-aligned sales so the rest of the pipeline still
     exercises calendar + weather + external sources.
     """

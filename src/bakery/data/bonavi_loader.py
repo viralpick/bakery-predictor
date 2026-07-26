@@ -13,7 +13,7 @@ column placeholders) we drop, and every-sheet 판매구분 = 0 (정상) and
 셋트상품구분 = SS (단품) only — we exclude returns and bundles for the
 first PoC pass. 예약(대량) 주문 라인은 `bulk.flag_bulk_lines`로 추가 제거한다.
 
-Output: `data/internal/bonavi_daily.parquet` conforming to
+Output: `bonavi_daily` dataset (see `data/paths.py`) conforming to
 `schema.DAILY_COLUMNS` so `loader._load_real_dataset` can swap it in.
 """
 
@@ -26,12 +26,13 @@ import numpy as np
 import pandas as pd
 
 from ..features.potential_demand import StoreHours, attach_potential_demand
+from . import paths
 from .bulk import SINGLE_FLOOR, flag_bulk_lines
 from .schema import DAILY_COLUMNS, validate_daily
 
-XLSX_DEFAULT = Path("data/internal/보나비 데이터_20260520.xlsx")
-INVENTORY_XLSX_DEFAULT = Path("data/internal/보나비 데이터_20260526.xlsx")  # 재고정보 시트는 이 파일에만 존재
-OUT_DEFAULT = Path("data/internal/bonavi_daily.parquet")
+XLSX_DEFAULT = paths.dataset("legacy_xlsx_0520")
+INVENTORY_XLSX_DEFAULT = paths.dataset("master_xlsx")  # 재고정보 시트는 이 파일에만 존재
+OUT_DEFAULT = paths.dataset("bonavi_daily")
 DEFAULT_STORE_CODE = "1000000047"  # 아티제 아브뉴프랑광교점
 
 # Keyword → category (order matters; cake/sandwich first, then pastry, then bread).
@@ -332,13 +333,15 @@ def load_stockouts(xlsx: Path, store_code: str = DEFAULT_STORE_CODE) -> pd.DataF
 
 
 def assign_stockout_fields(df: pd.DataFrame) -> pd.DataFrame:
-    """물리 leftover 기반 진짜 최종소진. is_stockout=(made>0 & waste<=0),
-    stockout_time=마지막 실판매(is_stockout일 때). 재고정보 결측(NaN)→False (NaN 비교가
-    False라 자동). 첫 순간품절 이벤트를 쓰던 버그를 대체한다."""
+    """물리 leftover 기반 진짜 최종소진. is_stockout=(made>0 & waste<=0) [boolean 불변],
+    stockout_time=마지막 실판매(is_stockout일 때). is_stockout_defined=생산기록 존재
+    (inventory 커버). 완제품(made 결측)은 is_stockout=False·is_stockout_defined=False —
+    매진률 측정 시 defined mask로 제외해 검열 희석을 막는다(헌장 2번)."""
     made = pd.to_numeric(df["production_qty"], errors="coerce")
     waste = pd.to_numeric(df["waste_qty"], errors="coerce")
     out = df.copy()
     out["is_stockout"] = ((made > 0) & (waste <= 0)).fillna(False).astype(bool)
+    out["is_stockout_defined"] = made.notna()   # inventory 커버 = 생산기록 있음
     out["stockout_time"] = df["last_sale_ts"].where(out["is_stockout"])
     return out
 
@@ -470,7 +473,7 @@ def build(
     returns = load_returns(xlsx_path, store_code=store_code)
 
     # Receipts with hh:mm — written once and reused by DiD substitution.
-    receipts_out = Path(receipts_path or "data/internal/bonavi_receipts.parquet")
+    receipts_out = Path(receipts_path or paths.dataset("bonavi_receipts"))
     receipts_df = load_receipts_with_time(xlsx_path, store_code=store_code)
     if rename_store_id is not None:
         receipts_df = receipts_df.copy()  # store_id stays implicit; receipts only carries receipt_id/item_id/timestamp
@@ -501,7 +504,7 @@ def build(
         measured_profiles = {rename_store_id: next(iter(measured_profiles.values()))} if measured_profiles else {}
 
     # Second pass — apply substitution outflow to potential_demand
-    receipts_path = Path(receipts_path or "data/internal/bonavi_receipts.parquet")
+    receipts_path = Path(receipts_path or paths.dataset("bonavi_receipts"))
     if apply_substitution and receipts_path.exists():
         try:
             from ..analysis.substitution import compute_substitution_matrix

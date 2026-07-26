@@ -1,0 +1,316 @@
+"""외부 8종 소스 통합 갱신 (`bakery refresh-external`).
+
+★어댑터 실측(Task 9 조사) — 브리프의 append 모델과 다름★
+기존 `ingest/*_api.py`의 backfill 함수는 전부:
+  - 자기 자신이 parquet을 직접 쓴다 (dry-run 아닌 이상 side-effect).
+  - 반환값은 raw rows DataFrame이 아니라 `Path`(또는 forecast는 `dict[str, Path]`).
+  - fetch한 "이번 창(window)"만으로 파일을 통째로 덮어쓴다 — 기존 on-disk 데이터와
+    병합하지 않는다 (예: weather_api.backfill(start, end)는 [start, end] 구간만
+    combined해서 weather_observed.parquet을 overwrite).
+
+따라서 이 모듈은 브리프가 가정한 "refresh_fn이 신규 rows를 반환 → append_new_dates로
+병합" 파이프라인을 강제하지 않는다. 대신:
+  - `refresh_fn`은 기존 CLI(`ingest-*`)가 쓰던 것과 동일한 기본 인자로 실제
+    backfill을 호출하는 얇은 콜러블(재구현 금지, 그대로 호출만).
+  - `refresh_source`는 fetch 전/후의 on-disk parquet을 diff해서 added_rows를
+    계산한다 — 병합이 아니라 "어댑터가 덮어쓴 결과를 관측"하는 방식.
+  - `append_new_dates`/`gap_days`는 그 자체로 테스트된 순수 헬퍼로 남긴다. 실제
+    소스 중 이 append 모델이 "그대로" 맞는 곳은 없다(모든 adapter가 자체
+    overwrite) — 대신 순수 함수로서 정확성이 검증되어 있고, 향후 어댑터가
+    raw rows를 반환하는 형태로 바뀌면 바로 재사용 가능하다.
+
+⚠️ 알려진 한계 (그대로 두고 리포트에 기록):
+  - `living_population_api.backfill`은 서울 열린데이터광장 rolling ~2개월
+    윈도우만 반환한다. on-disk `living_population.parquet`은 2017년까지의
+    CSV backfill 이력을 포함하므로, refresh_fn 호출 시 어댑터가 파일을
+    "최근 2개월분"으로 통째 덮어써 과거 이력이 사라질 수 있다 — 아래 커버리지
+    보존 가드가 이를 감지해 자동으로 되돌린다(§coverage guard).
+  - forecast(short/mid)는 둘 다 동일한 `forecast_api.backfill_forecast()` 한
+    호출로 채워진다. `--source all`로 갱신하면 이 함수가 두 번 불릴 수 있어
+    API 호출이 중복되지만(허용 budget 내), 별도 dedup은 하지 않았다(KISS).
+  - freshness 기준 컬럼은 소스마다 다르다: 실제 날짜(`date`/`fcst_date`) 4종,
+    월 스냅샷(`ym`) 1종, 분기(`quarter`) 1종, 날짜 개념이 아예 없는 경우
+    (`competitor_raw`, business_id 단위 스냅샷) 1종 — 이 마지막 경우는 parquet
+    파일의 mtime을 freshness 근사치로 쓴다.
+
+§coverage guard (리뷰 후속, data-loss 방지)
+  모든 "observed" 어댑터가 자기 fetch 창만으로 파일을 통째 덮어쓰는 구조라서,
+  fetch 창이 on-disk 이력보다 좁으면(예: weather 기본 시작일 2024-01-01인데
+  파일은 2021년부터 있음) 실제 갱신이 과거 이력을 조용히 삭제할 수 있다.
+  이건 어댑터별로 패치하지 않고 `refresh_source` 한 곳에 일반화된 가드로
+  구현했다 — "어댑터 출력을 받아들일지 말지 결정"은 오케스트레이션의 역할이지
+  어댑터 재구현이 아니다:
+    1. non-dry-run 시작 전, 대상 parquet이 있으면 바이트 그대로 임시 파일에
+       스냅샷.
+    2. spec.refresh_fn() 호출 (어댑터가 파일을 덮어씀).
+    3. 새 파일이 스냅샷보다 row 수가 적거나 최소 날짜(freshness key)가
+       더 늦으면(=커버리지가 줄면) 스냅샷을 원복하고 결과를 PROTECTED로
+       표시한다. `force=True`면 축소를 그대로 받아들인다.
+    4. 커버리지가 같거나 늘면(=superset, calendar/consumption/population의
+       "매번 전체 재fetch" 패턴) 정상적으로 새 파일을 유지한다.
+  가드는 kind=="observed"에만 적용한다 — forecast는 매번 창이 미래로
+  슬라이드하며 "축소"처럼 보이는 게 정상 동작이라 대상에서 제외한다.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import tempfile
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import date as Date
+from datetime import timedelta
+from pathlib import Path
+
+import pandas as pd
+
+from ..data import paths
+from . import (
+    calendar_api,
+    competitor_api,
+    consumption_api,
+    forecast_api,
+    living_population_api,
+    population_api,
+    weather_api,
+)
+
+_SENTINEL_GAP_DAYS = -1  # 데이터 없음(빈 df) — 관례적 sentinel
+
+
+def append_new_dates(existing: pd.DataFrame, fetched: pd.DataFrame,
+                      date_col: str) -> pd.DataFrame:
+    """기존 키(date_col 값)는 보존, fetched의 신규 키만 추가.
+
+    date_col은 실제 날짜(Timestamp)일 필요 없다 — 정렬/비교 가능한 값이면
+    ym("2026-04")·quarter("2025Q4") 같은 문자열 키로도 동작한다.
+    """
+    have = set(existing[date_col])
+    new = fetched[~fetched[date_col].isin(have)]
+    if new.empty:
+        return existing.reset_index(drop=True)
+    return (pd.concat([existing, new], ignore_index=True)
+            .sort_values(date_col).reset_index(drop=True))
+
+
+def gap_days(df: pd.DataFrame, today: pd.Timestamp, date_col: str) -> int:
+    """오늘과 df의 최신 date_col 값 사이 일수. 빈 df는 -1(sentinel)."""
+    if df.empty:
+        return _SENTINEL_GAP_DAYS
+    return int((today.normalize() - df[date_col].max().normalize()).days)
+
+
+@dataclass
+class SourceSpec:
+    name: str
+    dataset_key: str          # paths.dataset(...) 키
+    kind: str                 # "observed" | "forecast"
+    refresh_fn: Callable[[], object]  # 기존 ingest_*.backfill을 그대로 감싼 콜러블
+    date_col: str | None = "date"     # None=날짜 개념 없음(mtime fallback)
+
+
+@dataclass
+class RefreshResult:
+    name: str
+    added_rows: int
+    last_date: pd.Timestamp | None
+    gap_days: int
+    applied: bool = True          # False=coverage guard가 축소를 감지해 원복(PROTECTED)
+    message: str | None = None    # PROTECTED 사유 등 부가 메시지
+
+
+def _read_dataset(dataset_key: str) -> pd.DataFrame:
+    path = paths.dataset(dataset_key)
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(path)
+
+
+def _period_to_timestamp(df: pd.DataFrame, date_col: str) -> pd.Series:
+    """ym("2026-04")/quarter("2025Q4") 같은 기간 문자열을 대표 Timestamp로 변환."""
+    sample = str(df[date_col].iloc[0])
+    if "Q" in sample:
+        return df[date_col].map(lambda q: pd.Period(q, freq="Q").end_time.normalize())
+    return pd.to_datetime(df[date_col], format="%Y-%m")
+
+
+def _freshness(df: pd.DataFrame, spec: SourceSpec) -> tuple[pd.Timestamp | None, int]:
+    """(last_date, gap_days). competitor처럼 date_col=None이면 parquet mtime을 근사치로 쓴다."""
+    if spec.date_col is None:
+        path = paths.dataset(spec.dataset_key)
+        if not path.exists():
+            return None, _SENTINEL_GAP_DAYS
+        mtime = pd.Timestamp(path.stat().st_mtime, unit="s").normalize()
+        return mtime, int((pd.Timestamp.today().normalize() - mtime).days)
+    if df.empty:
+        return None, _SENTINEL_GAP_DAYS
+    if spec.date_col in ("ym", "quarter"):
+        ts_col = _period_to_timestamp(df, spec.date_col)
+        wrapped = pd.DataFrame({"_ts": ts_col})
+        last_date = wrapped["_ts"].max()
+        gap = gap_days(wrapped, today=pd.Timestamp.today(), date_col="_ts")
+        return last_date, gap
+    last_date = pd.to_datetime(df[spec.date_col]).max()
+    gap = gap_days(df.assign(**{spec.date_col: pd.to_datetime(df[spec.date_col])}),
+                    today=pd.Timestamp.today(), date_col=spec.date_col)
+    return last_date, gap
+
+
+def _coverage_stats(df: pd.DataFrame, spec: SourceSpec) -> tuple[int, pd.Timestamp | None]:
+    """(row_count, min_freshness_key). date_col=None(competitor 등)은 min=None —
+    row 수 축소만으로 판정한다."""
+    if df.empty:
+        return 0, None
+    if spec.date_col is None:
+        return len(df), None
+    if spec.date_col in ("ym", "quarter"):
+        return len(df), _period_to_timestamp(df, spec.date_col).min()
+    return len(df), pd.to_datetime(df[spec.date_col]).min()
+
+
+def _is_coverage_shrink(
+    before: tuple[int, pd.Timestamp | None], after: tuple[int, pd.Timestamp | None],
+) -> bool:
+    """이전 대비 row 수가 줄었거나(=일부 소실) 최소 날짜가 더 늦어졌으면(=과거 이력
+    소실) 커버리지 축소로 판정. 이전이 애초에 비어 있었다면 잃을 게 없으므로 False."""
+    before_rows, before_min = before
+    after_rows, after_min = after
+    if before_rows == 0:
+        return False
+    if after_rows < before_rows:
+        return True
+    return bool(before_min is not None and after_min is not None and after_min > before_min)
+
+
+def _snapshot_dataset(dataset_path: Path) -> Path | None:
+    """갱신 전 원본 parquet을 같은 디렉터리의 임시 파일로 바이트 그대로 복사."""
+    if not dataset_path.exists():
+        return None
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{dataset_path.stem}.refresh_bak_", suffix=".parquet", dir=dataset_path.parent,
+    )
+    os.close(fd)
+    snapshot_path = Path(tmp_name)
+    shutil.copy2(dataset_path, snapshot_path)
+    return snapshot_path
+
+
+def _apply_coverage_guard(
+    spec: SourceSpec, dataset_path: Path, snapshot_path: Path | None,
+    before: pd.DataFrame, after: pd.DataFrame, force: bool,
+) -> tuple[pd.DataFrame, bool, str | None]:
+    """축소 감지 시 스냅샷 원복. 반환은 (최종 df, applied, message)."""
+    if spec.kind != "observed" or snapshot_path is None:
+        return after, True, None
+
+    before_stats = _coverage_stats(before, spec)
+    after_stats = _coverage_stats(after, spec)
+    if not _is_coverage_shrink(before_stats, after_stats):
+        snapshot_path.unlink(missing_ok=True)
+        return after, True, None
+
+    before_rows, before_min = before_stats
+    after_rows, after_min = after_stats
+    detail = (
+        f"refresh would shrink coverage (was {before_rows} rows from {before_min}, "
+        f"fetched {after_rows} rows from {after_min})"
+    )
+    if force:
+        snapshot_path.unlink(missing_ok=True)
+        return after, True, f"{detail} — kept anyway (--force)"
+
+    shutil.move(str(snapshot_path), str(dataset_path))
+    return before, False, f"{detail} — kept existing; pass --force to override"
+
+
+def refresh_source(
+    spec: SourceSpec, today: pd.Timestamp, dry_run: bool = False, force: bool = False,
+) -> RefreshResult:
+    """소스 하나 갱신. dry_run=True면 refresh_fn(실제 API 호출)을 절대 부르지 않고
+    현재 on-disk freshness만 보고한다.
+
+    non-dry-run에서는 §coverage guard(모듈 docstring)가 적용된다: kind=="observed"
+    소스가 fetch 후 on-disk 이력보다 좁아지면(row 수 감소 또는 최소 날짜 후퇴)
+    자동으로 원복하고 `applied=False`로 표시한다. force=True면 축소를 그대로 받아들인다.
+    forecast는 창이 매번 미래로 슬라이드하는 게 정상이라 가드 대상에서 제외한다.
+    """
+    dataset_path = paths.dataset(spec.dataset_key)
+    before = _read_dataset(spec.dataset_key)
+    if dry_run:
+        last_date, gap = _freshness(before, spec)
+        return RefreshResult(name=spec.name, added_rows=0, last_date=last_date, gap_days=gap)
+
+    snapshot_path = _snapshot_dataset(dataset_path) if spec.kind == "observed" else None
+    spec.refresh_fn()
+    fetched = _read_dataset(spec.dataset_key)
+
+    final_df, applied, message = _apply_coverage_guard(
+        spec, dataset_path, snapshot_path, before, fetched, force,
+    )
+    added_rows = len(final_df) - len(before)
+    last_date, gap = _freshness(final_df, spec)
+    return RefreshResult(
+        name=spec.name, added_rows=added_rows, last_date=last_date, gap_days=gap,
+        applied=applied, message=message,
+    )
+
+
+def freshness_summary(specs: list[SourceSpec]) -> pd.DataFrame:
+    """각 소스의 현재 on-disk freshness 요약 (fetch 없음 — dry_run과 동일 관측)."""
+    rows = []
+    for spec in specs:
+        df = _read_dataset(spec.dataset_key)
+        last_date, gap = _freshness(df, spec)
+        rows.append({"source": spec.name, "last_date": last_date, "gap_days": gap})
+    return pd.DataFrame(rows)
+
+
+def select_sources(source: str) -> list[SourceSpec]:
+    """source="all"이면 8종 전부, 아니면 이름 하나. 미등록 이름은 KeyError."""
+    if source == "all":
+        return list(EXTERNAL_SOURCES.values())
+    if source not in EXTERNAL_SOURCES:
+        raise KeyError(f"unknown source '{source}'. known: {sorted(EXTERNAL_SOURCES)}")
+    return [EXTERNAL_SOURCES[source]]
+
+
+def _default_calendar_backfill() -> object:
+    # start_year=2024는 on-disk calendar_raw.parquet의 실제 커버리지(2024~)와 우연히
+    # 맞물려 있을 뿐 보장되지 않는다 — 커버리지 보존은 여기가 아니라 refresh_source의
+    # coverage guard가 책임진다.
+    return calendar_api.backfill(2024, Date.today().year)
+
+
+def _default_weather_backfill() -> object:
+    # start=2024-01-01은 on-disk weather_observed.parquet 실제 이력(2021~)보다 좁다 —
+    # 그대로 두면 fetch가 2021-2023을 삭제하므로 refresh_source의 coverage guard가
+    # 이 축소를 감지해 원복한다(§coverage guard, 모듈 docstring).
+    return weather_api.backfill(Date(2024, 1, 1), Date.today())
+
+
+def _default_living_population_backfill() -> object:
+    start = Date.today() - timedelta(days=30)
+    return living_population_api.backfill(start, Date.today())
+
+
+EXTERNAL_SOURCES: dict[str, SourceSpec] = {
+    spec.name: spec
+    for spec in [
+        SourceSpec("calendar", "calendar_raw", "observed",
+                    refresh_fn=_default_calendar_backfill, date_col="date"),
+        SourceSpec("weather", "weather_observed", "observed",
+                    refresh_fn=_default_weather_backfill, date_col="date"),
+        SourceSpec("living_population", "living_population", "observed",
+                    refresh_fn=_default_living_population_backfill, date_col="date"),
+        SourceSpec("population", "population", "observed",
+                    refresh_fn=population_api.backfill, date_col="ym"),
+        SourceSpec("consumption", "consumption", "observed",
+                    refresh_fn=consumption_api.backfill, date_col="quarter"),
+        SourceSpec("competitor", "competitor_raw", "observed",
+                    refresh_fn=competitor_api.backfill, date_col=None),
+        SourceSpec("forecast_short_term_daily", "forecast_short_term_daily", "forecast",
+                    refresh_fn=forecast_api.backfill_forecast, date_col="date"),
+        SourceSpec("forecast_mid_term_daily", "forecast_mid_term_daily", "forecast",
+                    refresh_fn=forecast_api.backfill_forecast, date_col="fcst_date"),
+    ]
+}

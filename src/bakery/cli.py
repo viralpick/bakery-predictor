@@ -12,7 +12,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from .config import EXTERNAL_DATA_DIR
+from .data import paths
 from .data.loader import DailyDataset, load_dataset
 from .decision import PolicyParams, RiskParams, build_recommendation, lineage_to_frame
 from .data.synthetic import generate_synthetic_bundle
@@ -502,9 +502,9 @@ def _load_forecast_weather(horizon: pd.DatetimeIndex) -> pd.DataFrame | None:
     matched against the latest forecast parquet, falling back to recent
     observed averages when the forecast is missing.
     """
-    short_p = EXTERNAL_DATA_DIR / "forecast_short_term_daily.parquet"
-    mid_p = EXTERNAL_DATA_DIR / "forecast_mid_term_daily.parquet"
-    observed_p = EXTERNAL_DATA_DIR / "weather_observed.parquet"
+    short_p = paths.dataset("forecast_short_term_daily")
+    mid_p = paths.dataset("forecast_mid_term_daily")
+    observed_p = paths.dataset("weather_observed")
     if not short_p.exists() and not mid_p.exists():
         console.print(
             "[yellow]forecast[/] parquet 없음 — `bakery ingest-forecast` 먼저 실행. "
@@ -703,7 +703,7 @@ def cmd_alpha_sweep(
     margin_rate: float = 0.50,
     cost_rate: float = 0.30,
     lost_sale_multiplier: float = 1.7,
-    item_master: Path = Path("data/internal/보나비 데이터_20260520.xlsx"),
+    item_master: Path = paths.dataset("legacy_xlsx_0520"),
     out_dir: Path = REPORTS_DIR,
     closing_alpha: float = DEFAULT_ALPHA,
 ) -> None:
@@ -806,7 +806,7 @@ def cmd_business_report(
     margin_rate: float = 0.50,
     cost_rate: float = 0.30,
     lost_sale_multiplier: float = 1.7,
-    item_master: Path = Path("data/internal/보나비 데이터_20260520.xlsx"),
+    item_master: Path = paths.dataset("legacy_xlsx_0520"),
     out_dir: Path = REPORTS_DIR,
     closing_alpha: float = DEFAULT_ALPHA,
 ) -> None:
@@ -895,7 +895,7 @@ def cmd_business_report(
     lost["lost_margin"] = lost["lost_revenue"] * margin_rate * lost_sale_multiplier
 
     # Substitution-adjusted: subtract intra-category outflow estimated from receipts
-    receipts_path = Path("data/internal/bonavi_receipts.parquet")
+    receipts_path = paths.dataset("bonavi_receipts")
     sub_matrix = None
     if receipts_path.exists():
         try:
@@ -1033,8 +1033,8 @@ def cmd_business_report(
 @app.command("mnl-substitution")
 def cmd_mnl_substitution(
     source: str = "real",
-    receipts: Path = Path("data/internal/bonavi_receipts.parquet"),
-    item_master: Path = Path("data/internal/보나비 데이터_20260520.xlsx"),
+    receipts: Path = paths.dataset("bonavi_receipts"),
+    item_master: Path = paths.dataset("legacy_xlsx_0520"),
     out_dir: Path = Path("reports"),
 ) -> None:
     """Multinomial Logit choice model — receipt-level substitution matrix.
@@ -1123,8 +1123,8 @@ def cmd_mnl_substitution(
 @app.command("nested-logit")
 def cmd_nested_logit(
     source: str = "real",
-    receipts: Path = Path("data/internal/bonavi_receipts.parquet"),
-    item_master: Path = Path("data/internal/보나비 데이터_20260520.xlsx"),
+    receipts: Path = paths.dataset("bonavi_receipts"),
+    item_master: Path = paths.dataset("legacy_xlsx_0520"),
     out_dir: Path = Path("reports"),
 ) -> None:
     """Nested logit (cross-category) — relaxes IIA via per-nest λ_g.
@@ -1284,10 +1284,10 @@ def cmd_ingest_consumption() -> None:
 
 @app.command("format-bonavi")
 def cmd_format_bonavi(
-    xlsx_path: Path = Path("data/internal/보나비 데이터_20260520.xlsx"),
+    xlsx_path: Path = paths.dataset("legacy_xlsx_0520"),
     store_code: str = "1000000047",
     rename_store_id: str = "store_gw01",
-    out_path: Path = Path("data/internal/bonavi_daily.parquet"),
+    out_path: Path = paths.dataset("bonavi_daily"),
 ) -> None:
     """보나비 xlsx → DAILY_COLUMNS parquet 변환. 광교점 1매장 단품·정상매출만."""
     from .data.bonavi_loader import build
@@ -1306,11 +1306,11 @@ def cmd_format_bonavi(
 
 @app.command("format-bonavi-v2")
 def cmd_format_bonavi_v2(
-    sales_xlsx: Path = Path("data/internal/보나비 판매 데이터_20260721.xlsx"),
-    master_xlsx: Path = Path("data/internal/보나비 데이터_20260526.xlsx"),
+    sales_xlsx: Path = paths.dataset("sales_xlsx"),
+    master_xlsx: Path = paths.dataset("master_xlsx"),
     store_code: str = "1000000047",
     rename_store_id: str = "store_gw01",
-    out_path: Path = Path("data/internal/bonavi_daily.parquet"),
+    out_path: Path = paths.dataset("bonavi_daily"),
     reconvert: bool = False,
 ) -> None:
     """신규 라인레벨 파일(0721) → DAILY_COLUMNS parquet. 타깃=당일폐기Y − salad.
@@ -1334,6 +1334,27 @@ def cmd_format_bonavi_v2(
         f"{df['item_id'].nunique()} items, {df['category_id'].nunique()} categories, "
         f"{df['date'].nunique()} days, stockout {df['is_stockout'].sum():,})"
     )
+
+
+@app.command("build-data")
+def cmd_build_data(reconvert: bool = False, diagnose: bool = True) -> None:
+    """raw → interim → processed/internal 재생성. diagnose면 on-disk와 rtol 진단."""
+    import tempfile
+
+    from .data import pipeline
+
+    if diagnose:
+        with tempfile.TemporaryDirectory() as td:
+            rebuilt = pipeline.build_internal(reconvert=reconvert, out_root=Path(td))
+            ref = {k: paths.dataset(k) for k in rebuilt}
+            diff = pipeline.equivalence_diff(rebuilt, ref)
+            for name, d in diff.items():
+                tag = "OK" if d <= 1e-9 else "DRIFT"
+                console.print(f"[{'green' if d <= 1e-9 else 'red'}]{tag}[/] {name}: max_diff={d:g}")
+            console.print("[dim]DRIFT는 §6 커버리지 리포트로 표면화(재배치 차단 아님)[/]")
+    else:
+        out = pipeline.build_internal(reconvert=reconvert)
+        console.print(f"[green]wrote[/] {list(out.values())}")
 
 
 @app.command("ingest-living-pop-csv")
@@ -1376,12 +1397,42 @@ def cmd_ingest_forecast() -> None:
     중기예보: 매일 2회 발표(06·18). horizon D+4~D+10 커버.
     """
     console.print("[cyan]forecast[/] 최신 단기 + 중기예보 ingestion")
-    paths = forecast_api.backfill_forecast()
-    for kind, p in paths.items():
+    out_paths = forecast_api.backfill_forecast()
+    for kind, p in out_paths.items():
         df = pd.read_parquet(p)
         console.print(f"[green]wrote[/] {kind}: {p} ({len(df):,} rows)")
-    if not paths:
+    if not out_paths:
         console.print("[yellow]warning[/] no forecast rows returned — check API status / region codes")
+
+
+@app.command("refresh-external")
+def cmd_refresh_external(source: str = "all", dry_run: bool = False, force: bool = False) -> None:
+    """외부 8종 소스(calendar/weather/living_population/population/consumption/
+    competitor/forecast_short_term_daily/forecast_mid_term_daily) 통합 갱신.
+
+    source=all|<name>. --dry-run이면 실제 API를 호출하지 않고 현재 on-disk
+    freshness만 보고한다(.env 없이도 안전하게 확인 가능). observed 소스는
+    fetch 결과가 기존 이력보다 커버리지가 좁아지면(coverage guard) 자동으로
+    원복되고 PROTECTED로 표시된다 — --force로 축소를 그대로 받아들일 수 있다.
+    """
+    from .ingest import refresh
+
+    try:
+        specs = refresh.select_sources(source)
+    except KeyError as exc:
+        console.print(f"[red]error[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    today = pd.Timestamp.today()
+    for spec in specs:
+        result = refresh.refresh_source(spec, today=today, dry_run=dry_run, force=force)
+        status = "[green]applied[/]" if result.applied else "[yellow]PROTECTED[/]"
+        line = f"[cyan]{result.name}[/] {status} +{result.added_rows} rows, last={result.last_date}"
+        if result.message:
+            line += f" — {result.message}"
+        console.print(line)
+
+    console.print(refresh.freshness_summary(specs).to_string(index=False))
 
 
 @app.command("grounding-eval")
@@ -1613,7 +1664,7 @@ def cmd_demand_absorption(
 
 
 CLOSING_DEMAND_CATEGORIES = ("bread", "pastry")
-CLOSING_DEMAND_WASTE_PARQUET = Path("data/internal/v2/waste_alpha_4stores.parquet")
+CLOSING_DEMAND_WASTE_PARQUET = paths.dataset("waste_alpha_4stores")
 CLOSING_DEMAND_STORE = "광교"
 CLOSING_ALPHA_CSV = "closing_alpha_estimates.csv"
 CLOSING_PANEL_CSV = "closing_panel.csv"
@@ -1958,9 +2009,9 @@ def _synthetic_prospective_inputs() -> tuple[pd.DataFrame, pd.DataFrame, dict[st
 
 
 # 실데이터 진입점 — 재고정보 시트가 있는 파일만 생산량/폐기량/품목단가를 갖는다.
-REAL_INVENTORY_XLSX_PATH = "data/internal/보나비 데이터_20260526.xlsx"
-REAL_DAILY_PARQUET_PATH = "data/internal/bonavi_daily.parquet"
-REAL_RECEIPTS_PARQUET_PATH = "data/internal/bonavi_receipts.parquet"
+REAL_INVENTORY_XLSX_PATH = str(paths.dataset("master_xlsx"))
+REAL_DAILY_PARQUET_PATH = str(paths.dataset("bonavi_daily"))
+REAL_RECEIPTS_PARQUET_PATH = str(paths.dataset("bonavi_receipts"))
 
 REAL_ROWS_COLUMNS = [
     "item_id", "date", "category_id", "potential_demand", "adjusted_demand",

@@ -52,3 +52,4 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra -q"
+markers = ["slow: 실행 시간이 긴 테스트 (예: 전체 데이터 재생성 진단), 기본 실행에서 제외 가능"]
