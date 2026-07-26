@@ -124,3 +124,35 @@ def find_missing_codes(sale_codes: set[str], master_codes: set[str], kind: str,
         "kind": kind,
         "is_target_scope": [c in scope for c in missing],
     })
+
+
+def find_conflicting_codes(old_master: pd.DataFrame, new_master: pd.DataFrame, key: str,
+                           fields: list[str], kind: str, scope_codes: set[str]) -> pd.DataFrame:
+    """공통 코드(양쪽 존재) 중 field 값이 다른 것. English 코드(key) 기반 —
+    한글 헤더는 vintage마다 다를 수 있어 신뢰 금지([[project_new_data_ingestion_pitfall]])."""
+    o = old_master.set_index(key)
+    n = new_master.set_index(key)
+    common = o.index.intersection(n.index)
+    rows = []
+    for field in fields:
+        if field not in o.columns or field not in n.columns:
+            continue
+        ov, nv = o.loc[common, field].astype(str), n.loc[common, field].astype(str)
+        diff = common[(ov.values != nv.values)]
+        for code in diff:
+            rows.append({"code": code, "kind": kind, "field": field,
+                         "old_value": str(o.loc[code, field]), "new_value": str(n.loc[code, field]),
+                         "is_target_scope": code in scope_codes})
+    return pd.DataFrame(rows, columns=["code", "kind", "field", "old_value", "new_value", "is_target_scope"])
+
+
+def check_scope_conflicts(conflicts: pd.DataFrame) -> list[Violation]:
+    """타깃/사용중 코드의 값이 바뀌면 fail(모델 라벨/α에 영향)."""
+    if conflicts.empty or "is_target_scope" not in conflicts.columns:
+        return []
+    scoped = conflicts[conflicts["is_target_scope"].astype(bool)]
+    if scoped.empty:
+        return []
+    sample = ", ".join(scoped["code"].astype(str).unique()[:5])
+    return [Violation("scope_conflicts", "fail",
+                      f"target/used codes changed value: {sample}", len(scoped))]
