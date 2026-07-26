@@ -20,7 +20,7 @@ def test_run_all_aggregates_and_exit_severity():
     assert any(v.severity == "fail" and v.check == "target_items_resolve" for v in violations)
     assert integrity.has_fail(violations) is True
     # A101이 missing_df에 target_scope=True로
-    assert missing.set_index("code").loc["A101", "is_target_scope"]
+    assert missing.set_index("code").loc["A101", "is_target_scope"] == True  # noqa: E712
 
 
 def test_run_conflict_diagnostic_target_flag_flip_fails():

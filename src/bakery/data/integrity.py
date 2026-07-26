@@ -79,7 +79,8 @@ def check_return_ratio(sales: pd.DataFrame, lo: float = 0.01, hi: float = 0.03) 
     total = len(sales)
     if total == 0:
         return []
-    ratio = float((sales["SALES_FG"].astype(str) == "1").mean())
+    fg = sales["SALES_FG"].astype(str).str.replace(r"\.0$", "", regex=True)
+    ratio = float((fg == "1").mean())
     if lo <= ratio <= hi:
         return []
     return [Violation("return_ratio", "drift",

@@ -29,3 +29,10 @@ def test_date_contiguity_contiguous_passes():
     dates = ["20260101", "20260115", "20260201", "20260215"]
     df = pd.DataFrame({"DT_SALE": dates})
     assert integrity.check_date_contiguity(df, max_gap_days=45) == []
+
+
+def test_return_ratio_float_coded_normalizes():
+    # float64 SALES_FG (1.0/0.0)도 정규화 후 2% → range 통과 (형제 체크와 일관)
+    fg = [1.0] * 2 + [0.0] * 98
+    df = pd.DataFrame({"SALES_FG": fg})
+    assert integrity.check_return_ratio(df) == []

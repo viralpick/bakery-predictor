@@ -38,7 +38,7 @@
 | `source_sheet`별 컬럼 semantic 일치 | **Invariant** | 새 drop | 시트별 값 기준 판별(판매정보2 스왑 재발). |
 | 17 컬럼 존재 + dtype 계약 | **Invariant** | 새 drop | 스키마 드리프트. (실측: DT_SALE/CD_ITEM string, AM_* int64 등) |
 | (NO_POS, SLIP_NO, SLIP_LINE) 라인 유일 | **Invariant** | 새 drop | 중복 라인. |
-| `DT_SALE` 품목×월 큰 갭 없음 | **Invariant** | 새 drop | 조용한 데이터 누락(품목×월 분해, sheet-2 교훈). |
+| `DT_SALE` 큰 갭 없음 | **Drift** | 새 drop | 조용한 데이터 누락. ⚠️구현은 global 날짜(품목×월 분해 아님) — 약한 2차 net. 진짜 스왑은 값판별 fail이 잡음. 품목×월 분해는 follow-up. |
 | 반품비율 ≈ 1.88% | **Drift(soft-range 1~3%)** | 새 drop | 비율 invariant. 범위 벗어나면 사람 확인(gate 아님). (실측 0.0188) |
 | 광교 same-item 총량 510,585 | **vintage regression** | 현 raw 재처리만 | 새 drop엔 검사 안 함(false-positive 방지). |
 
