@@ -52,8 +52,8 @@ def test_build_store_daily_uses_redefinition():
     rate = produced["is_stockout"].mean()
     # round(rate, 2)==0.61 (0.6051 rounds up at 2dp) — check at 3dp to match the ~0.605 design value
     assert round(rate, 3) == 0.605, f"expected produced-scope ~0.605, got {rate:.3f}"
-    # 완제품이 실제로 분모에 섞여 있었음을 고정 (전체는 여전히 희석되어 낮음)
-    assert d["is_stockout"].mean() < 0.30   # 전체(완제품 포함)는 ~0.151
+    # 완제품이 실제로 분모에 섞여 있었음을 고정 (전체는 여전히 희석되어 낮음 = 0.151)
+    assert round(d["is_stockout"].mean(), 3) == 0.151   # 전체(완제품 포함) 희석값
     # 스키마: 신규 companion 컬럼 존재, is_stockout은 여전히 bool
     assert d["is_stockout"].dtype == bool
     assert "is_stockout_defined" in d.columns
