@@ -16,6 +16,7 @@ def test_tool_specs_cover_seven_functions():
     assert names == {
         "rank_stockout_risk", "rank_stockout_earliness", "explain_order",
         "what_if", "waste_cost", "demand_diff_by_condition", "what_if_driver",
+        "explain_category_total", "explain_item_order",
     }
     for t in TOOL_SPECS:
         assert t.parameters["type"] == "object"
@@ -112,3 +113,42 @@ def test_dispatch_rank_stockout_earliness_returns_json(dataset):
     payload = json.loads(result.content)
     assert len(payload) == 3
     assert {"item_id", "lost_hours_per_day", "stockout_days", "days"} <= set(payload[0])
+
+
+def _forward_date(ds, store):
+    """store의 마지막 관측일 다음날 (forward horizon 첫날)."""
+    dd = pd.to_datetime(ds.daily.loc[ds.daily["store_id"] == store, "date"])
+    return str((dd.max() + pd.Timedelta(days=1)).date())
+
+
+def test_dispatch_explain_category_total(dataset):
+    """explain_category_total 도구가 dispatch되어 분해 행을 JSON으로 반환."""
+    import json
+    from bakery.ontology.grounding.llm import ToolCall
+    from bakery.ontology.grounding.tools import dispatch
+    store = str(dataset.daily["store_id"].iloc[0])
+    date = _forward_date(dataset, store)
+    call = ToolCall(id="c1", name="explain_category_total",
+                    arguments={"store_id": store, "date": date})
+    res = dispatch(call, dataset)
+    rows = json.loads(res.content)
+    assert [r["step"] for r in rows] == ["base_median", "event_prior", "prior_median", "quantile_buffer", "prior_prod"]
+
+
+def test_dispatch_explain_item_order(dataset):
+    import json
+    from bakery.forecast.forward import forecast_forward
+    from bakery.ontology.grounding.llm import ToolCall
+    from bakery.ontology.grounding.tools import dispatch
+    store = str(dataset.daily["store_id"].iloc[0])
+    date = _forward_date(dataset, store)
+    iq = forecast_forward(store, daily=dataset.daily[dataset.daily["store_id"] == store].copy(),
+                          horizon_days=7, use_forecast=False).item_quantities
+    iq_d = iq[iq["date"].astype(str).str.startswith(date)].copy()
+    iq_d["item_id"] = iq_d["item_id"].astype(str)
+    item = str(iq_d.sort_values(["our_order", "item_id"], ascending=[False, True]).iloc[0]["item_id"])
+    call = ToolCall(id="c2", name="explain_item_order",
+                    arguments={"store_id": store, "item_id": item, "date": date})
+    res = dispatch(call, dataset)
+    rows = json.loads(res.content)
+    assert [r["step"] for r in rows] == ["category_total", "proportion", "item_order", "final"]
