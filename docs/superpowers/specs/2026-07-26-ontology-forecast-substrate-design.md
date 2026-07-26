@@ -57,23 +57,25 @@ def _item_demand_points(period, demand_col):
 - **설명 함수 일체**(`explain_category_total`, `explain_item_order`), grounded 도구, Q셋 — **Spec 5b**.
 - **synthetic 소스 forward 예측** — 본 seam은 real 소스(canonical PoC = 광교) 지향(`build_category_daily`/`_load_real_daily` 의존). synthetic 온톨로지 데모는 기존 컬럼-proxy fallback 유지(라벨).
 - **다중 카테고리 배분** — 현 canonical은 단일 빵 총량 1개(`distribute_total`이 date당 단일 total을 전 품목에 배분). 다중 카테고리는 범위 밖.
-- **임의 과거 cutoff replay를 온톨로지 함수에 전면 개방** — seam은 cutoff 파라미터화하되(아래 §4), 온톨로지 소비 함수의 forward 대상 period는 예측 horizon 내로 한정(architect 예시 = "다음주").
+- **임의 과거 period replay를 온톨로지에 개방** — seam은 forward-only(마지막 관측일 다음 horizon). 온톨로지 함수는 다가오는 horizon을 예측(architect 예시 = "다음주"). 과거 period를 예측대상으로 주는 historical replay는 범위 밖(windowed_backtest fold 재발명).
 
 ---
 
 ## 3. 설계 — Seam 추출
 
 ### 3.1 위치 / 진입점
-신규 모듈 **`src/bakery/forecast/forward.py`**. forward 전용 헬퍼(`_extend_category_features`, `_category_base_predict`, `_blend_event_prior`, `_category_future_order_predictions` 본문)를 cli에서 이 모듈로 **이동**하고, cli는 다시 import한다(단일 출처, 순환의존 없음 — 모듈은 `models/`에만 의존).
+신규 패키지 **`src/bakery/forecast/`**. `_category_future_order_predictions`의 transitive private 의존을 cli에서 이 패키지로 **이동**하고 cli는 다시 import한다(단일 출처, 순환의존 없음 — `models/`·`features/`에만 의존):
 
-### 3.2 시그니처 (cutoff 파라미터화)
+- `forecast/loaders.py` ← `_load_real_daily`, `_load_forecast_weather` (⚠️ **cli의 item·decision 경로와 공유** — 이동 시 그 경로들도 `forecast.loaders`에서 import)
+- `forecast/forward.py` ← `_extend_category_features`, `_forecast_to_category_weather`(forward 전용) + `_category_base_predict`, `_blend_event_prior`(⚠️ **cli의 category 마진 스택과 공유** — 이동 시 그 경로도 import) + 신규 `ForwardForecast`·`forecast_forward`
+
+### 3.2 시그니처 (forward-only, horizon 기반)
 
 ```python
 def forecast_forward(
     store_id: str,
-    target_period: tuple[str, str],       # 예측 대상 기간 [start, end] (미래)
     *,
-    cutoff: str | None = None,            # fit은 date < cutoff. None → target_period[0]
+    horizon_days: int = 7,                # 마지막 관측 history 다음 N일 예측
     total_model: str = "lightgbm",        # lightgbm | distributional
     event_prior: bool = True,
     production_quantile: float = 0.85,
@@ -82,7 +84,7 @@ def forecast_forward(
 ) -> ForwardForecast: ...
 ```
 
-`cutoff` 파라미터화로 (a) cli의 "다음주" 경로(target_period=다음 7일, cutoff=오늘)와 (b) 온톨로지의 임의 forward period를 **동일 seam**으로 처리한다. leakage 규칙: fit은 `date < cutoff`만(scenario의 `train_cutoff` 패턴과 동형, 헌장 1번).
+현 `_category_future_order_predictions`와 **동일 forward 의미**(마지막 관측일 다음 `horizon_days`일 예측, fit은 관측 history만 = `date < 첫 미래일`, leakage-safe: 미래 행 target=NaN append로 lag가 seam 너머 계산). 임의 과거 cutoff replay(historical backtest를 온톨로지에 개방)는 windowed_backtest fold 재발명이라 **범위 밖**(§2). date-recency 비의존(마지막 history일 기준)이라 재현적.
 
 ### 3.3 반환 — 중간값 노출
 
@@ -91,15 +93,17 @@ def forecast_forward(
 class ForwardForecast:
     # Stage 1 총량 + event_prior 중간값 (date당 1행; event_prior off면 prior_*==base_*)
     category_totals: pd.DataFrame   # [date, base_median, base_prod, prior_median, prior_prod]
-    # Stage 2 비중 factor 분해 (item_proportion.ItemProportionResult.proportions 그대로)
-    proportions: pd.DataFrame       # [date, item_id, proportion, base, trend, stockout, closing, new]
+    # Stage 2 비중 factor 분해 (item_proportion.ItemProportionResult.proportions 그대로, target_date→date 정규화)
+    proportions: pd.DataFrame       # [date, item_id, category_id, proportion, base_sold,
+                                    #  trend_pct, avg_stockout_h, closing_rate, days_since_first,
+                                    #  adj_trend, adj_stockout, adj_closing, adj_new]
     # 최종 품목 수량 (현 cli 반환과 동일 스키마)
     item_quantities: pd.DataFrame   # [store_id, item_id, category_id, date, demand_point, our_order]
 ```
 
 - `base_*` = Stage 1 예측(prior 보정 전), `prior_*` = event_prior 블렌드 후. → 5b `explain_category_total`이 "특수일 앵커가 base를 얼마나 끌어올렸나"를 **실제 수치**로 서술.
 - ⚠️ 구현 주의: 현 cli는 `_blend_event_prior`가 `base_median/base_prod`를 **제자리 덮어써** prior-이전 값을 잃는다. seam은 블렌드 **전** `base_*`를 스냅샷하고 블렌드 **후** 값을 `prior_*`로 담아 둘 다 보존해야 한다.
-- `proportions`의 factor 컬럼(`base/trend/stockout/closing/new`) → 5b `explain_item_order`가 비중을 factor로 분해. `distribute_total`은 base_prod·base_median 두 번 호출하나 비중은 date당 동일(`compute_proportions` 결정론) → `proportions`는 1회만 노출.
+- `proportions`의 factor 컬럼(`adj_trend·adj_stockout·adj_closing·adj_new`, base=`base_sold`) → 5b `explain_item_order`가 `raw_weight = base_sold × adj_trend × adj_stockout × adj_closing × adj_new` (정규화 전)을 그대로 분해. `distribute_total`은 base_prod·base_median 두 번 호출하나 비중은 date당 동일(`compute_proportions` 결정론) → `proportions`는 1회만 노출.
 
 ### 3.4 event_prior 서술의 충실성 (advisor #1)
 `prior_*`는 **pre-test 히스토리로 fit한 레벨-앵커 블렌드값**이지 "크리스마스=고정 N개 룰"이 아니다. 본 seam은 `base_*`/`prior_*`를 **엔진이 실제로 낸 값 그대로** 노출하며, "룰"이라는 이상화된 라벨을 만들지 않는다. (5b 설명 함수도 이 값을 그대로 서술 — grounding이 없애려는 fabrication 방지.)
@@ -117,7 +121,7 @@ class ForwardForecast:
 ## 5. 설계 — functions.py 재배선
 
 ### 5.1 변경
-`_item_demand_points`(컬럼 평균)를 대체: 온톨로지 함수는 `forecast_forward(store_id, period).item_quantities`의 `demand_point`를 소비한다. `_resolve_demand_proxy`(컬럼 자동선택)는 forward 경로에선 불필요해지나, synthetic fallback 경로용으로 라벨과 함께 잔존.
+`_item_demand_points`(컬럼 평균)를 대체: 온톨로지 함수는 `forecast_forward(store_id, horizon_days=...).item_quantities`를 요청 (item_id, date)로 슬라이스해 `demand_point`를 얻는다. `period`는 다가오는 horizon 내 forward 대상으로 해석(horizon_days는 요청 period end가 마지막 관측일에서 며칠 뒤인지로 도출). `_resolve_demand_proxy`(컬럼 자동선택)는 forward 경로에선 불필요해지나, synthetic fallback 경로용으로 라벨과 함께 잔존.
 
 ### 5.2 계약 변경 — 영향 소비처 (grep 열거)
 | 함수 | demand_point 소비 | 조치 |
@@ -128,7 +132,7 @@ class ForwardForecast:
 | `rank_stockout_earliness` (functions.py:85) | observed `stockout_time` 사용 | **무영향** |
 
 - **의도적 변경(라벨)**: 온톨로지 demand_point = 과거 평균 → forward 예측. 게이트 대상 아님, docstring·리뷰에 명시.
-- 테스트: functions 테스트의 fixture가 forward 경로(cutoff·미래 period)를 태우도록 마이그레이션. real-source fixture 필요.
+- 테스트: functions 테스트의 fixture가 forward 경로(다가오는 horizon 예측)를 태우도록 마이그레이션. 과거 period 슬라이스 fixture → forward 대상으로 교체. real-source fixture 필요.
 
 ---
 
