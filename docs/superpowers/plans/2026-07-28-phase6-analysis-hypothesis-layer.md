@@ -27,6 +27,7 @@
 - **코드 품질** — 함수 30줄 이내(빈 줄 제외), 인자 4개 초과 시 dict/객체로 묶기, 중첩 3단계 초과 금지, guard clause 우선, 매직값 금지(상수화), 불리언은 `is_`/`has_`/`needs_` 접두어.
 - **산문은 한국어** — docstring·리포트 텍스트·판정 문구 전부 한국어(코드 심볼은 영어).
 - **`uv run pytest`로 실행**. repo `addopts`에 이미 `-q`가 있으므로 `-q`를 추가로 붙이지 않는다(`-qq`가 되어 passed 요약이 사라짐). 카운트가 필요하면 `--color=no`.
+- **기존 시각화 자산 재사용 거부(스펙 §116 대응 결정)** — `scripts/build_dashboard.py`(1209줄)·`weekly_overlay_series.py`를 재사용하지 않는다. 근거: (1) 두 스크립트는 예측 산출물 대시보드용이라 이 레이어의 섹션 구조(항목별 제목+그래프+표+판정)와 계약이 다르다, (2) 1209줄 모놀리스에서 함수를 끌어오면 `analysis/lab`이 `scripts/`에 의존하게 되어 "paths 기반 canonical 입력만" 원칙이 깨진다, (3) 핸들러당 figure는 1~2개짜리 20줄 이하라 추출 비용이 재작성 비용보다 크다. 대신 **`fig_to_div` stateless 패턴은 harness `report.py`에서 그대로 재사용**한다(자기포함 HTML의 핵심 자산).
 - **plotly 경계 결정(의도적 이탈)** — harness는 "코어는 viz 무의존"이지만 `AnalysisResult.figures`는 핸들러가 plotly Figure를 담는다. 대신 **회귀 대조·수치 테스트는 `tables`/`verdict`에만** 걸어 핸들러 검증이 plotly 없이 성립하게 한다. 이는 드리프트가 아니라 결정이다.
 
 ---
@@ -74,7 +75,7 @@
 
 **테스트** — `tests/analysis_lab/` (harness는 `tests/harness/` 패턴)
 
-`__init__.py`, `test_spec.py`, `test_inputs.py`, `test_registry.py`, `test_runner.py`, `test_report.py`, `test_cli_analysis.py`, `test_handlers_sales.py`, `test_handlers_waste.py`, `test_handlers_absorption.py`, `test_handlers_discount.py`, `test_handlers_stockout.py`, `test_handlers_substitution.py`, `test_handlers_calendar_bias.py`, `test_handlers_model_bias.py`, `test_handlers_basket.py`
+`__init__.py`, `conftest.py`(`stub_inputs` 팩토리 — 실 parquet IO 없이 `AnalysisInputs`의 `cached_property`를 주입한다. 핸들러 테스트 4곳이 각자 `_StubInputs`를 정의하면 시그니처가 갈라지므로 여기 한 번만 둔다), `test_spec.py`, `test_inputs.py`, `test_registry.py`, `test_runner.py`, `test_report.py`, `test_cli_analysis.py`, `test_handlers_sales.py`, `test_handlers_waste.py`, `test_handlers_absorption.py`, `test_handlers_discount.py`, `test_handlers_stockout.py`, `test_handlers_substitution.py`, `test_handlers_calendar_bias.py`, `test_handlers_model_bias.py`, `test_handlers_basket.py`
 
 **문서** — `docs/phase6_analysis_layer.md` (사용법 + 이식 대조 기록 + 제외 근거)
 
@@ -106,7 +107,7 @@
   - `SkippedResult(name: str, kind: str, title: str, reason: str)`
   - `AnalysisReport(name: str, spec_resolved: dict, results: list[AnalysisResult], skipped: list[SkippedResult])`
   - `KIND_DATA = "data"`, `KIND_HYPOTHESIS = "hypothesis"`
-  - `REASON_OFF = "off"`, `REASON_PREDS_REQUIRED = "preds_required"`, `REASON_MULTISTORE_REQUIRED = "multistore_required"`
+  - `REASON_OFF = "off"`, `REASON_PREDS_REQUIRED = "preds_required"`, `REASON_MULTISTORE_REQUIRED = "multistore_required"`, `REASON_SINGLE_STORE_REQUIRED = "single_store_required"`
   - `AnalysisReport.table_of(name, table_name) -> pd.DataFrame` (테스트/리포트 조회 헬퍼)
 
 - [ ] **Step 1: 실패하는 테스트 작성**
@@ -119,7 +120,7 @@ import pytest
 
 from bakery.analysis.lab.result import (
     KIND_DATA, KIND_HYPOTHESIS, REASON_OFF, REASON_PREDS_REQUIRED,
-    AnalysisReport, AnalysisResult, SkippedResult,
+    REASON_SINGLE_STORE_REQUIRED, AnalysisReport, AnalysisResult, SkippedResult,
 )
 
 
@@ -148,6 +149,7 @@ def test_kind_and_reason_constants_are_exact():
     assert KIND_HYPOTHESIS == "hypothesis"
     assert REASON_OFF == "off"
     assert REASON_PREDS_REQUIRED == "preds_required"
+    assert REASON_SINGLE_STORE_REQUIRED == "single_store_required"
 
 
 def test_report_table_of_returns_the_named_table():
@@ -184,12 +186,14 @@ canonical 입력 데이터와 (선택적으로) harness-run이 남긴 예측 art
 """
 from bakery.analysis.lab.result import (
     KIND_DATA, KIND_HYPOTHESIS, REASON_MULTISTORE_REQUIRED, REASON_OFF,
-    REASON_PREDS_REQUIRED, AnalysisReport, AnalysisResult, SkippedResult,
+    REASON_PREDS_REQUIRED, REASON_SINGLE_STORE_REQUIRED,
+    AnalysisReport, AnalysisResult, SkippedResult,
 )
 
 __all__ = [
     "KIND_DATA", "KIND_HYPOTHESIS", "REASON_OFF", "REASON_PREDS_REQUIRED",
-    "REASON_MULTISTORE_REQUIRED", "AnalysisResult", "SkippedResult", "AnalysisReport",
+    "REASON_MULTISTORE_REQUIRED", "REASON_SINGLE_STORE_REQUIRED",
+    "AnalysisResult", "SkippedResult", "AnalysisReport",
 ]
 ```
 
@@ -210,6 +214,9 @@ KIND_HYPOTHESIS = "hypothesis"
 REASON_OFF = "off"                                  # YAML에서 꺼짐
 REASON_PREDS_REQUIRED = "preds_required"            # preds artifact 미지정/부재
 REASON_MULTISTORE_REQUIRED = "multistore_required"  # 4매장 전용 항목인데 단매장 spec
+# 광교 전용 소스(category_daily=bonavi_daily)를 쓰는 항목인데 multistore spec.
+# 게이트 없이 실행하면 광교 수치가 4매장 분석으로 라벨링되는 조용한 오데이터가 된다.
+REASON_SINGLE_STORE_REQUIRED = "single_store_required"
 
 
 @dataclass
@@ -530,7 +537,8 @@ git commit -m "feat(analysis-lab): AnalysisSpec + DEPRECATED/오타 이름 강�
     - `predictions -> pd.DataFrame | None` — `spec.predictions` CSV. 없으면 None
     - `calendar -> pd.DataFrame` — `build_calendar_daily(daily 최소~최대)`
   - `has_predictions -> bool`, `is_multistore -> bool`
-  - `STORE_CODES: dict[str, str]` (store_id → CD_PARTNER), `STORE_NAMES: dict[str, str]` (store_id → 한글명)
+  - `STORE_CODES: dict[str, str]` (store_id → CD_PARTNER), `STORE_NAMES: dict[str, str]` (store_id → 한글명), `STORE_PRIOR_KEYS: dict[str, str]` (store_id → `STORE_EVENT_PRIORS` 키)
+  - `prior_key -> str` (단매장 prior 프리셋 키. multistore면 광교)
   - `params_for(name) -> dict`
 
 - [ ] **Step 1: 실패하는 테스트 작성**
@@ -551,6 +559,23 @@ def _spec(**over):
     body = {"name": "t", "data": {"source": "real"}}
     body.update(over)
     return AnalysisSpec(**body)
+
+
+def test_store_prior_keys_are_english_labels():
+    from bakery.analysis.lab.inputs import STORE_PRIOR_KEYS
+    from bakery.harness.event_priors import STORE_EVENT_PRIORS
+
+    assert STORE_PRIOR_KEYS == {"store_gw01": "gwangyo", "store_ss01": "samsung",
+                                "store_mp01": "mecenatpolis", "store_gh01": "gwanghwamun"}
+    assert set(STORE_PRIOR_KEYS.values()) == set(STORE_EVENT_PRIORS)
+
+
+def test_prior_key_falls_back_to_gwangyo_for_multistore():
+    assert AnalysisInputs.from_spec(_spec()).prior_key == "gwangyo"
+    assert AnalysisInputs.from_spec(
+        _spec(data={"source": "real", "store": "multistore"})).prior_key == "gwangyo"
+    assert AnalysisInputs.from_spec(
+        _spec(data={"source": "real", "store": "store_mp01"})).prior_key == "mecenatpolis"
 
 
 def test_store_codes_cover_four_stores():
@@ -691,6 +716,13 @@ STORE_NAMES: dict[str, str] = {
     "store_mp01": "메세나폴리스",
     "store_gh01": "광화문",
 }
+# harness.event_priors.STORE_EVENT_PRIORS의 키(영문 라벨) — 한글명과 다르다.
+STORE_PRIOR_KEYS: dict[str, str] = {
+    "store_gw01": "gwangyo",
+    "store_ss01": "samsung",
+    "store_mp01": "mecenatpolis",
+    "store_gh01": "gwanghwamun",
+}
 GWANGYO = "store_gw01"
 _POLLUTED_COLUMNS = ("potential_demand",)   # 오염 소스 — 측정 헌장상 사용 금지
 
@@ -719,6 +751,11 @@ class AnalysisInputs:
     def store_code(self) -> str:
         """단매장 CD_PARTNER. multistore면 광교(참조 매장) 코드."""
         return STORE_CODES[GWANGYO if self.is_multistore else self.store]
+
+    @property
+    def prior_key(self) -> str:
+        """이벤트 prior 프리셋 키. multistore면 광교(참조 매장)."""
+        return STORE_PRIOR_KEYS[GWANGYO if self.is_multistore else self.store]
 
     @property
     def has_predictions(self) -> bool:
@@ -829,7 +866,7 @@ git commit -m "feat(analysis-lab): AnalysisInputs lazy 로더(paths 기반, pote
 **Interfaces:**
 - Consumes: `AnalysisSpec`/`load_analysis_spec` (Task 2), `AnalysisInputs` (Task 3), `AnalysisResult`/`SkippedResult`/`AnalysisReport` (Task 1)
 - Produces:
-  - `Handler(name, kind, title, fn, needs_predictions=False, needs_multistore=False)` — frozen dataclass. `fn: Callable[[AnalysisInputs], AnalysisResult]`
+  - `Handler(name, kind, title, fn, needs_predictions=False, needs_multistore=False, needs_single_store=False)` — frozen dataclass. `fn: Callable[[AnalysisInputs], AnalysisResult]`
   - `DATA_ANALYSES: dict[str, Handler]`, `HYPOTHESES: dict[str, Handler]`
   - `register_data(name, title, **flags)` / `register_hypothesis(name, title, **flags)` — 데코레이터
   - `all_names() -> frozenset[str]`, `resolve(name) -> Handler`
@@ -933,6 +970,7 @@ class Handler:
     fn: HandlerFn
     needs_predictions: bool = False     # harness-run predictions.csv 필요
     needs_multistore: bool = False      # 4매장 비교 전용
+    needs_single_store: bool = False    # 광교 전용 소스(category_daily) 사용 → multistore 금지
 
 
 DATA_ANALYSES: dict[str, Handler] = {}
@@ -999,7 +1037,7 @@ import yaml
 from bakery.analysis.lab import registry
 from bakery.analysis.lab.result import (
     KIND_DATA, KIND_HYPOTHESIS, REASON_MULTISTORE_REQUIRED, REASON_OFF,
-    REASON_PREDS_REQUIRED, AnalysisResult,
+    REASON_PREDS_REQUIRED, REASON_SINGLE_STORE_REQUIRED, AnalysisResult,
 )
 from bakery.analysis.lab.runner import run_analysis
 from bakery.analysis.lab.spec import AnalysisSpec
@@ -1033,6 +1071,9 @@ def fake_registry(monkeypatch):
         "stub_ms": registry.Handler("stub_ms", KIND_HYPOTHESIS, "스텁 다매장",
                                     _make("stub_ms", KIND_HYPOTHESIS),
                                     needs_multistore=True),
+        "stub_single": registry.Handler("stub_single", KIND_HYPOTHESIS, "스텁 단매장",
+                                        _make("stub_single", KIND_HYPOTHESIS),
+                                        needs_single_store=True),
     }
     monkeypatch.setattr(registry, "DATA_ANALYSES", data)
     monkeypatch.setattr(registry, "HYPOTHESES", hypo)
@@ -1061,7 +1102,8 @@ def test_off_item_is_recorded_with_reason_off(fake_registry, tmp_path):
 def test_unrequested_registry_items_are_also_listed_as_off(fake_registry, tmp_path):
     # 은폐 방지: spec에 없는 항목도 off로 리포트에 남는다
     report = run_analysis(_spec(data_analyses={"stub_data": True}), out_dir=tmp_path)
-    assert {s.name for s in report.skipped} == {"stub_hypo", "stub_preds", "stub_ms"}
+    assert {s.name for s in report.skipped} == {"stub_hypo", "stub_preds", "stub_ms",
+                                               "stub_single"}
     assert {s.reason for s in report.skipped} == {REASON_OFF}
 
 
@@ -1093,6 +1135,20 @@ def test_multistore_item_runs_on_multistore_spec(fake_registry, tmp_path):
     report = run_analysis(_spec(data={"source": "real", "store": "multistore"},
                                 hypotheses={"stub_ms": True}), out_dir=tmp_path)
     assert fake_registry == ["stub_ms"]
+
+
+def test_single_store_item_skipped_on_multistore_spec(fake_registry, tmp_path):
+    # 광교 전용 소스를 4매장 라벨로 내보내는 조용한 오데이터 차단
+    report = run_analysis(_spec(data={"source": "real", "store": "multistore"},
+                                hypotheses={"stub_single": True}), out_dir=tmp_path)
+    assert fake_registry == []
+    assert [(s.name, s.reason) for s in report.skipped
+            if s.name == "stub_single"] == [("stub_single", REASON_SINGLE_STORE_REQUIRED)]
+
+
+def test_single_store_item_runs_on_single_store_spec(fake_registry, tmp_path):
+    report = run_analysis(_spec(hypotheses={"stub_single": True}), out_dir=tmp_path)
+    assert fake_registry == ["stub_single"]
 
 
 def test_resolved_config_written_to_out_dir(fake_registry, tmp_path):
@@ -1150,7 +1206,7 @@ from bakery.analysis.lab import registry
 from bakery.analysis.lab.inputs import AnalysisInputs
 from bakery.analysis.lab.result import (
     REASON_MULTISTORE_REQUIRED, REASON_OFF, REASON_PREDS_REQUIRED,
-    AnalysisReport, AnalysisResult, SkippedResult,
+    REASON_SINGLE_STORE_REQUIRED, AnalysisReport, AnalysisResult, SkippedResult,
 )
 from bakery.analysis.lab.spec import AnalysisSpec
 
@@ -1161,6 +1217,8 @@ def _gate_reason(handler: registry.Handler, inputs: AnalysisInputs) -> str | Non
         return REASON_PREDS_REQUIRED
     if handler.needs_multistore and not inputs.is_multistore:
         return REASON_MULTISTORE_REQUIRED
+    if handler.needs_single_store and inputs.is_multistore:
+        return REASON_SINGLE_STORE_REQUIRED
     return None
 
 
@@ -1217,7 +1275,7 @@ def _run_one(handler: registry.Handler, inputs: AnalysisInputs,
 - [ ] **Step 8: runner 테스트 통과 확인**
 
 Run: `uv run pytest tests/analysis_lab/test_runner.py -v`
-Expected: PASS (11 passed)
+Expected: PASS (13 passed)
 
 - [ ] **Step 9: 커밋**
 
@@ -1377,13 +1435,14 @@ import plotly.io as pio
 
 from bakery.analysis.lab.result import (
     KIND_DATA, KIND_HYPOTHESIS, REASON_MULTISTORE_REQUIRED, REASON_OFF,
-    REASON_PREDS_REQUIRED, AnalysisReport, AnalysisResult,
+    REASON_PREDS_REQUIRED, REASON_SINGLE_STORE_REQUIRED, AnalysisReport, AnalysisResult,
 )
 
 SKIP_LABELS: dict[str, str] = {
     REASON_OFF: "(off)",
     REASON_PREDS_REQUIRED: "(preds 필요 — 미실행)",
     REASON_MULTISTORE_REQUIRED: "(multistore spec 필요 — 미실행)",
+    REASON_SINGLE_STORE_REQUIRED: "(단매장 spec 필요 — 미실행)",
 }
 _TABLE_ROW_LIMIT = 200        # HTML 비대 방지. 전체는 out_dir CSV에 있다.
 
@@ -1600,6 +1659,10 @@ data:
   store: store_gw01
 alpha: 0.8                        # 측정 헌장: adjusted_demand = 정상 + 0.8×마감
 predictions: reports/gwangyo_default/category_total/predictions.csv
+params:
+  # event_prior_validation A/B 대조군(layers: [] 로 돌린 harness 산출). Task 17 Step 6b에서 생성.
+  event_prior_validation:
+    baseline_predictions: reports/gwangyo_no_prior/category_total/predictions.csv
 data_analyses:
   sales_distribution: true
   category_mix: true
@@ -1703,6 +1766,38 @@ git commit -m "feat(analysis-lab): 자기포함 HTML 리포트 + bakery analysis
   - `monthly_share_stability(daily) -> pd.DataFrame` (cols: store_id, category_id, n_months, share_std, share_min, share_max)
   - `MONTH_STD_DDOF = 0` (관측 월 전체 = 모집단 → 값이 재현 가능한 정수 비율로 떨어짐)
 
+- [ ] **Step 0: 공용 stub fixture 작성**
+
+`tests/analysis_lab/conftest.py`:
+
+```python
+"""핸들러 테스트 공용 — 실 parquet IO 없이 AnalysisInputs 속성을 주입한다.
+
+AnalysisInputs의 입력 속성은 functools.cached_property라서 __dict__에 값을 직접
+넣으면 IO 없이 그 값이 쓰인다. 핸들러별로 필요한 속성만 주면 된다.
+"""
+import pytest
+
+from bakery.analysis.lab.inputs import AnalysisInputs
+
+
+@pytest.fixture
+def stub_inputs():
+    def _make(*, store="store_gw01", alpha=0.8, params=None, **attributes):
+        inputs = AnalysisInputs(store=store, alpha=alpha, params=params or {})
+        for name, value in attributes.items():
+            inputs.__dict__[name] = value       # cached_property 사전 채우기
+        return inputs
+    return _make
+```
+
+핸들러 테스트는 `_StubInputs` 클래스를 각자 정의하지 않고 이 fixture를 쓴다:
+
+```python
+def test_something(stub_inputs):
+    inputs = stub_inputs(daily=_daily(), waste=_waste())
+```
+
 - [ ] **Step 1: 실패하는 테스트 작성**
 
 `tests/analysis_lab/test_handlers_sales.py`:
@@ -1714,7 +1809,6 @@ import pytest
 from bakery.analysis.lab.handlers.sales import (
     category_mix, category_share, median_unit_price, monthly_share_stability,
 )
-from bakery.analysis.lab.inputs import AnalysisInputs
 from bakery.analysis.lab.result import KIND_DATA
 
 
@@ -1739,15 +1833,6 @@ def _waste():
         "unit_price": [3000, 3000, 5000],
         "production_qty": [12, 32, 6], "waste_qty": [2, 2, 1],
     })
-
-
-class _StubInputs(AnalysisInputs):
-    """실 parquet IO 없이 daily/waste만 주입한다."""
-
-    def __init__(self, daily, waste):
-        super().__init__(store="store_gw01", alpha=0.8)
-        self.__dict__["daily"] = daily          # cached_property 직접 채우기
-        self.__dict__["waste"] = waste
 
 
 def test_median_unit_price_is_per_item_median():
@@ -1796,8 +1881,8 @@ def test_monthly_share_stability_groups_by_store():
     assert len(stability) == 4          # 2매장 × 2카테고리
 
 
-def test_handler_returns_data_kind_without_verdict():
-    result = category_mix(_StubInputs(_daily(), _waste()))
+def test_handler_returns_data_kind_without_verdict(stub_inputs):
+    result = category_mix(stub_inputs(daily=_daily(), waste=_waste()))
     assert result.name == "category_mix"
     assert result.kind == KIND_DATA
     assert result.verdict is None       # 데이터 분석은 판정 없음
@@ -1805,12 +1890,12 @@ def test_handler_returns_data_kind_without_verdict():
     assert len(result.figures) == 2
 
 
-def test_handler_notes_price_coverage():
+def test_handler_notes_price_coverage(stub_inputs):
     daily = _daily()
     daily.loc[len(daily)] = {"store_id": "store_gw01", "item_id": "unknown",
                              "category_id": "bread", "date": pd.Timestamp("2025-02-02"),
                              "sold_units": 10, "is_stockout": False, "stockout_time": pd.NaT}
-    result = category_mix(_StubInputs(daily, _waste()))
+    result = category_mix(stub_inputs(daily=daily, waste=_waste()))
     # 단가 미매핑 10개 / 총 100개 → coverage 0.9. 은폐 방지로 note에 남긴다.
     assert result.notes == ["단가 매핑 커버리지 0.900 — 미매핑 품목의 revenue는 0으로 계산됨"]
 ```
@@ -2376,6 +2461,7 @@ git commit -m "feat(analysis-lab): demand_absorption 핸들러 + placebo_absorpt
 - Consumes: `bakery.data.calendar.build_calendar_daily`, `AnalysisInputs.category_daily`/`.calendar` (Task 3), `register_hypothesis` (Task 4)
 - Produces:
   - `local_dow_baseline(series, calendar, *, halfwin=HALFWIN) -> pd.Series` (index=date, value=동일요일 로컬 median)
+  - 핸들러는 `needs_single_store=True` — `inputs.category_daily`가 `bonavi_daily`(광교 전용)를 읽으므로 multistore spec에서는 실행하지 않는다(광교 수치를 4매장으로 라벨링하는 오데이터 방지)
   - `decompose_holiday_premium(series, calendar, *, halfwin=HALFWIN) -> dict[str, pd.DataFrame]` — 키 `"full"`, `"by_holiday"`, `"dow_class"`, `"event_ranking"`, `"streak_buckets"`
   - `HALFWIN = 6`, `MIN_BASELINE_SAMPLES = 3`, `SERIES_VALUE_COLUMN = "adjusted_demand_unit"`
   - `holiday_premium(inputs) -> AnalysisResult`
@@ -2704,6 +2790,9 @@ def test_handler_uses_fresh_category_daily_not_frozen_csv():
     inputs = AnalysisInputs.from_spec(AnalysisSpec(name="t", data={"source": "real"}))
     result = holiday_premium(inputs)
     assert result.kind == KIND_HYPOTHESIS
+    from bakery.analysis.lab.registry import HYPOTHESES, load_handlers
+    load_handlers()
+    assert HYPOTHESES["holiday_premium"].needs_single_store is True
     assert [label for label, _ in result.tables] == [
         "dow_class", "event_ranking", "streak_buckets", "by_holiday"]
     # vintage 분리를 은폐하지 않는다
@@ -2785,7 +2874,8 @@ def _dow_class_fig(dow_class: pd.DataFrame) -> go.Figure:
     return fig
 
 
-@register_hypothesis("holiday_premium", "공휴일 프리미엄 분해 (요일·연휴·대체 축)")
+@register_hypothesis("holiday_premium", "공휴일 프리미엄 분해 (요일·연휴·대체 축)",
+                     needs_single_store=True)
 def holiday_premium(inputs: AnalysisInputs) -> AnalysisResult:
     series = _series_from_category_daily(inputs.category_daily)
     tables = decompose_holiday_premium(series, inputs.calendar,
@@ -3437,10 +3527,10 @@ def test_distribution_summary_exact():
     assert summary["cv"] == pytest.approx(13.228756555322953 / 30.0)
 
 
-def test_sales_distribution_handler_shape():
+def test_sales_distribution_handler_shape(stub_inputs):
     from bakery.analysis.lab.handlers.sales import sales_distribution
 
-    result = sales_distribution(_StubInputs(_daily(), _waste()))
+    result = sales_distribution(stub_inputs(daily=_daily(), waste=_waste()))
     assert result.name == "sales_distribution"
     assert result.verdict is None
     assert [label for label, _ in result.tables] == ["daily_totals", "summary"]
@@ -3550,7 +3640,6 @@ from bakery.analysis.lab.handlers.waste import (
     overproduction_breakdown, waste_alpha_identity, waste_rate, waste_rate_by_item,
     waste_rate_by_store,
 )
-from bakery.analysis.lab.inputs import AnalysisInputs
 from bakery.analysis.lab.result import KIND_DATA
 
 
@@ -3574,13 +3663,6 @@ def _waste():
 
 def _item_to_category():
     return pd.Series({"b1": "bread", "p1": "pastry"})
-
-
-class _StubInputs(AnalysisInputs):
-    def __init__(self, waste, item_to_category):
-        super().__init__(store="store_gw01", alpha=0.8)
-        self.__dict__["waste"] = waste
-        self.__dict__["item_to_category"] = item_to_category
 
 
 def test_min_production_constant():
@@ -3630,8 +3712,8 @@ def test_overproduction_by_category_cost_share_sums_to_one():
     assert bread["cost_share"] == pytest.approx(30000 / 130000)
 
 
-def test_three_handlers_are_data_kind_without_verdict():
-    inputs = _StubInputs(_waste(), _item_to_category())
+def test_three_handlers_are_data_kind_without_verdict(stub_inputs):
+    inputs = stub_inputs(waste=_waste(), item_to_category=_item_to_category())
     for handler, tables in ((waste_rate, ["by_store", "by_item"]),
                             (waste_alpha_identity, ["residual"]),
                             (overproduction_breakdown, ["by_category"])):
@@ -3812,10 +3894,12 @@ git commit -m "feat(analysis-lab): 폐기 3종(waste_rate/항등식/과잉생산
 **Interfaces:**
 - Consumes:
   - `bakery.analysis.discount`: `discount_summary(ds)`, `label_summary(ds)`, `closing_by_category_hour(ds, item_to_category)`, `DiscountSales`, `classify_code`
-  - `bakery.analysis.closing_demand`: `run_closing_demand(rows, waste, item_to_category, category="bread")` → dict(alpha/depth/surplus/kink/panel)
-  - `bakery.analysis.discount_regime`: `run_discount_regime(rows, item_to_category, category, ...)` → `RegimeResult`
+  - `bakery.analysis.closing_demand`: `run_closing_demand(rows, waste, item_to_category, category="bread")` → dict(`alpha`/`depth`/`surplus`/`kink`/`panel`)
+    - **실측 필드명(2026-07-28 확인)**: `AlphaEstimate(alpha_low, alpha_high, a1, a2, a3_slope, note)` / `KinkResult(n_days, base, closing_total, alpha, note)` / `DepthResult(n, slope, se, base, alpha, note)` / `SurplusResult(n, slope, se, clearance_high, note)` — **SurplusResult에는 alpha가 없다**(A3는 slope만; α 환산값은 `AlphaEstimate.a3_slope`)
+  - `bakery.analysis.discount_regime`: `run_discount_regime(rows, item_to_category, category, *, cut_date, placebo_cut_dates)` → **dict** `{category, cut_date, n, closing_share, closing_intensity, placebo, verdict}`
+    - `closing_share`/`closing_intensity` = `RegimeResult(beta, se, ci_low, ci_high, n, n_params, cut_date, ill_posed)` — **p_value 없음**(CI로 판정)
   - `AnalysisInputs.discount_rows`/`.waste`/`.item_to_category`
-- Produces: `closing_waste_frame(waste) -> pd.DataFrame` (item_id/date/waste_qty — `run_closing_demand`의 waste 인자 계약), `alpha_verdict(alpha) -> str`, `regime_verdict(result) -> str`, `discount_hour_table(ds, item_to_category)`, 핸들러 3개
+- Produces: `closing_waste_frame(waste) -> pd.DataFrame` (item_id/date/waste_qty — `run_closing_demand`의 waste 인자 계약), `alpha_verdict(alpha: AlphaEstimate) -> str`, `regime_verdict(report: dict) -> str`, `discount_hour_table(ds, item_to_category)`, `alpha_estimates_table(report: dict) -> pd.DataFrame`, 핸들러 3개
 - `CLOSING_CATEGORY_DEFAULT = "bread"`
 
 - [ ] **Step 1: 테스트 작성**
@@ -3831,7 +3915,6 @@ from bakery.analysis.lab.handlers.discount import (
     CLOSING_CATEGORY_DEFAULT, alpha_verdict, closing_discount, closing_waste_frame,
     discount_hour_table, other_discounts, regime_verdict,
 )
-from bakery.analysis.lab.inputs import AnalysisInputs
 from bakery.analysis.lab.result import KIND_HYPOTHESIS
 
 
@@ -3863,14 +3946,6 @@ def _waste():
     })
 
 
-class _StubInputs(AnalysisInputs):
-    def __init__(self, rows, waste, mapping):
-        super().__init__(store="store_gw01", alpha=0.8)
-        self.__dict__["discount_rows"] = rows
-        self.__dict__["waste"] = waste
-        self.__dict__["item_to_category"] = mapping
-
-
 def test_closing_category_default():
     assert CLOSING_CATEGORY_DEFAULT == "bread"
 
@@ -3890,29 +3965,41 @@ def test_discount_hour_table_counts_closing_by_hour():
 
 
 def test_alpha_verdict_reports_interval():
-    class _Alpha:
-        lower, upper, point, note = 0.6, 0.9, 0.75, "A1 제외(저녁 상시할인)"
-    assert alpha_verdict(_Alpha()) == (
-        "구간 추정 α ∈ [0.600, 0.900] (점추정 0.750) — A1 제외(저녁 상시할인)")
+    from bakery.analysis.closing_demand import AlphaEstimate
+
+    alpha = AlphaEstimate(alpha_low=0.6, alpha_high=0.9, a1=0.55, a2=0.8,
+                          a3_slope=0.7, note="A1 제외(저녁 상시할인)")
+    assert alpha_verdict(alpha) == (
+        "구간 추정 α ∈ [0.600, 0.900] (A1 0.550 / A2 0.800 / A3 0.700) "
+        "— A1 제외(저녁 상시할인)")
 
 
-def test_alpha_verdict_handles_missing_point():
-    class _Alpha:
-        lower, upper, point, note = 0.5, 1.0, None, "식별 불가"
-    assert alpha_verdict(_Alpha()) == (
-        "구간 추정 α ∈ [0.500, 1.000] (점추정 없음) — 식별 불가")
+def test_alpha_verdict_handles_missing_estimators():
+    from bakery.analysis.closing_demand import AlphaEstimate
+
+    alpha = AlphaEstimate(alpha_low=0.5, alpha_high=1.0, a1=None, a2=None,
+                          a3_slope=None, note="식별 불가")
+    assert alpha_verdict(alpha) == (
+        "구간 추정 α ∈ [0.500, 1.000] (A1 없음 / A2 없음 / A3 없음) — 식별 불가")
 
 
-def test_regime_verdict_uses_placebo_comparison():
-    class _Regime:
-        beta, se, p_value, verdict = -0.05, 0.01, 0.001, "shift"
-        n, placebo_max_abs_beta = 500, 0.01
-    assert regime_verdict(_Regime()) == (
-        "레짐 전환 있음(shift) — β=-0.0500 (p=0.0010), placebo max|β|=0.0100, n=500")
+def test_regime_verdict_uses_ci_and_placebo():
+    from bakery.analysis.discount_regime import RegimeResult
+
+    share = RegimeResult(beta=-0.05, se=0.01, ci_low=-0.07, ci_high=-0.03,
+                         n=500, n_params=4, cut_date=pd.Timestamp("2024-01-01"),
+                         ill_posed=False)
+    report = {"category": "bread", "cut_date": pd.Timestamp("2024-01-01"), "n": 500,
+              "closing_share": share, "closing_intensity": share,
+              "placebo": [], "verdict": "shift"}
+    assert regime_verdict(report) == (
+        "레짐 전환 shift — closing_share β=-0.0500 CI90[-0.0700,-0.0300], "
+        "placebo 0건, n=500 (cut=2024-01-01)")
 
 
-def test_other_discounts_handler_shape():
-    inputs = _StubInputs(_rows(), _waste(), pd.Series({"b1": "bread", "p1": "pastry"}))
+def test_other_discounts_handler_shape(stub_inputs):
+    inputs = stub_inputs(discount_rows=_rows(), waste=_waste(),
+                         item_to_category=pd.Series({"b1": "bread", "p1": "pastry"}))
     result = other_discounts(inputs)
     assert result.kind == KIND_HYPOTHESIS
     assert [label for label, _ in result.tables] == ["by_code", "by_label", "by_hour"]
@@ -3960,18 +4047,37 @@ def discount_hour_table(ds: DiscountSales, item_to_category: pd.Series) -> pd.Da
     return closing_by_category_hour(ds, item_to_category)
 
 
+def _estimator_text(value: float | None) -> str:
+    return f"{value:.3f}" if value is not None else "없음"
+
+
 def alpha_verdict(alpha) -> str:
-    point = f"{alpha.point:.3f}" if alpha.point is not None else "없음"
-    suffix = f"(점추정 {point})" if alpha.point is not None else "(점추정 없음)"
-    return (f"구간 추정 α ∈ [{alpha.lower:.3f}, {alpha.upper:.3f}] {suffix} — {alpha.note}")
+    """AlphaEstimate(alpha_low/alpha_high/a1/a2/a3_slope/note) → 판정 문구."""
+    return (f"구간 추정 α ∈ [{alpha.alpha_low:.3f}, {alpha.alpha_high:.3f}] "
+            f"(A1 {_estimator_text(alpha.a1)} / A2 {_estimator_text(alpha.a2)} / "
+            f"A3 {_estimator_text(alpha.a3_slope)}) — {alpha.note}")
 
 
-def regime_verdict(result) -> str:
-    return (f"레짐 전환 있음({result.verdict}) — β={result.beta:.4f} "
-            f"(p={result.p_value:.4f}), placebo max|β|={result.placebo_max_abs_beta:.4f}, "
-            f"n={result.n}") if result.verdict != "none" else (
-        f"레짐 전환 없음 — β={result.beta:.4f} (p={result.p_value:.4f}), "
-        f"placebo max|β|={result.placebo_max_abs_beta:.4f}, n={result.n}")
+def alpha_estimates_table(report: dict) -> pd.DataFrame:
+    """추정기별 원시 산출 — SurplusResult에는 alpha가 없어 slope를 싣는다."""
+    kink, depth, surplus = report["kink"], report["depth"], report["surplus"]
+    return pd.DataFrame([
+        {"estimator": "A1 kink", "alpha": kink.alpha, "statistic": kink.base,
+         "n": kink.n_days, "note": kink.note},
+        {"estimator": "A2 depth", "alpha": depth.alpha, "statistic": depth.slope,
+         "n": depth.n, "note": depth.note},
+        {"estimator": "A3 surplus", "alpha": report["alpha"].a3_slope,
+         "statistic": surplus.slope, "n": surplus.n, "note": surplus.note},
+    ])
+
+
+def regime_verdict(report: dict) -> str:
+    """run_discount_regime 반환 dict → 판정. p_value가 없어 CI90로 읽는다."""
+    share = report["closing_share"]
+    return (f"레짐 전환 {report['verdict']} — closing_share β={share.beta:.4f} "
+            f"CI90[{share.ci_low:.4f},{share.ci_high:.4f}], "
+            f"placebo {len(report['placebo'])}건, n={report['n']} "
+            f"(cut={pd.Timestamp(report['cut_date']).date()})")
 
 
 def _hour_fig(table: pd.DataFrame) -> go.Figure:
@@ -4001,14 +4107,7 @@ def closing_discount(inputs: AnalysisInputs) -> AnalysisResult:
     category = params.get("category", CLOSING_CATEGORY_DEFAULT)
     report = run_closing_demand(inputs.discount_rows, closing_waste_frame(inputs.waste),
                                inputs.item_to_category, category=category)
-    estimates = pd.DataFrame([
-        {"estimator": "A1 kink", "value": report["kink"].alpha_lower,
-         "note": report["kink"].note},
-        {"estimator": "A2 depth", "value": report["depth"].alpha_hat,
-         "note": report["depth"].note},
-        {"estimator": "A3 surplus", "value": report["surplus"].alpha_hat,
-         "note": report["surplus"].note},
-    ])
+    estimates = alpha_estimates_table(report)
     return AnalysisResult(
         name="closing_discount", kind=KIND_HYPOTHESIS, title="마감할인 실수요 비율 α 추정",
         tables=[("estimates", estimates), ("panel", report["panel"]),
@@ -4046,35 +4145,30 @@ def other_discounts(inputs: AnalysisInputs) -> AnalysisResult:
 def discount_regime(inputs: AnalysisInputs) -> AnalysisResult:
     params = inputs.params_for("discount_regime")
     category = params.get("category", CLOSING_CATEGORY_DEFAULT)
-    result = run_discount_regime(inputs.discount_rows, inputs.item_to_category, category,
+    report = run_discount_regime(inputs.discount_rows, inputs.item_to_category, category,
                                  **{k: v for k, v in params.items() if k != "category"})
-    summary = pd.DataFrame([{"beta": result.beta, "se": result.se,
-                             "p_value": result.p_value, "n": result.n,
-                             "placebo_max_abs_beta": result.placebo_max_abs_beta,
-                             "verdict": result.verdict}])
-    fig = go.Figure(go.Bar(x=["real β", "placebo max|β|"],
-                           y=[abs(result.beta), result.placebo_max_abs_beta]))
-    fig.update_layout(title="레짐 전환 β vs placebo 최대 |β|", yaxis_title="|β|")
+    rows = [{"outcome": name, "beta": result.beta, "se": result.se,
+             "ci_low": result.ci_low, "ci_high": result.ci_high, "n": result.n,
+             "ill_posed": result.ill_posed}
+            for name, result in (("closing_share", report["closing_share"]),
+                                 ("closing_intensity", report["closing_intensity"]))]
+    summary = pd.DataFrame(rows)
+    placebo = pd.DataFrame([{"cut_date": r.cut_date, "beta": r.beta,
+                             "ci_low": r.ci_low, "ci_high": r.ci_high}
+                            for r in report["placebo"]])
+    betas = [abs(report["closing_share"].beta)] + [abs(r.beta) for r in report["placebo"]]
+    labels = ["real β"] + [f"placebo {pd.Timestamp(r.cut_date).date()}"
+                           for r in report["placebo"]]
+    fig = go.Figure(go.Bar(x=labels, y=betas))
+    fig.update_layout(title="레짐 전환 |β| — real vs placebo cut", yaxis_title="|β|")
     return AnalysisResult(
         name="discount_regime", kind=KIND_HYPOTHESIS,
         title="할인 레짐 전환(마감 비중 구조변화)",
-        tables=[("summary", summary)], figures=[fig],
-        verdict=regime_verdict(result), notes=[f"카테고리={category}"],
+        tables=[("summary", summary), ("placebo", placebo)], figures=[fig],
+        verdict=regime_verdict(report),
+        notes=[f"카테고리={category}",
+               "placebo cut이 real과 비슷한 β를 내면 그 전환은 구조가 아니라 추세다."],
     )
-```
-
-**주의:** `KinkResult`/`DepthResult`/`SurplusResult`/`AlphaEstimate`의 실제 필드명을 구현 시 확인하라 — 위 코드의 `alpha_lower`/`alpha_hat`/`note`/`lower`/`upper`/`point`가 다르면 그 이름으로 맞춘다. 확인 명령:
-
-```bash
-uv run python -c "
-import inspect, bakery.analysis.closing_demand as m
-for name in ('KinkResult','DepthResult','SurplusResult','AlphaEstimate'):
-    print(name, [f.name for f in __import__('dataclasses').fields(getattr(m, name))])
-"
-uv run python -c "
-import dataclasses, bakery.analysis.discount_regime as m
-print([f.name for f in dataclasses.fields(m.RegimeResult)])
-"
 ```
 
 - [ ] **Step 4: 통과 확인** — Run: `uv run pytest tests/analysis_lab/test_handlers_discount.py -v` / Expected: PASS (8 passed)
@@ -4108,11 +4202,16 @@ git commit -m "feat(analysis-lab): 할인 3종(마감α/마감외/레짐) 핸들
 
 **Interfaces:**
 - Consumes:
-  - `bakery.analysis.self_fulfillment`: `per_item_dow_pattern(daily)`, `top_self_fulfilling_items(daily, n=15)`, `stockout_hour_distribution(daily, item_ids=None)`, `estimated_lost_demand(daily, hour_weights=None)`
-  - `bakery.analysis.popularity`: `compute_popularity_signals(daily, closing_discount, today=None)`, `recommend_quantities(signals)`
-  - `bakery.models.item_proportion`: `compute_proportions`, `STOCKOUT_MAX_BOOST` (인기 신호가 비율 배분에 실제로 쓰이는 경로)
+  - `bakery.analysis.self_fulfillment` — **실측 반환 컬럼(2026-07-28 확인)**:
+    - `estimated_lost_demand(daily, *, hour_weights=None)` → `store_id, item_id, date, sold_units, stockout_time, potential_demand, lost_units` (손실량 컬럼은 **`lost_units`**. `potential_demand`는 이 함수가 자체 계산한 로컬 추정치이며 오염된 canonical 컬럼이 아니다 — 혼동 방지를 위해 출력 테이블에서 **드롭**한다)
+    - `stockout_hour_distribution(daily, item_ids=None)` → `store_id, item_id, dow, stockout_hour_mean, stockout_hour_std, n_weeks` (**시각 히스토그램이 아니라 품목×요일 평균 매진시각**)
+    - `top_self_fulfilling_items(daily, n=15)` → `store_id, item_id, sold_total, avg_stockout_rate, avg_sold_cv, avg_stockout_hour, covered_dows`
+  - `bakery.analysis.popularity`: `compute_popularity_signals(daily, closing_discount, today=None)` → `item_id, category_id, days_sold, total_sold, avg_daily_sold, stockout_freq_all, stockout_days, avg_stockout_h, median_stockout_h, closing_qty, closing_days, closing_rate_per_sold, recent_avg, prior_avg, trend_pct` (**boosted 컬럼 없음** — 부스트는 `models/item_proportion`에 있다)
+  - `bakery.models.item_proportion`: `compute_proportions(history, target_date)` → `adj_stockout`/`adj_trend`/`adj_closing` 등 배분 조정 컬럼, `STOCKOUT_MAX_BOOST = 0.20`
   - `AnalysisInputs.daily`/`.discount_rows`
-- Produces: `lost_demand_summary(daily) -> pd.DataFrame` (cols: store_id, n_stockout_days, est_lost_units, lost_share_of_sold), `stockout_revenue_verdict(summary) -> str`, `popularity_rank_correlation(signals) -> pd.DataFrame`, `popularity_verdict(corr) -> str`, 핸들러 2개
+- Produces: `lost_demand_summary(daily) -> pd.DataFrame` (cols: store_id, n_stockout_days, est_lost_units, lost_share_of_sold), `stockout_revenue_verdict(summary) -> str`, `popularity_boost_correlation(daily, closing, *, target_date) -> pd.DataFrame`, `popularity_verdict(corr) -> str`, 핸들러 2개
+
+**`popularity_stockout` 재정의(명시):** 출처 스크립트는 **옛 매진 라벨 vs 새 라벨**로 만든 두 비율을 spearman 비교했다. canonical에는 옛(오염) 라벨이 더 이상 없으므로 A/B가 불가능하다. 대신 **원시 인기 순위(`avg_daily_sold`) vs 매진 부스트 적용 배분 순위(`compute_proportions`의 `adj_stockout` 반영값)** 를 비교해 "매진 신호가 배분 순위를 얼마나 재배열하는가"를 잰다. 이 재정의를 verdict 문구와 note에 반드시 적는다.
 - `LOST_SHARE_THRESHOLD = 0.02` (2% 미만이면 "무영향")
 
 - [ ] **Step 1: 테스트 작성**
@@ -4124,10 +4223,9 @@ import pandas as pd
 import pytest
 
 from bakery.analysis.lab.handlers.stockout import (
-    LOST_SHARE_THRESHOLD, lost_demand_summary, popularity_verdict,
-    stockout_revenue, stockout_revenue_verdict,
+    LOST_SHARE_THRESHOLD, POPULARITY_CORR_THRESHOLD, lost_demand_summary,
+    popularity_verdict, stockout_revenue, stockout_revenue_verdict,
 )
-from bakery.analysis.lab.inputs import AnalysisInputs
 from bakery.analysis.lab.result import KIND_HYPOTHESIS
 
 
@@ -4145,16 +4243,9 @@ def _daily():
                          for d, i, c, q, so, t in rows])
 
 
-class _StubInputs(AnalysisInputs):
-    def __init__(self, daily, discount_rows=None):
-        super().__init__(store="store_gw01", alpha=0.8)
-        self.__dict__["daily"] = daily
-        if discount_rows is not None:
-            self.__dict__["discount_rows"] = discount_rows
-
-
-def test_threshold_constant():
+def test_threshold_constants():
     assert LOST_SHARE_THRESHOLD == 0.02
+    assert POPULARITY_CORR_THRESHOLD == 0.8
 
 
 def test_lost_demand_summary_counts_and_share():
@@ -4186,22 +4277,27 @@ def test_stockout_revenue_verdict_flags_material_store():
 
 
 def test_popularity_verdict_reports_rank_stability():
-    corr = pd.DataFrame([{"pair": "sold_vs_boosted", "spearman": 0.95, "n": 100}])
+    corr = pd.DataFrame([{"pair": "raw_vs_stockout_boosted", "spearman": 0.95, "n": 100}])
     assert popularity_verdict(corr) == (
-        "지지 — 매진 보정 전후 인기 순위 spearman 0.950 (n=100), 신호 안정")
+        "매진 부스트가 배분 순위를 거의 바꾸지 않음 — spearman 0.950 (n=100), "
+        "부스트 기여 작음")
 
 
-def test_popularity_verdict_flags_instability():
-    corr = pd.DataFrame([{"pair": "sold_vs_boosted", "spearman": 0.55, "n": 100}])
+def test_popularity_verdict_flags_reordering():
+    corr = pd.DataFrame([{"pair": "raw_vs_stockout_boosted", "spearman": 0.55, "n": 100}])
     assert popularity_verdict(corr) == (
-        "기각 — 매진 보정 전후 인기 순위 spearman 0.550 (n=100), 신호 불안정(임계 0.8)")
+        "매진 부스트가 배분 순위를 크게 재배열 — spearman 0.550 (n=100), "
+        "임계 0.8 미만이므로 부스트 강도 검토 필요")
 
 
-def test_stockout_revenue_handler_shape():
-    result = stockout_revenue(_StubInputs(_daily()))
+def test_stockout_revenue_handler_shape(stub_inputs):
+    result = stockout_revenue(stub_inputs(daily=_daily()))
     assert result.kind == KIND_HYPOTHESIS
     assert [label for label, _ in result.tables] == [
         "summary", "top_self_fulfilling", "hour_distribution"]
+    hours = dict(result.tables)["hour_distribution"]
+    assert hours.columns.tolist() == ["store_id", "item_id", "dow",
+                                      "stockout_hour_mean", "stockout_hour_std", "n_weeks"]
 ```
 
 - [ ] **Step 2: 실패 확인** — Expected: FAIL `ModuleNotFoundError: ...handlers.stockout`
@@ -4229,6 +4325,9 @@ from bakery.analysis.self_fulfillment import (
     estimated_lost_demand, stockout_hour_distribution, top_self_fulfilling_items,
 )
 
+LOST_UNITS_COLUMN = "lost_units"                 # estimated_lost_demand의 손실량 컬럼
+_LOCAL_ESTIMATE_COLUMNS = ("potential_demand",)  # 함수 내부 추정치 — 출력에서 드롭
+
 LOST_SHARE_THRESHOLD = 0.02      # 추정 손실 비중 2% 미만 = 무영향
 POPULARITY_CORR_THRESHOLD = 0.8  # 순위 상관 0.8 이상 = 신호 안정
 _TOP_ITEMS = 15
@@ -4241,9 +4340,7 @@ _NOTE_LOST_MODEL = ("손실 추정은 features/potential_demand와 같은 시간
 def lost_demand_summary(daily: pd.DataFrame) -> pd.DataFrame:
     """매장별 매진일 수 + 추정 손실 수량 + sold 대비 비중."""
     lost = estimated_lost_demand(daily)
-    lost_col = next(c for c in ("lost_units", "est_lost_units", "lost_demand")
-                    if c in lost.columns)
-    per_store_lost = lost.groupby("store_id")[lost_col].sum()
+    per_store_lost = lost.groupby("store_id")[LOST_UNITS_COLUMN].sum()
     rows = []
     for store, group in daily.groupby("store_id", observed=True):
         sold = float(group["sold_units"].sum())
@@ -4265,24 +4362,34 @@ def stockout_revenue_verdict(summary: pd.DataFrame) -> str:
             f"2% 이상 (최대 {max_share:.1f}%)")
 
 
-def popularity_rank_correlation(signals: pd.DataFrame) -> pd.DataFrame:
-    """매진 보정 전(raw sold) vs 후(보정 인기 점수) 순위 상관."""
-    raw_col = next(c for c in ("sold_recent", "sold_units", "sold_total")
-                   if c in signals.columns)
-    boosted_col = next(c for c in ("popularity", "score", "boosted_sold")
-                       if c in signals.columns)
-    pair = signals[[raw_col, boosted_col]].dropna()
-    rho = float(spearmanr(pair[raw_col], pair[boosted_col]).statistic)
-    return pd.DataFrame([{"pair": "sold_vs_boosted", "spearman": rho, "n": len(pair)}])
+def popularity_boost_correlation(daily: pd.DataFrame, closing: pd.DataFrame, *,
+                                 target_date: pd.Timestamp) -> pd.DataFrame:
+    """원시 인기 순위(avg_daily_sold) vs 매진 부스트 적용 배분 순위의 spearman.
+
+    옛/새 매진 라벨 A/B는 canonical에 옛 라벨이 없어 불가 — 대신 부스트가 순위를
+    얼마나 재배열하는지를 잰다(Stage2 배분에 실제로 쓰이는 경로).
+    """
+    from bakery.models.item_proportion import compute_proportions
+
+    signals = compute_popularity_signals(daily, closing, today=target_date)
+    proportions = compute_proportions(daily, target_date)
+    merged = signals[["item_id", "avg_daily_sold"]].merge(
+        proportions[["item_id", "adj_stockout"]], on="item_id", how="inner")
+    merged["boosted_rank_value"] = merged["avg_daily_sold"] * merged["adj_stockout"]
+    pair = merged[["avg_daily_sold", "boosted_rank_value"]].dropna()
+    rho = float(spearmanr(pair["avg_daily_sold"], pair["boosted_rank_value"]).statistic)
+    return pd.DataFrame([{"pair": "raw_vs_stockout_boosted", "spearman": rho,
+                          "n": int(len(pair))}])
 
 
 def popularity_verdict(corr: pd.DataFrame) -> str:
     rho = float(corr["spearman"].iloc[0])
     n = int(corr["n"].iloc[0])
     if rho >= POPULARITY_CORR_THRESHOLD:
-        return (f"지지 — 매진 보정 전후 인기 순위 spearman {rho:.3f} (n={n}), 신호 안정")
-    return (f"기각 — 매진 보정 전후 인기 순위 spearman {rho:.3f} (n={n}), "
-            "신호 불안정(임계 0.8)")
+        return (f"매진 부스트가 배분 순위를 거의 바꾸지 않음 — spearman {rho:.3f} "
+                f"(n={n}), 부스트 기여 작음")
+    return (f"매진 부스트가 배분 순위를 크게 재배열 — spearman {rho:.3f} (n={n}), "
+            "임계 0.8 미만이므로 부스트 강도 검토 필요")
 
 
 def _lost_fig(summary: pd.DataFrame) -> go.Figure:
@@ -4294,10 +4401,12 @@ def _lost_fig(summary: pd.DataFrame) -> go.Figure:
 
 
 def _hour_fig(hours: pd.DataFrame) -> go.Figure:
-    hour_col = "hour" if "hour" in hours.columns else hours.columns[0]
-    count_col = next(c for c in hours.columns if c != hour_col)
-    fig = go.Figure(go.Bar(x=hours[hour_col], y=hours[count_col]))
-    fig.update_layout(title="매진 시각 분포", xaxis_title="시(hour)", yaxis_title="건수")
+    """품목×요일 평균 매진시각의 요일별 분포(히스토그램이 아니라 평균값의 분포)."""
+    fig = go.Figure()
+    for dow, group in hours.groupby("dow", observed=True):
+        fig.add_trace(go.Box(y=group["stockout_hour_mean"], name=str(dow)))
+    fig.update_layout(title="요일별 평균 매진시각 분포(품목 단위)",
+                      xaxis_title="요일(월=0)", yaxis_title="평균 매진시각(시)")
     return fig
 
 
@@ -4305,13 +4414,14 @@ def _hour_fig(hours: pd.DataFrame) -> go.Figure:
 def stockout_revenue(inputs: AnalysisInputs) -> AnalysisResult:
     daily = inputs.daily
     summary = lost_demand_summary(daily)
+    hours = stockout_hour_distribution(daily)
     return AnalysisResult(
         name="stockout_revenue", kind=KIND_HYPOTHESIS,
         title="매진의 매장 매출 영향(무영향 가정 검증)",
         tables=[("summary", summary),
                 ("top_self_fulfilling", top_self_fulfilling_items(daily, n=_TOP_ITEMS)),
-                ("hour_distribution", stockout_hour_distribution(daily))],
-        figures=[_lost_fig(summary), _hour_fig(stockout_hour_distribution(daily))],
+                ("hour_distribution", hours)],
+        figures=[_lost_fig(summary), _hour_fig(hours)],
         verdict=stockout_revenue_verdict(summary),
         notes=[_NOTE_CENSORED, _NOTE_LOST_MODEL],
     )
@@ -4323,33 +4433,25 @@ def popularity_stockout(inputs: AnalysisInputs) -> AnalysisResult:
 
     closing = inputs.discount_rows
     closing = closing[closing["label"] == "closing"][["item_id", "date", "qty"]]
-    signals = compute_popularity_signals(inputs.daily, closing)
-    corr = popularity_rank_correlation(signals)
+    target_date = pd.Timestamp(inputs.daily["date"].max())
+    signals = compute_popularity_signals(inputs.daily, closing, today=target_date)
+    corr = popularity_boost_correlation(inputs.daily, closing, target_date=target_date)
     fig = go.Figure(go.Bar(x=corr["pair"], y=corr["spearman"]))
     fig.add_hline(y=POPULARITY_CORR_THRESHOLD, line_dash="dash")
     fig.update_layout(title="인기 신호 순위 상관(점선=0.8 임계)", yaxis_title="spearman")
     return AnalysisResult(
         name="popularity_stockout", kind=KIND_HYPOTHESIS,
-        title="매진 재정의가 인기 신호를 흔드는가",
+        title="매진 부스트가 배분 순위를 재배열하는가",
         tables=[("rank_correlation", corr), ("signals", signals)],
         figures=[fig], verdict=popularity_verdict(corr),
-        notes=["매진 라벨은 재정의(폐기0=완판) 반영본 — 옛 92.7% 정의가 아니다."],
+        notes=["매진 라벨은 재정의(폐기0=완판) 반영본 — 옛 92.7% 정의가 아니다.",
+               ("출처 스크립트의 옛/새 라벨 A/B는 canonical에 옛(오염) 라벨이 없어 "
+                "불가 — 원시 인기 vs 매진 부스트 순위 비교로 재정의했다."),
+               f"부스트 상한 STOCKOUT_MAX_BOOST=0.20, 기준일={{target}}"],
     )
 ```
 
-**주의:** `estimated_lost_demand`/`compute_popularity_signals`/`stockout_hour_distribution`의 실제 반환 컬럼명을 구현 시 확인해 `next(...)` fallback 목록을 실제 이름 하나로 고정하라(추측 fallback을 남기지 말 것). 확인:
-
-```bash
-uv run python -c "
-import pandas as pd
-from bakery.analysis.self_fulfillment import estimated_lost_demand, stockout_hour_distribution
-from bakery.analysis.lab.inputs import AnalysisInputs
-from bakery.analysis.lab.spec import AnalysisSpec
-d = AnalysisInputs.from_spec(AnalysisSpec(name='t', data={'source':'real'})).daily
-print('lost:', estimated_lost_demand(d).columns.tolist())
-print('hours:', stockout_hour_distribution(d).columns.tolist())
-"
-```
+**주의:** 마지막 note의 `{target}`은 f-string 안에서 `target_date.date()`로 채운다(리터럴 중괄호를 남기지 말 것).
 
 - [ ] **Step 4: 통과 확인** — Run: `uv run pytest tests/analysis_lab/test_handlers_stockout.py -v` / Expected: PASS (8 passed)
 
@@ -4377,8 +4479,8 @@ git commit -m "feat(analysis-lab): stockout_revenue + popularity_stockout 핸들
 **Interfaces:**
 - Consumes:
   - `bakery.analysis.substitution`: `compute_substitution_matrix(daily, receipts, *, include_inter_category=True, hour_profiles=None, cutoff_threshold=...)` → `SubstitutionMatrix(coefficients, outflow_ratio, cutoffs)`, `sensitivity_summary(outflow_ratio)`
-  - `bakery.analysis.mnl_substitution`: `fit_mnl_per_category(receipts, daily)` → `MnlResult`
-  - `bakery.analysis.nested_logit`: `fit_nested_logit(receipts, daily)` → `NestedLogitResult` (+ per-nest λ)
+  - `bakery.analysis.mnl_substitution`: `fit_mnl_per_category(receipts, daily)` → **`MnlResult(utilities, substitution, outflow_ratio)`** (2026-07-28 확인 — `coefficients` 아님)
+  - `bakery.analysis.nested_logit`: `fit_nested_logit(receipts, daily)` → **`NestedLogitResult(utilities, lambdas, substitution, outflow_ratio)`** (λ 필드명은 **`lambdas`**)
   - `bakery.analysis.substitution_did`: `compute_did_substitution(daily, receipts, hour_profiles, ...)` → `DidResult(coefficients, outflow_ratio, cutoffs)`
   - `AnalysisInputs.daily`/`.receipts`
 - Produces: `hour_profiles_from_receipts(receipts, daily) -> dict[str, np.ndarray]`, `substitution_verdict(rd, did, nested) -> str`, `substitution(inputs) -> AnalysisResult`
@@ -4575,7 +4677,7 @@ def substitution(inputs: AnalysisInputs) -> AnalysisResult:
     did = compute_did_substitution(daily, receipts, profiles)
     mnl = fit_mnl_per_category(receipts, daily)
     nested = fit_nested_logit(receipts, daily)
-    lambdas = nested.nest_lambda.rename("lambda").rename_axis("nest").reset_index()
+    lambdas = pd.Series(nested.lambdas).rename("lambda").rename_axis("nest").reset_index()
     verdict = substitution_verdict(
         rd_mean_outflow=float(rd.outflow_ratio.mean()),
         did_mean_beta=float(did.coefficients["beta_did"].mean()),
@@ -4586,7 +4688,7 @@ def substitution(inputs: AnalysisInputs) -> AnalysisResult:
         title="품목 매진 시 수요 대체(RD/DiD/MNL/Nested)",
         tables=[("rd_coefficients", rd.coefficients),
                 ("did_coefficients", did.coefficients),
-                ("mnl", mnl.coefficients),
+                ("mnl", mnl.substitution),
                 ("nested_lambda", lambdas),
                 ("sensitivity", sensitivity_summary(rd.outflow_ratio))],
         figures=[_outflow_fig(rd.outflow_ratio, did.outflow_ratio), _lambda_fig(lambdas)],
@@ -4594,17 +4696,7 @@ def substitution(inputs: AnalysisInputs) -> AnalysisResult:
     )
 ```
 
-**주의:** `MnlResult`/`NestedLogitResult`의 필드명(`coefficients`, `nest_lambda`)을 구현 시 확인해 맞춘다:
-
-```bash
-uv run python -c "
-import dataclasses as dc
-from bakery.analysis.mnl_substitution import MnlResult
-from bakery.analysis.nested_logit import NestedLogitResult
-print('Mnl:', [f.name for f in dc.fields(MnlResult)])
-print('Nested:', [f.name for f in dc.fields(NestedLogitResult)])
-"
-```
+**주의:** `nested.lambdas`가 dict/Series 중 무엇이든 `pd.Series(...)`로 감싸 통일한다. `mnl.substitution`/`nested.substitution`은 대체 계수 프레임, `outflow_ratio`는 index=item_id인 Series다.
 
 - [ ] **Step 4: 통과 확인** — Run: `uv run pytest tests/analysis_lab/test_handlers_substitution.py -v` / Expected: PASS (6 passed)
 
@@ -4868,7 +4960,7 @@ git commit -m "feat(analysis-lab): modeling_v4_assumptions 핸들러(4가정)"
   - `month_dow_matrix(series, value_column) -> pd.DataFrame` (index=month 1~12, columns=요일 월~일, 값=일평균)
   - `adjust_effect_table(series) -> pd.DataFrame` (cols: month, dow, raw_mean, adjusted_mean, closing_mean, delta, delta_pct)
   - `MONTH_DOW_VALUE_COLUMNS = ("sold_total_unit", "adjusted_demand_unit", "sold_closing")`
-  - `month_dow_adjust(inputs) -> AnalysisResult`
+  - `month_dow_adjust(inputs) -> AnalysisResult` (`needs_single_store=True` — `category_daily`가 광교 전용)
 
 **출처와의 차이(명시):** 스크립트는 `data/internal/v2/sales.parquet` 직독 + `ALPHA = 0.5`를 썼다. 핸들러는 canonical `category_daily`(헌장 α=0.8)를 쓴다. 따라서 **수치 등가가 아니다** — 구조(12×7 매트릭스 형태·adjust 방향)만 대조하고 근거를 note에 남긴다.
 
@@ -5051,7 +5143,8 @@ def _heatmap_fig(matrix: pd.DataFrame, title: str) -> go.Figure:
     return fig
 
 
-@register_hypothesis("month_dow_adjust", "월×요일 매트릭스 — 마감 조정 전후")
+@register_hypothesis("month_dow_adjust", "월×요일 매트릭스 — 마감 조정 전후",
+                     needs_single_store=True)
 def month_dow_adjust(inputs: AnalysisInputs) -> AnalysisResult:
     series = inputs.category_daily
     table = adjust_effect_table(series)
@@ -5126,6 +5219,14 @@ git commit -m "feat(analysis-lab): month_dow_adjust 이식 + month_dow 프리미
 1. `params.event_prior_validation.baseline_predictions`에 `layers: []`로 돌린 harness preds 경로가 주어지면 **artifact 대 artifact A/B**(이벤트일 WPE 개선폭)를 계산한다.
 2. 없으면 **단일 artifact 모드** — 이벤트일 vs 비이벤트일 WPE/매진률 대조만 한다(prior 효과가 이미 반영된 상태의 잔여 편향 진단).
 리포트 note와 verdict에 어느 모드인지 반드시 표기한다.
+
+**★ baseline artifact는 이 태스크에서 반드시 만든다(Step 5b).** 만들지 않으면 이름은 "prior 검증"인데 항상 단일 artifact 모드로만 출하되어 실제로는 "이벤트일 잔여 편향"을 재게 된다. `experiments/analysis_gwangyo.yaml`에 그 경로를 박아 A/B가 기본 동작이 되게 한다.
+
+**`STORE_EVENT_PRIORS` 실측 구조(2026-07-28 확인)** — 추측 금지:
+- 키는 **영문 라벨** `gwangyo` / `samsung` / `mecenatpolis` / `gwanghwamun` (한글명 아님 → `inputs.prior_key` 사용)
+- `events` = `{이벤트명: (월, 일)}` 양력 고정 (예: `{"xmas": (12, 25), "childrens": (5, 5)}`)
+- `lunar_events` = `{이벤트명: {연도: "YYYY-MM-DD"}}` (예: `{"chuseok": {2021: "2021-09-21", ...}}`)
+- 광교만 `childrens` + `chuseok`가 등록돼 있다(OOS 순개선 확인된 것만 opt-in)
 
 - [ ] **Step 1: 프리미티브 테스트 작성**
 
@@ -5450,7 +5551,8 @@ def event_prior_validation(inputs: AnalysisInputs) -> AnalysisResult:
 
     params = inputs.params_for("event_prior_validation")
     preds = _with_axes(inputs.predictions)
-    event_dates = _event_dates(inputs, STORE_EVENT_PRIORS)
+    years = range(int(preds["date"].dt.year.min()), int(preds["date"].dt.year.max()) + 1)
+    event_dates = event_dates_for(inputs.prior_key, years, STORE_EVENT_PRIORS)
     preds["segment"] = np.where(preds["date"].isin(event_dates), "event", "non_event")
     table = bias_by_axis(preds, "segment")
     baseline_path = params.get("baseline_predictions")
@@ -5478,30 +5580,33 @@ def event_prior_validation(inputs: AnalysisInputs) -> AnalysisResult:
     )
 
 
-def _event_dates(inputs: AnalysisInputs, store_event_priors: dict) -> pd.DatetimeIndex:
-    """spec 매장의 이벤트 prior 날짜 집합(캘린더 + prior 프리셋)."""
-    from bakery.analysis.lab.inputs import STORE_NAMES
+def _solar_event_dates(events: dict, years: range) -> list[pd.Timestamp]:
+    """{이벤트명: (월, 일)} → 연도별 날짜로 전개."""
+    dates = []
+    for month, day in events.values():
+        dates += [pd.Timestamp(year=year, month=month, day=day) for year in years]
+    return dates
 
-    label = STORE_NAMES.get(inputs.store, inputs.store)
-    config = store_event_priors.get(label, {})
-    events = config.get("events") or {}
-    dates = [pd.Timestamp(d) for d in events]
-    calendar = inputs.calendar
-    holiday_dates = calendar[calendar["is_public_holiday"] == 1]["date"]
-    return pd.DatetimeIndex(dates).union(pd.DatetimeIndex(holiday_dates))
+
+def _lunar_event_dates(lunar_events: dict) -> list[pd.Timestamp]:
+    """{이벤트명: {연도: 'YYYY-MM-DD'}} → 날짜 리스트."""
+    dates = []
+    for per_year in lunar_events.values():
+        dates += [pd.Timestamp(value) for value in per_year.values()]
+    return dates
+
+
+def event_dates_for(prior_key: str, years: range, store_event_priors: dict) -> pd.DatetimeIndex:
+    """등록된 prior 이벤트일만(공휴일 전체가 아니다 — prior가 실제로 손대는 날짜)."""
+    config = store_event_priors.get(prior_key, {})
+    dates = _solar_event_dates(config.get("events") or {}, years)
+    dates += _lunar_event_dates(config.get("lunar_events") or {})
+    return pd.DatetimeIndex(sorted(set(dates)))
 ```
 
 `model_bias.py` 상단 import에 `import numpy as np`, `from pathlib import Path` 추가.
 
-**주의:** `STORE_EVENT_PRIORS`의 키(매장 라벨)와 `events` 값의 실제 자료구조를 확인해 `_event_dates`를 맞춘다:
-
-```bash
-uv run python -c "
-from bakery.harness.event_priors import STORE_EVENT_PRIORS
-for label, cfg in STORE_EVENT_PRIORS.items():
-    print(label, {k: (list(v)[:3] if hasattr(v,'__iter__') else v) for k,v in cfg.items()})
-"
-```
+**주의:** `event_dates_for`는 **등록된 prior 이벤트일만** 잡는다(공휴일 전체를 합집합하면 prior가 손대지 않은 날까지 "event"로 라벨링되어 A/B가 희석된다).
 
 - [ ] **Step 6: 핸들러 테스트 추가** — `tests/analysis_lab/test_handlers_model_bias.py`에 추가:
 
@@ -5537,11 +5642,74 @@ def test_event_prior_verdict_single_artifact_mode():
         "(prior 적용 후 잔여 편향; base 대비 개선폭은 baseline preds 필요)")
 
 
+def test_event_dates_for_expands_solar_and_lunar():
+    from bakery.analysis.lab.handlers.model_bias import event_dates_for
+
+    priors = {"gwangyo": {"events": {"xmas": (12, 25), "childrens": (5, 5)},
+                          "lunar_events": {"chuseok": {2024: "2024-09-17",
+                                                       2025: "2025-10-06"}}}}
+    dates = event_dates_for("gwangyo", range(2024, 2026), priors)
+    assert dates.tolist() == [pd.Timestamp("2024-05-05"), pd.Timestamp("2024-09-17"),
+                              pd.Timestamp("2024-12-25"), pd.Timestamp("2025-05-05"),
+                              pd.Timestamp("2025-10-06"), pd.Timestamp("2025-12-25")]
+
+
+def test_event_dates_for_unknown_key_is_empty():
+    from bakery.analysis.lab.handlers.model_bias import event_dates_for
+
+    assert event_dates_for("nope", range(2024, 2025), {}).tolist() == []
+
+
 def test_all_three_registered_as_needs_predictions():
     load_handlers()
     for name in ("seasonal_bias", "weather_bias", "event_prior_validation"):
         assert HYPOTHESES[name].needs_predictions is True, name
 ```
+
+- [ ] **Step 6b: baseline preds artifact 생성 + YAML 배선 (A/B 활성화)**
+
+`event_prior_validation`이 단일 artifact 모드로만 출하되지 않게, `layers: []`(prior 없음)로
+harness를 한 번 돌려 baseline preds를 만든다.
+
+```bash
+cat > experiments/gwangyo_no_prior.yaml <<'YAML'
+# event_prior 없는 baseline — analysis-run의 event_prior_validation A/B 대조군
+name: gwangyo_no_prior
+data:
+  source: real
+  store: store_gw01
+forecaster: category_total
+layers: []
+event_priors: null
+YAML
+uv run bakery harness-run experiments/gwangyo_no_prior.yaml --out reports
+ls -la reports/gwangyo_no_prior/category_total/predictions.csv
+```
+
+`experiments/analysis_gwangyo.yaml`에 params를 추가한다:
+
+```yaml
+params:
+  event_prior_validation:
+    baseline_predictions: reports/gwangyo_no_prior/category_total/predictions.csv
+```
+
+**주의:** `layers: []` + `event_priors: null`은 harness `config._enforce`에서 경고를 내지
+않아야 정상이다(경고 조건은 `event_prior` in layers). 만약 `events=None`이 xmas로 몰래
+fallback되면 baseline이 오염되므로, PR#61에서 심은 guard가 살아있는지 확인한다:
+
+```bash
+uv run python -c "
+import pandas as pd
+base = pd.read_csv('reports/gwangyo_no_prior/category_total/predictions.csv')
+prior = pd.read_csv('reports/gwangyo_default/category_total/predictions.csv')
+m = base.merge(prior, on='date', suffixes=('_base','_prior'))
+xmas = m[pd.to_datetime(m['date']).dt.strftime('%m-%d') == '12-25']
+print(xmas[['date','expected_base','expected_prior']].to_string(index=False))
+print('xmas에서 두 expected가 동일하면 baseline이 오염됐다(guard 확인 필요)')
+"
+```
+Expected: 크리스마스 행에서 `expected_base != expected_prior`. 동일하면 **멈추고** guard를 확인한다.
 
 - [ ] **Step 7: shipped YAML xfail 해제**
 
@@ -5703,19 +5871,38 @@ BODY
 | §7 성공기준 | Task 5(HTML), Task 4(독립 on/off), Task 3(입력만), Task 18(전체 스위트) |
 | §8 리스크(이식 폭·추출 동작변화·소스 정합·자산 재사용·DEPRECATED) | 각 태스크의 게이트 + Task 18 문서 |
 
-**갭 1건 — 의도적 범위 조정:** 스펙 §7의 "입력 데이터만 사용(모델 예측값 미참조)"은
-preds 의존 4종과 충돌한다. 사용자 결정(2026-07-28)으로 **artifact 읽기만 허용**으로
-경계를 재정의했고, `event_prior_validation`은 원래의 base vs prior A/B(모델 실행 필요)를
-artifact 대 artifact A/B + 단일 artifact 모드로 재정의했다(Task 17에 명시).
+| §116 시각화 자산 재사용 | Global Constraints — **재사용 거부 결정 + 근거 3항** (`fig_to_div` 패턴만 재사용) |
+
+**의도적 범위 조정 2건 (갭 아님, 근거 기록됨):**
+1. 스펙 §7의 "입력 데이터만 사용(모델 예측값 미참조)"은 preds 의존 4종과 충돌한다. 사용자
+   결정(2026-07-28)으로 **artifact 읽기만 허용**으로 경계를 재정의했다. `event_prior_validation`은
+   base vs prior A/B가 원래 모델 실행을 요구했으므로, Task 17 Step 6b에서 `layers: []` harness
+   실행으로 **baseline artifact를 만들어 artifact 대 artifact A/B를 기본 동작으로** 만든다
+   (baseline이 없을 때만 단일 artifact 모드로 강등되고, 그 사실이 verdict에 표기된다).
+2. `popularity_stockout`은 출처의 "옛 라벨 vs 새 라벨" A/B가 canonical에 옛(오염) 라벨이
+   없어 불가능하다. **원시 인기 vs 매진 부스트 배분 순위** 비교로 재정의하고 title도
+   "매진 부스트가 배분 순위를 재배열하는가"로 맞췄다(Task 13에 명시).
 
 **2. Placeholder 스캔** — TBD/TODO/"적절히 처리"/"Task N과 유사" 없음. 모든 코드 스텝에
-실제 코드 블록이 있다. 단, 아래 3곳은 **구현 시 확인 명령이 함께 제공된 필드명 확인 지점**이며
-플레이스홀더가 아니다(확인 명령과 대체 규칙 명시):
-- Task 12: `KinkResult`/`DepthResult`/`SurplusResult`/`AlphaEstimate`/`RegimeResult` 필드명
-- Task 13: `estimated_lost_demand`/`compute_popularity_signals`/`stockout_hour_distribution` 반환 컬럼
-- Task 14: `MnlResult`/`NestedLogitResult` 필드명, Task 17: `STORE_EVENT_PRIORS` 자료구조
+실제 코드 블록이 있다. **미확정 필드명 4곳은 2026-07-28에 실측해 플랜에 확정 반영했다**
+(추측 fallback 체인 제거):
+- `AlphaEstimate(alpha_low, alpha_high, a1, a2, a3_slope, note)` / `KinkResult(..., alpha, note)` /
+  `DepthResult(..., alpha, note)` / `SurplusResult(n, slope, se, clearance_high, note)` — **A3에 alpha 없음**
+- `run_discount_regime` → **dict**(`closing_share`/`closing_intensity`/`placebo`/`verdict`),
+  `RegimeResult(beta, se, ci_low, ci_high, n, n_params, cut_date, ill_posed)` — **p_value 없음**
+- `estimated_lost_demand` → `lost_units`(+ 로컬 `potential_demand`는 드롭),
+  `stockout_hour_distribution` → 품목×요일 `stockout_hour_mean`(히스토그램 아님),
+  `compute_popularity_signals` → `avg_daily_sold` 등 15컬럼(boosted 없음)
+- `MnlResult(utilities, substitution, outflow_ratio)` / `NestedLogitResult(..., lambdas, ...)`
+- `STORE_EVENT_PRIORS` 키=영문 라벨, `events={명:(월,일)}`, `lunar_events={명:{연도:날짜}}`
 
 **3. 타입 일관성** — `AnalysisResult`/`SkippedResult`/`AnalysisReport`(Task 1), `Handler`(Task 4),
 `AnalysisInputs`(Task 3), `AnalysisSpec`(Task 2) 이름이 Task 5~17에서 동일하게 쓰인다.
 `register_data`/`register_hypothesis` 데코레이터 시그니처, `KIND_DATA`/`KIND_HYPOTHESIS`,
-`REASON_*` 상수도 일관. `fig_to_div(fig, div_id, *, include_js, height)`는 harness와 동일 계약.
+`REASON_*` 상수(4종)도 일관. `fig_to_div(fig, div_id, *, include_js, height)`는 harness와 동일 계약.
+핸들러 테스트의 stub은 `tests/analysis_lab/conftest.py`의 `stub_inputs` 팩토리 하나로 통일했다.
+
+**4. 게이트 무력화 방지** — `needs_single_store` 게이트(Task 4)로 광교 전용 소스
+(`category_daily`)를 쓰는 `holiday_premium`/`month_dow_adjust`가 multistore spec에서
+실행되지 않게 막았다. 게이트가 없으면 광교 수치가 4매장 분석으로 라벨링되는 조용한
+오데이터가 된다.
