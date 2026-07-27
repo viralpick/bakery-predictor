@@ -109,8 +109,8 @@ def test_waste_frame_renames_without_transforming_values():
     assert set(waste.columns) >= {"item_id", "date", "production_qty", "waste_qty"}
     assert waste["cd"].unique().tolist() == ["1000000047"]
     # 순수 rename 계약: made→production_qty, out→waste_qty 값 변형 없음.
-    # 음수 waste_qty는 전일 재고 이월(carry-in)로 판매가 당일 생산을 초과한 실제 신호이며
-    # (해당 행에서 identity_diff==0), clip하면 항등식이 깨지고 폐기율이 부풀려진다.
+    # 음수 waste_qty는 전일 재고 이월(carry-in)로 판매가 당일 생산을 초과한 실제 신호다.
+    # clip하면 항등식이 더 깨지고 폐기율이 부풀려지므로 로더는 값을 건드리지 않는다.
     raw = pd.read_parquet(paths.dataset("waste_alpha_4stores"))
     raw = raw[raw["cd"].astype(str) == "1000000047"].reset_index(drop=True)
     assert waste["production_qty"].tolist() == raw["made"].tolist()

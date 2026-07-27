@@ -120,9 +120,12 @@ class AnalysisInputs:
     def waste(self) -> pd.DataFrame:
         """생산/폐기/마감 실측(4매장). production_qty=made, waste_qty=out.
 
-        waste_qty 음수는 전일 재고 이월(carry-in)로 판매가 당일 생산을 초과한 경우다
-        (그 행에서도 made−(normal+closing)−out=0 항등식은 성립). 값을 clip하지 않는다 —
-        clip하면 항등식이 깨지고 폐기율(1차 KPI)이 부풀려진다.
+        waste_qty 음수는 전일 재고 이월(carry-in)로 판매가 당일 생산을 초과한 경우다.
+        값을 clip하지 않는다 — clip하면 made−(normal+closing)−out 항등식이 더 깨지고
+        폐기율(1차 KPI)이 부풀려진다(광교 0.12532→0.12933).
+        참고(2026-07-28 실측): 항등식 잔차 0 비율은 전체 91.83%, out<0 행 88.80%
+        (8,108행 중 908행 위반, |잔차| max 25.0) — 음수 행이 오히려 약간 더 나쁘다.
+        항등식 자체의 진단은 analysis/lab/handlers/waste.py(waste_alpha_identity)가 담당한다.
         """
         df = pd.read_parquet(paths.dataset("waste_alpha_4stores"))
         df["cd"] = df["cd"].astype(str)
