@@ -21,6 +21,7 @@ htmlcov/
 *.parquet
 *.csv
 !tests/**/*.csv
+!docs/phase7/*.csv
 
 # OS / IDE
 .DS_Store
