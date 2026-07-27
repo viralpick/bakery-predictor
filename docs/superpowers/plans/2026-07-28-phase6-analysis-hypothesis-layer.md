@@ -20,7 +20,10 @@
 - **이 레이어는 모델을 실행하지 않는다** — `windowed_backtest`, LightGBM fit, `predict_*` 호출 금지. 모델 예측이 필요한 가설은 `spec.predictions`가 가리키는 **harness-run 산출 artifact(`predictions.csv`)를 읽기만** 한다. artifact가 없으면 실행하지 않고 리포트에 `preds_required`로 표기한다(사용자 결정, 2026-07-28).
 - **DEPRECATED 3종 이식 금지** — `diag_anchor_gh`, `diag_chuseok_gh`, `diagnose_conformal_residual`. v5 conformal 구간예측은 점추정+위험수치로 전환되며 폐기됐다. spec에서 이 이름을 쓰면 에러.
 - **회귀 대조 게이트 = 동일 vintage 실측 대조** (사용자 결정, 2026-07-28). `docs/*_result.md`에 기록된 수치를 golden으로 쓰지 않는다 — Phase 7 신규데이터 편입으로 값이 이동했다(헤드라인 WAPE 8.03→7.72). 게이트 형태는 두 가지뿐:
-  1. **frozen-input 대조**: 출처 스크립트가 읽던 동결 artifact(`reports/raw_adjusted_series.csv`, `reports/track3_fresh_preds.parquet`)를 추출 함수에 먹여 **이 플랜에 박힌 golden 수치**와 비교. golden은 2026-07-28에 실제 실행해 캡처한 값이다.
+  1. **frozen-input 대조**: 동결 artifact를 추출 함수에 먹여 **이 플랜에 박힌 golden 수치**와 비교. golden은 2026-07-28에 실제 실행해 캡처한 값이다.
+     - **★ 동결 artifact는 `tests/fixtures/frozen/`에 git 추적 상태로 둔다**(architect 결정 2026-07-28). 원래 `reports/`는 `.gitignore:19 /reports/`로 무시되므로, 거기서 읽으면 다른 머신·CI에서 golden 테스트가 조용히 `skip`되고 스위트는 green으로 보인다 — 이식 정확성 게이트가 로컬 전용이 되는 구조적 결함(Task 8 리뷰에서 포착). `.gitignore`에 `!tests/**/*.csv`(기존)와 `!tests/**/*.parquet`(신규) 예외가 있다.
+     - 추적 fixture가 없으면 `skip`이 아니라 **실패**여야 한다(체크아웃 파손 신호).
+     - 출처 스크립트(wrapper)도 같은 추적 경로를 읽어 golden 테스트와 드리프트하지 않게 한다.
   2. **동일 입력 등가**: 스크립트를 추출 함수의 얇은 wrapper로 바꾼 뒤, 같은 DataFrame을 두 경로에 먹여 동일 출력 확인.
   - 레거시 EDA 스크립트(`eda01`~`eda05`)는 `data/internal/v2/` 원본 시트를 다른 필터(`FG_ITEM=='SS'`, beverage/etc 포함)로 읽으므로 **수치 등가 게이트가 불가능**하다. 이 5종은 canonical 입력 위에서의 재표현이며, 게이트는 구조 불변식(비중 합=1.0, 폐기율∈[0,1], 항등식 잔차)으로 한다. 근거를 핸들러 docstring과 리포트 note에 남긴다.
 - **테스트 단언 강도** — 기대값을 아는 단언은 정확값 비교(`==`, float는 `pytest.approx(..., rel=1e-9)`). truthy(`assert x`)·부분 문자열(`in`) 금지. 예외는 비결정적 값(타임스탬프)이나 계약이 "존재 여부"인 경우만, 이유를 주석으로.
@@ -3032,7 +3035,8 @@ git commit -m "feat(analysis-lab): holiday_premium 이식 — 스크립트 추�
 """order_bias 프리미티브 — 동결 preds 캐시 golden 대조.
 
 golden은 2026-07-28에 `scripts/weekday_bias_isowaste.py`의 함수를
-reports/track3_fresh_preds.parquet(2026-07-18 생성, 동결)에 직접 돌려 캡처했다.
+2026-07-18 생성 동결 preds(현재 `tests/fixtures/frozen/track3_fresh_preds.parquet`, git 추적)에
+직접 돌려 캡처했다.
 """
 from pathlib import Path
 
@@ -3046,13 +3050,14 @@ from bakery.analysis.order_bias import (
     solve_base_for_waste, soldout_freq, soldout_mag, waste_rate_of,
 )
 
-FROZEN_PREDS = Path("reports/track3_fresh_preds.parquet")
+FROZEN_PREDS = Path("tests/fixtures/frozen/track3_fresh_preds.parquet")   # git 추적(Task 8에서 이동)
 
 
 @pytest.fixture(scope="module")
 def frozen_preds():
-    if not FROZEN_PREDS.exists():
-        pytest.skip(f"{FROZEN_PREDS} 없음 — 동결 입력 대조 스킵")
+    # 추적 fixture다 — 없으면 체크아웃 파손이므로 skip이 아니라 실패여야 한다
+    # (gitignore된 reports/를 읽던 옛 경로에선 CI가 조용히 skip하고 green으로 보였다).
+    assert FROZEN_PREDS.exists(), f"{FROZEN_PREDS} 없음 — 추적 fixture가 누락됐다"
     preds = pd.read_parquet(FROZEN_PREDS)
     preds["date"] = pd.to_datetime(preds["date"])
     return preds
@@ -3295,8 +3300,8 @@ def isowaste_grid(preds: pd.DataFrame, *, w_targets: tuple[float, ...] = W_TARGE
 ```python
 """실제 레버 검증 — 평일(월·수) 과대예측 트림이 전역 균일 하향을 iso-waste에서 이기는가.
 
-계산은 `bakery.analysis.order_bias`로 옮겼다(Phase 6). 이 스크립트는 동결 캐시
-reports/track3_fresh_preds.parquet를 읽어 격자 결과를 print하는 wrapper다.
+계산은 `bakery.analysis.order_bias`로 옮겼다(Phase 6). 이 스크립트는 동결 fixture
+tests/fixtures/frozen/track3_fresh_preds.parquet(git 추적)를 읽어 격자 결과를 print하는 wrapper다.
 현 vintage/canonical preds 실행은 `bakery analysis-run`(hypotheses.weekday_bias)을 쓴다.
 
 실행: PYTHONPATH=scripts uv run python scripts/weekday_bias_isowaste.py
@@ -3309,7 +3314,7 @@ import pandas as pd
 
 from bakery.analysis.order_bias import TARGET_DOWS, isowaste_grid, waste_rate_of
 
-CACHE = Path("reports/track3_fresh_preds.parquet")
+CACHE = Path("tests/fixtures/frozen/track3_fresh_preds.parquet")   # git 추적 동결 fixture
 
 
 def _load() -> pd.DataFrame:
