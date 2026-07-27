@@ -113,9 +113,9 @@ Expected: PASS
 
 Run: `uv run pytest tests/test_forecast_forward.py tests/harness/test_backtest_core_equivalence.py tests/harness/test_backtest_core_distributional.py tests/harness/test_forecasters.py -v`
 
-판정:
-- **동등성 테스트(`test_backtest_core_equivalence`)가 "추출 코어 == 원본 스크립트" 대조라면** 양쪽 다 같은 `build_category_daily`를 쓰므로 소스 교체와 무관하게 통과해야 한다. → 통과면 OK.
-- **고정 WAPE/값 anchor를 assert하는 테스트가 실패하면**: 그 기대값이 옛 0520 소스 기준이므로, 신규 소스로 실제 값을 재측정해 기대값을 갱신하고, 주석에 "신규 클린 parquet closing 소스 기준(Task 0)"을 남긴다. 값이 비결정적이 아니므로 정확값(rtol 명시)으로.
+판정 (두 실패 모드를 반드시 구분 — advisor):
+- **동등성 테스트(`test_backtest_core_equivalence`, 추출 코어 == 원본 스크립트, rtol=1e-9)**: 양쪽 다 같은 `build_category_daily`를 통과하므로 Task 0 후 둘이 함께 움직여 **여전히 통과해야 한다**. 만약 **실패하면 이것은 진짜 회귀** — 기대값을 re-baseline하지 말고 원인을 규명하라(추출 코어와 원본의 closing 소스가 갈렸다는 신호).
+- **pinned sanity-anchor 상수(예: WAPE ~8.03)만** 옛 0520 소스 기준이므로 신규 소스로 재측정해 갱신 대상이다. 갱신 시 주석 "신규 클린 parquet closing 소스 기준(Task 0)", 정확값(부동소수는 rtol 명시).
 - `test_store_daily_redefine`는 **이 PR 이전부터 실패하는 사전존재 이슈**(라인레벨 데이터로 is_stockout 재정의 후 기대값 미갱신) — 이 태스크와 무관. 상태만 확인하고 별도 처리.
 
 - [ ] **Step 6: 전체 스위트 실행 (크로스파일 회귀 게이트)**
@@ -365,7 +365,7 @@ Claude-Session: https://claude.ai/code/session_012iHLiUwcdPQUrQZqM5WUKv"
 **전제:** Task 0 완료(closing 소스 신규). 미완료면 delta 보고 금지.
 
 **Files:**
-- Create: `reports/phase7/gwangyo_headline_remeasure.md` (delta 리포트)
+- Create: `docs/phase7/gwangyo_headline_remeasure.md` (delta 리포트 — **tracked 경로**. `reports/`는 gitignored이라 헤드라인 산출물이 커밋 안 됨. harness가 `reports/`에 자동생성하는 comparison.csv/HTML은 원본으로 두고, 손으로 쓰는 delta 리포트만 `docs/phase7/`로.)
 - (코드 변경 없음 — 기존 `harness-run` 실행 + 결과 정리)
 
 **Interfaces:**
@@ -386,7 +386,7 @@ Run: `uv run python -c "import json,glob; [print(p, json.load(open(p))) for p in
 
 - [ ] **Step 3: delta 리포트 작성**
 
-`reports/phase7/gwangyo_headline_remeasure.md`에 표로 기록:
+`docs/phase7/gwangyo_headline_remeasure.md`(tracked)에 표로 기록:
 - 컬럼: 지표 | 옛 146 headline(naive WAPE 8.19 / 우리 8.03 / 폐기 −33~40%) | 새 166+신규closing | delta
 - **지표 경계 명시(필수)**: "이 delta는 146→166 품목/타깃정의 변화 + closing 소스 교체분이며, 날짜는 여전히 2021~2025-12로 2026 전향 검증이 아님."
 - 고객 지표 경로(category_total+event_prior, adjusted_demand)임을 명시. item-level WAPE 아님.
@@ -394,7 +394,8 @@ Run: `uv run python -c "import json,glob; [print(p, json.load(open(p))) for p in
 - [ ] **Step 4: Commit**
 
 ```bash
-git add reports/phase7/gwangyo_headline_remeasure.md
+mkdir -p docs/phase7
+git add docs/phase7/gwangyo_headline_remeasure.md
 git commit -m "docs: 광교 헤드라인 KPI 재측정 (새 166+신규 closing, Phase 7 Task 3)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
@@ -412,10 +413,12 @@ multistore_daily 위에서 삼성·메세나·광화문 category_total 예측을
 - Create: `reports/phase7/multistore_reference.csv`
 
 **Interfaces:**
-- Consumes: `build_category_daily(daily_raw=<store-filtered df>, alpha=0.8)` — `daily_raw` 주입으로 store 필터(harness 침습 없이). `windowed_backtest`(harness backtest_core) 또는 기존 category_total 예측 함수.
-- Produces: 매장별 총량 WAPE 참조표 CSV.
+- Consumes: `build_category_daily(daily_raw=<store-filtered df>, discount_rows=<store closing>, closing_returns=<store returns>, alpha=0.8)`. `load_sales_with_discount_v2(store_code=)`/`load_closing_returns_v2(store_code=)`(store별 closing). `STORE_CODE_MAPPING`. `windowed_backtest`/`metrics_from_preds`/`build_forecaster`(harness).
+- Produces: 매장별 총량 WAPE 참조표 CSV (tracked `docs/phase7/`).
 
-- [ ] **Step 1: 참조 스크립트 작성**
+**★오염 방지(advisor):** `build_category_daily`의 closing 기본 소스는 `load_sales_with_discount_v2()` no-args = `store_code=_GW_STORE_CODE`(광교). 타매장 `daily_raw`에 `discount_rows=None`으로 부르면 **광교 closing_qty가 (item_id,date)로 join되어 조용히 오염**(같은 베이커리 품목·날짜라 에러 없음). 반드시 store별 closing을 명시 전달한다.
+
+- [ ] **Step 1: 참조 스크립트 작성 (store별 closing 명시 전달)**
 
 ```python
 # scripts/phase7_multistore_reference.py
@@ -424,8 +427,9 @@ import sys
 sys.stdout.reconfigure(line_buffering=True)
 import pandas as pd
 from bakery.data import paths
-from bakery.features.category_aggregate import build_category_daily
-from bakery.features.category_aggregate import build_features
+from bakery.features.category_aggregate import build_category_daily, build_features
+from bakery.analysis.discount import load_sales_with_discount_v2, load_closing_returns_v2
+from bakery.ingest.inventory import STORE_CODE_MAPPING
 from bakery.harness.backtest_core import windowed_backtest, metrics_from_preds
 from bakery.harness.registry import build_forecaster
 
@@ -433,8 +437,13 @@ REFERENCE_STORES = ["store_ss01", "store_mp01", "store_gh01"]  # 광교 제외
 ms = pd.read_parquet(paths.dataset("multistore_daily"))
 rows = []
 for store_id in REFERENCE_STORES:
+    code = STORE_CODE_MAPPING[store_id]
     daily_raw = ms[ms["store_id"] == store_id].copy()
-    cd = build_category_daily(daily_raw=daily_raw, alpha=0.8)
+    # ★store별 closing 명시 전달 (기본 광교 오염 방지)
+    dr = load_sales_with_discount_v2(store_code=code).closing_discount()
+    cr = load_closing_returns_v2(store_code=code)
+    cd = build_category_daily(daily_raw=daily_raw, discount_rows=dr,
+                              closing_returns=cr, alpha=0.8)
     feat = build_features(cd, target_col="adjusted_demand_unit")
     fc = build_forecaster("category_total")
     bt = windowed_backtest(
@@ -446,20 +455,20 @@ for store_id in REFERENCE_STORES:
     rows.append({"store_id": store_id, **m})
     print(store_id, m)
 out = pd.DataFrame(rows)
-out.to_csv("reports/phase7/multistore_reference.csv", index=False)
-print("wrote reports/phase7/multistore_reference.csv")
+out.to_csv("docs/phase7/multistore_reference.csv", index=False)
+print("wrote docs/phase7/multistore_reference.csv")
 ```
 
-- [ ] **Step 2: 실행 (스모크)**
+- [ ] **Step 2: 실행 (스모크 + 오염 sanity)**
 
-Run: `uv run python scripts/phase7_multistore_reference.py`
-Expected: 3매장 각각 metrics dict 출력 + CSV 생성. 에러 없이 완주(build_category_daily가 store-filtered daily_raw로 동작). 실패 시 build_features/windowed_backtest 인자 시그니처를 `src/bakery/harness/runner.py` `_feat`·backtest 호출부와 대조해 정합.
+Run: `mkdir -p docs/phase7 && uv run python scripts/phase7_multistore_reference.py`
+Expected: 3매장 각각 metrics dict 출력 + CSV 생성. 에러 없이 완주. **오염 sanity**: 3매장 WAPE가 서로 다른 값이어야(광교 closing이 3매장에 동일 join됐다면 의심). 실패 시 build_features/windowed_backtest 인자를 `src/bakery/harness/runner.py` `_feat`·backtest 호출부와 대조.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add scripts/phase7_multistore_reference.py reports/phase7/multistore_reference.csv
-git commit -m "feat: 타 3매장 참조 예측 (event_prior 미적용, 타깃 아님, Phase 7 Task 4)
+git add scripts/phase7_multistore_reference.py docs/phase7/multistore_reference.csv
+git commit -m "feat: 타 3매장 참조 예측 (store별 closing·event_prior 미적용·타깃 아님, Phase 7 Task 4)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_012iHLiUwcdPQUrQZqM5WUKv"
@@ -472,12 +481,12 @@ Claude-Session: https://claude.ai/code/session_012iHLiUwcdPQUrQZqM5WUKv"
 drift 상태·게이트 통과·열린 결정을 durable 문서로 남기고, 전체 스위트를 최종 확인한다.
 
 **Files:**
-- Create: `reports/phase7/finalize_summary.md`
+- Create: `docs/phase7/finalize_summary.md` (tracked)
 - Modify: 메모리 `project_harness_backbone.md`, `project_new_data_20260721.md` (7단계 완료 갱신)
 
 - [ ] **Step 1: finalize 요약 문서 작성**
 
-`reports/phase7/finalize_summary.md`에 기록:
+`docs/phase7/finalize_summary.md`에 기록:
 - 게이트 3종 통과 상태(build-data max_diff=0 / integrity fail 0 / conflict 0).
 - drift 2건: 할인코드 357 미정규화(기존)·비타깃 품목 1649개(is_target_scope=False, 타깃 아님) — fail 아님, 정보성.
 - 열린 결정(범위 밖·아티제 확인 대기): 원가율 미보유(폐기비용 판매가 계열)·음료 마스터 부재로 T5 blocked·진열시간 계획/실측 미확정·전향 4주 실측(2026-06-30 컷오프, 실시간 피드 필요).
@@ -495,7 +504,8 @@ Expected: Task 0·1·2 신규 테스트 통과. 사전존재 `test_store_daily_r
 - [ ] **Step 4: Commit**
 
 ```bash
-git add reports/phase7/finalize_summary.md
+mkdir -p docs/phase7
+git add docs/phase7/finalize_summary.md
 git commit -m "docs: Phase 7 편입 마무리 요약 + 열린 결정 문서화 (Task 5)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
