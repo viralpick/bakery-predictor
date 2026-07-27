@@ -4019,7 +4019,8 @@ git commit -m "feat(analysis-lab): 폐기 3종(waste_rate/항등식/과잉생산
   - `bakery.analysis.closing_demand`: `run_closing_demand(rows, waste, item_to_category, category="bread")` → dict(`alpha`/`depth`/`surplus`/`kink`/`panel`)
     - **실측 필드명(2026-07-28 확인)**: `AlphaEstimate(alpha_low, alpha_high, a1, a2, a3_slope, note)` / `KinkResult(n_days, base, closing_total, alpha, note)` / `DepthResult(n, slope, se, base, alpha, note)` / `SurplusResult(n, slope, se, clearance_high, note)` — **SurplusResult에는 alpha가 없다**(A3는 slope만; α 환산값은 `AlphaEstimate.a3_slope`)
   - `bakery.analysis.discount_regime`: `run_discount_regime(rows, item_to_category, category, *, cut_date, placebo_cut_dates)` → **dict** `{category, cut_date, n, closing_share, closing_intensity, placebo, verdict}`
-    - `closing_share`/`closing_intensity` = `RegimeResult(beta, se, ci_low, ci_high, n, n_params, cut_date, ill_posed)` — **p_value 없음**(CI로 판정)
+    - `closing_share`/`closing_intensity` = `RegimeResult(beta, se, ci_low, ci_high, n, n_params, cut_date, ill_posed)` — **p_value 없음**(CI로 판정). ★구간은 `Z_95 = 1.959963984540054`(`discount_regime.py:33`) 기준 **95% CI**다 — `demand_absorption`의 90% CI와 신뢰수준이 달라 verdict 라벨을 `CI95`로 쓴다(고객 대면 문구에 신뢰수준 오표기 금지)
+    - ★**`rows` 인자는 영수증 라인이 아니다**(Task 12에서 포착): `build_regime_panel`이 `made` 컬럼을 요구하는 **item-day 패널**을 받으므로 `inputs.discount_rows`를 넘기면 `KeyError`로 죽는다. `regime_rows_from_waste(inputs.waste)`로 `production_qty`→`made` 되돌려 넘긴다
   - `AnalysisInputs.discount_rows`/`.waste`/`.item_to_category`
 - Produces: `closing_waste_frame(waste) -> pd.DataFrame` (item_id/date/waste_qty — `run_closing_demand`의 waste 인자 계약), `alpha_verdict(alpha: AlphaEstimate) -> str`, `regime_verdict(report: dict) -> str`, `discount_hour_table(ds, item_to_category)`, `alpha_estimates_table(report: dict) -> pd.DataFrame`, 핸들러 3개
 - `CLOSING_CATEGORY_DEFAULT = "bread"`
@@ -4115,7 +4116,7 @@ def test_regime_verdict_uses_ci_and_placebo():
               "closing_share": share, "closing_intensity": share,
               "placebo": [], "verdict": "shift"}
     assert regime_verdict(report) == (
-        "레짐 전환 shift — closing_share β=-0.0500 CI90[-0.0700,-0.0300], "
+        "레짐 전환 shift — closing_share β=-0.0500 CI95[-0.0700,-0.0300], "
         "placebo 0건, n=500 (cut=2024-01-01)")
 
 
@@ -4174,6 +4175,16 @@ def closing_waste_frame(waste: pd.DataFrame) -> pd.DataFrame:
     return waste[["item_id", "date", "waste_qty"]].reset_index(drop=True)
 
 
+def regime_rows_from_waste(waste: pd.DataFrame) -> pd.DataFrame:
+    """run_discount_regime의 rows 인자 계약 — 영수증 라인이 아니라 **item-day 패널**이다.
+
+    `build_regime_panel`이 `made` 컬럼을 요구하므로 `production_qty`를 되돌려 준다
+    (기존 CLI `cmd_regime_alpha`, src/bakery/cli.py:1977 배선과 동일). 값은 변형하지
+    않는다 — 음수 waste_qty를 clip하면 폐기율이 부풀려진다(전일 재고 이월, 실측 2.89%).
+    """
+    return waste.rename(columns={"production_qty": "made"})
+
+
 def discount_hour_table(ds: DiscountSales, item_to_category: pd.Series) -> pd.DataFrame:
     """카테고리×시각 마감할인 수량. 반환 컬럼(실측) = category_id, hour, qty, loss_won, rows."""
     return closing_by_category_hour(ds, item_to_category)
@@ -4204,10 +4215,12 @@ def alpha_estimates_table(report: dict) -> pd.DataFrame:
 
 
 def regime_verdict(report: dict) -> str:
-    """run_discount_regime 반환 dict → 판정. p_value가 없어 CI90로 읽는다."""
+    """run_discount_regime 반환 dict → 판정. p_value가 없어 CI로 읽는다."""
     share = report["closing_share"]
+    # CI95: discount_regime.Z_95(1.9599…) 기준 — demand_absorption의 CI90(norm.ppf(0.95)
+    # two-sided)과 신뢰수준이 다르다. 프리미티브가 만드는 구간을 그대로 라벨링한다.
     return (f"레짐 전환 {report['verdict']} — closing_share β={share.beta:.4f} "
-            f"CI90[{share.ci_low:.4f},{share.ci_high:.4f}], "
+            f"CI95[{share.ci_low:.4f},{share.ci_high:.4f}], "
             f"placebo {len(report['placebo'])}건, n={report['n']} "
             f"(cut={pd.Timestamp(report['cut_date']).date()})")
 
@@ -4307,7 +4320,8 @@ def other_discounts(inputs: AnalysisInputs) -> AnalysisResult:
 def discount_regime(inputs: AnalysisInputs) -> AnalysisResult:
     params = inputs.params_for("discount_regime")
     category = params.get("category", CLOSING_CATEGORY_DEFAULT)
-    report = run_discount_regime(inputs.discount_rows, inputs.item_to_category, category,
+    report = run_discount_regime(regime_rows_from_waste(inputs.waste),
+                                 inputs.item_to_category, category,
                                  **{k: v for k, v in params.items() if k != "category"})
     rows = [{"outcome": name, "beta": result.beta, "se": result.se,
              "ci_low": result.ci_low, "ci_high": result.ci_high, "n": result.n,
