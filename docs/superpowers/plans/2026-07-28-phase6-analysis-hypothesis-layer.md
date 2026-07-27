@@ -4129,8 +4129,11 @@ def test_other_discounts_handler_shape(stub_inputs):
     assert result.verdict == "마감 외 할인 0건 — 이 매장은 마감할인이 전부다"
     # 빈 결과에서도 라벨별 스키마가 유지돼야 한다(오라벨 방지)
     tables = dict(result.tables)
-    assert tables["by_code"].columns.tolist() == ["discount_code", "n_lines", "qty"]
-    assert tables["by_label"].columns.tolist() == ["label", "n_lines", "qty"]
+    assert tables["by_code"].columns.tolist() == [
+        "discount_code", "label", "rows", "qty_total", "amt_total", "avg_amt",
+        "peak_hour", "share_at_pm8"]
+    assert tables["by_label"].columns.tolist() == [
+        "label", "rows", "qty_total", "amt_total", "share_at_pm8"]
     assert tables["by_hour"].columns.tolist() == ["discount_code", "hour", "qty"]
     assert len(tables["by_code"]) == 0
 ```
@@ -4172,6 +4175,7 @@ def closing_waste_frame(waste: pd.DataFrame) -> pd.DataFrame:
 
 
 def discount_hour_table(ds: DiscountSales, item_to_category: pd.Series) -> pd.DataFrame:
+    """카테고리×시각 마감할인 수량. 반환 컬럼(실측) = category_id, hour, qty, loss_won, rows."""
     return closing_by_category_hour(ds, item_to_category)
 
 
@@ -4248,15 +4252,23 @@ def closing_discount(inputs: AnalysisInputs) -> AnalysisResult:
 
 
 # 빈 결과에서도 테이블 스키마를 유지한다 — 라벨과 컬럼이 어긋나면 CSV 소비자가 깨진다.
+# ★컬럼은 2026-07-28 실측(discount_summary/label_summary 실제 반환)과 정확히 일치시킨 것이다.
 _EMPTY_BY_HOUR = pd.DataFrame({"discount_code": pd.Series(dtype="object"),
                                "hour": pd.Series(dtype="int64"),
                                "qty": pd.Series(dtype="float64")})
 _EMPTY_BY_CODE = pd.DataFrame({"discount_code": pd.Series(dtype="object"),
-                               "n_lines": pd.Series(dtype="int64"),
-                               "qty": pd.Series(dtype="float64")})
+                               "label": pd.Series(dtype="object"),
+                               "rows": pd.Series(dtype="int64"),
+                               "qty_total": pd.Series(dtype="float64"),
+                               "amt_total": pd.Series(dtype="float64"),
+                               "avg_amt": pd.Series(dtype="float64"),
+                               "peak_hour": pd.Series(dtype="float64"),
+                               "share_at_pm8": pd.Series(dtype="float64")})
 _EMPTY_BY_LABEL = pd.DataFrame({"label": pd.Series(dtype="object"),
-                                "n_lines": pd.Series(dtype="int64"),
-                                "qty": pd.Series(dtype="float64")})
+                                "rows": pd.Series(dtype="int64"),
+                                "qty_total": pd.Series(dtype="float64"),
+                                "amt_total": pd.Series(dtype="float64"),
+                                "share_at_pm8": pd.Series(dtype="float64")})
 
 
 def _discount_code_hour_fig(by_hour: pd.DataFrame) -> go.Figure:
@@ -4321,17 +4333,16 @@ def discount_regime(inputs: AnalysisInputs) -> AnalysisResult:
     )
 ```
 
-**빈 스키마 주의:** `_EMPTY_BY_CODE`/`_EMPTY_BY_LABEL`의 컬럼은 `discount_summary`/`label_summary`의 실제 반환 컬럼과 **정확히 같아야** 한다. 구현 시 확인해 맞춘다:
+**빈 스키마 = 실측 확정(2026-07-28):** `discount_summary` → `discount_code, label, rows, qty_total, amt_total, avg_amt, peak_hour, share_at_pm8` / `label_summary` → `label, rows, qty_total, amt_total, share_at_pm8` / `closing_by_category_hour` → `category_id, hour, qty, loss_won, rows`. `_EMPTY_*`와 테스트 기대 리스트는 이 이름들로 이미 맞춰져 있다. 재확인이 필요하면:
 
 ```bash
 uv run python -c "
-from bakery.analysis.discount import DiscountSales, discount_summary, label_summary, load_sales_with_discount_v2
+from bakery.analysis.discount import discount_summary, label_summary, load_sales_with_discount_v2
 ds = load_sales_with_discount_v2()
 print('by_code:', discount_summary(ds).columns.tolist())
 print('by_label:', label_summary(ds).columns.tolist())
 "
 ```
-확인 결과와 다르면 `_EMPTY_*` 정의와 위 테스트의 기대 컬럼 리스트를 **둘 다** 그 이름으로 고친다.
 
 - [ ] **Step 4: 통과 확인** — Run: `uv run pytest tests/analysis_lab/test_handlers_discount.py -v` / Expected: PASS (8 passed)
 
