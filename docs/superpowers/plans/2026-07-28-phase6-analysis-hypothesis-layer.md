@@ -27,6 +27,7 @@
 - **코드 품질** — 함수 30줄 이내(빈 줄 제외), 인자 4개 초과 시 dict/객체로 묶기, 중첩 3단계 초과 금지, guard clause 우선, 매직값 금지(상수화), 불리언은 `is_`/`has_`/`needs_` 접두어.
 - **산문은 한국어** — docstring·리포트 텍스트·판정 문구 전부 한국어(코드 심볼은 영어).
 - **`uv run pytest`로 실행**. repo `addopts`에 이미 `-q`가 있으므로 `-q`를 추가로 붙이지 않는다(`-qq`가 되어 passed 요약이 사라짐). 카운트가 필요하면 `--color=no`.
+- **태스크별 테스트 게이트는 스코프 한정** — 각 태스크는 자기가 만든 테스트 파일 + `tests/analysis_lab/` 디렉토리까지만 돌린다. **전체 repo 스위트(`uv run pytest`)는 PR 경계(Task 9)와 마감(Task 18)에서만** 돌린다. 전체 스위트는 수 분 걸려 foreground 한도를 넘고, 백그라운드로 넘어가면 구현자가 결과를 기다리다 커밋 없이 멈춘다(Task 4에서 실제 발생).
 - **기존 시각화 자산 재사용 거부(스펙 §116 대응 결정)** — `scripts/build_dashboard.py`(1209줄)·`weekly_overlay_series.py`를 재사용하지 않는다. 근거: (1) 두 스크립트는 예측 산출물 대시보드용이라 이 레이어의 섹션 구조(항목별 제목+그래프+표+판정)와 계약이 다르다, (2) 1209줄 모놀리스에서 함수를 끌어오면 `analysis/lab`이 `scripts/`에 의존하게 되어 "paths 기반 canonical 입력만" 원칙이 깨진다, (3) 핸들러당 figure는 1~2개짜리 20줄 이하라 추출 비용이 재작성 비용보다 크다. 대신 **`fig_to_div` stateless 패턴은 harness `report.py`에서 그대로 재사용**한다(자기포함 HTML의 핵심 자산).
 - **plotly 경계 결정(의도적 이탈)** — harness는 "코어는 viz 무의존"이지만 `AnalysisResult.figures`는 핸들러가 plotly Figure를 담는다. 대신 **회귀 대조·수치 테스트는 `tables`/`verdict`에만** 걸어 핸들러 검증이 plotly 없이 성립하게 한다. 이는 드리프트가 아니라 결정이다.
 
@@ -1108,8 +1109,12 @@ def test_only_enabled_items_run(fake_registry, tmp_path):
 
 
 def test_off_item_is_recorded_with_reason_off(fake_registry, tmp_path):
-    report = run_analysis(_spec(hypotheses={"stub_hypo": False}), out_dir=tmp_path)
-    assert [(s.name, s.reason) for s in report.skipped] == [("stub_hypo", REASON_OFF)]
+    # 주의: 미요청 registry 항목도 off로 남는 계약(다음 테스트)이 있으므로 skipped 전체를
+    # 한 항목으로 단언할 수 없다. 여기서는 명시적으로 False를 준 항목만 좁혀 확인한다.
+    report = run_analysis(_spec(data_analyses={"stub_data": True},
+                                hypotheses={"stub_hypo": False}), out_dir=tmp_path)
+    assert [(s.name, s.reason) for s in report.skipped
+            if s.name == "stub_hypo"] == [("stub_hypo", REASON_OFF)]
 
 
 def test_unrequested_registry_items_are_also_listed_as_off(fake_registry, tmp_path):
