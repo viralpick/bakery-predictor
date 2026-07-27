@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 
 from ...data.loader import DailyDataset
+from .. import explain
 from .. import functions as fn
 from .. import scenario
 from .constants import CALENDAR, FRAMES
@@ -72,6 +73,29 @@ TOOL_SPECS: list[ToolSpec] = [
                  "base_order": {"type": "number"}},
               "required": ["store_id", "item_id", "period", "driver_overrides", "base_order"],
               "additionalProperties": False}),
+    ToolSpec("explain_category_total",
+             "Decompose a store's forward category production total: Stage1 base forecast "
+             "→ event_prior anchor adjustment (actual blend delta, not a fixed rule) "
+             "→ production quantile buffer → prior_prod.",
+             {"type": "object", "properties": {
+                 "store_id": {"type": "string"},
+                 "date": {"type": "string", "description": "forward horizon date YYYY-MM-DD"}},
+              "required": ["store_id", "date"], "additionalProperties": False}),
+    ToolSpec("explain_item_order",
+             "Decompose one item's forward production: category total × item proportion "
+             "(base×trend×stockout×closing×new factors) → item order → batch rounding (3/6/9).",
+             {"type": "object", "properties": {
+                 "store_id": {"type": "string"}, "item_id": {"type": "string"},
+                 "date": {"type": "string", "description": "forward horizon date YYYY-MM-DD"}},
+              "required": ["store_id", "item_id", "date"], "additionalProperties": False}),
+    ToolSpec("rank_forward_items",
+             "Top-k items by forward production quantity (our_order) for a store on a date. "
+             "Use to find which items are produced most next week, then explain one with explain_item_order.",
+             {"type": "object", "properties": {
+                 "store_id": {"type": "string"},
+                 "date": {"type": "string", "description": "forward horizon date YYYY-MM-DD"},
+                 "k": {"type": "integer"}},
+              "required": ["store_id", "date", "k"], "additionalProperties": False}),
 ]
 
 
@@ -117,4 +141,12 @@ def _call(name: str, a: dict, dataset: DailyDataset):
             dataset.daily, dataset.calendar, dataset.weather,
             a["store_id"], a["item_id"], tuple(a["period"]), overrides,
             base_order=a["base_order"], train_cutoff=a["period"][0])
+    if name == "explain_category_total":
+        return explain.explain_category_total(
+            a["store_id"], daily=dataset.daily, date=a["date"], use_forecast=False)
+    if name == "explain_item_order":
+        return explain.explain_item_order(
+            a["store_id"], a["item_id"], daily=dataset.daily, date=a["date"], use_forecast=False)
+    if name == "rank_forward_items":
+        return explain.rank_forward_items(a["store_id"], daily=dataset.daily, date=a["date"], k=a["k"], use_forecast=False)
     raise KeyError(f"unknown tool: {name}")

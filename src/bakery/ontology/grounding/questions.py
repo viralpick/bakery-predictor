@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+from .. import explain
 from .. import functions as fn
 from ...data.loader import DailyDataset
 from .constants import CALENDAR, DECOMPOSITION, NUMERIC, RANKING, WEATHER
@@ -35,6 +36,23 @@ def _ctx(dataset: DailyDataset):
     dd = pd.to_datetime(daily.loc[daily["store_id"] == store, "date"])
     period = (str(dd.min().date()), str(dd.max().date()))
     return store, period
+
+
+def _forward_ctx(dataset: DailyDataset):
+    """explain 질문용 forward 컨텍스트: (store, 마지막 관측일 다음날).
+
+    _ctx(historical)와 달리 forward 대상. forecast_forward가 결정론이라 gold 재현 가능.
+    """
+    store = sorted(dataset.daily["store_id"].unique())[0]
+    dd = pd.to_datetime(dataset.daily.loc[dataset.daily["store_id"] == store, "date"])
+    first_future = (dd.max() + pd.Timedelta(days=1)).date()
+    return store, str(first_future)
+
+
+def _forward_top_item(dataset: DailyDataset, store: str, date: str) -> str:
+    """forward our_order 최대 품목 = rank_forward_items top1 (단일 소스)."""
+    ranked = explain.rank_forward_items(store, daily=dataset.daily, date=date, k=1, use_forecast=False)
+    return str(ranked["item_id"].iloc[0])
 
 
 QUESTIONS: list[Question] = [
@@ -61,6 +79,12 @@ QUESTIONS: list[Question] = [
     Question("q_rank_top1", "매진 위험이 가장 높은 1개 품목은?", RANKING, "rank_stockout_risk", {"k": 1}),
     Question("q_diff_offday", "휴무일일 때 평균에서 비휴무일일 때 평균을 뺀 일 판매량 차이는? (휴무일이 더 높으면 양수)",
              NUMERIC, "demand_diff_by_condition", {"condition_col": "is_off_day", "frame": CALENDAR}),
+    Question("q_explain_total",
+             "다음주 이 매장의 빵 카테고리 생산총량은? base 예측·특수일 보정·분위수 버퍼로 분해하면?",
+             NUMERIC, "explain_category_total", {}),
+    Question("q_explain_item",
+             "다음주 이 매장에서 가장 많이 생산하는 품목의 생산량은? 카테고리 총량과 품목 비중으로 분해하면?",
+             DECOMPOSITION, "explain_item_order", {}),
 ]
 
 
@@ -108,4 +132,19 @@ def build_gold(question: Question, dataset: DailyDataset) -> dict:
         if not math.isfinite(value):
             raise ValueError(f"non-finite gold for {question.id}: {value}")
         return {"answer_value": value}
+    if question.source_fn == "explain_category_total":
+        store, date = _forward_ctx(dataset)
+        rows = explain.explain_category_total(store, daily=dataset.daily, date=date, use_forecast=False)
+        value = float(rows.set_index("step")["value"]["prior_prod"])
+        if not math.isfinite(value):
+            raise ValueError(f"non-finite gold for {question.id}: {value}")
+        return {"answer_value": value}
+    if question.source_fn == "explain_item_order":
+        store, date = _forward_ctx(dataset)
+        item = _forward_top_item(dataset, store, date)
+        rows = explain.explain_item_order(store, item, daily=dataset.daily, date=date, use_forecast=False)
+        value = float(rows.set_index("step")["value"]["final"])
+        if not math.isfinite(value):
+            raise ValueError(f"non-finite gold for {question.id}: {value}")
+        return {"item_id": item, "order_qty": value}
     raise KeyError(question.source_fn)
