@@ -3640,11 +3640,14 @@ git commit -m "feat(analysis-lab): sales_distribution 핸들러"
 
 **항등식 정의:** `waste_alpha_4stores`의 `identity_diff`는 `production − sold_total − waste`의 잔차다(빌드 시 계산됨). 이 핸들러는 잔차를 **재계산하지 않고 검증**한다: `production_qty − (normal_qty + closing_qty) − waste_qty`가 `identity_diff`와 일치하는지 확인하고, 0이 아닌 행의 비중·크기를 표로 낸다. 재계산 공식이 컬럼과 어긋나면 그 자체가 발견이므로 note에 남긴다.
 
-**★ carry-in 음수 폐기 (2026-07-28 실측 확인, Task 3에서 발견):** `waste_qty`(=`out`)는 8,108/280,779행(2.89%, min −282, 4매장 전부)에서 **음수**다. 손상이 아니라 **전일 재고 이월** 신호다 — 판매가 당일 생산을 초과한 경우이며, 그 행에서도 `identity_diff == 0`이다(`out`은 정의상 `made − sold`). 따라서:
-- **clip 금지.** 광교 폐기율이 0.12532 → 0.12933로 +3.2% 상대 부풀려진다(1차 KPI 왜곡).
-- 항등식 검증은 음수 영향 없음(정의상 성립) — `identity_residual`은 그대로 둔다.
+**★ carry-in 음수 폐기 + 항등식 잔차 실측 (2026-07-28, Task 3에서 발견):**
+- `waste_qty`(=`out`)는 8,108/280,779행(**2.89%**, min −282, 4매장 전부)에서 **음수**다. 손상이 아니라 **전일 재고 이월** 신호다 — 판매가 당일 생산을 초과한 경우.
+- **재계산 공식은 검증됐다:** `made − (normal_qty + closing_qty) − out`이 저장된 `identity_diff`를 **100% 일치**로 재현한다. 즉 아래 잔차율은 공식 불일치가 아니라 **실제 데이터 성질**이다.
+- **항등식 잔차 0 비율(실측):** 전체 **91.83%** / `out<0` 행 **88.80%**(8,108행 중 908행 위반, |잔차| max **25.0**) / `out≥0` 행 **91.92%**. → 음수 행이 오히려 **약간 더 나쁘다**. "음수 행은 정의상 항등식이 성립한다"는 서술은 **틀렸다**(초기 ruling의 과일반화를 리뷰에서 교정).
+- **clip 금지.** 광교 폐기율이 0.12532 → 0.12933로 +3.2% 상대 부풀려지고(1차 KPI 왜곡), 항등식 잔차도 더 커진다.
 - 폐기율은 순합(net) 기준이며, 이를 **note에 명시**해 소비자가 gross로 오독하지 않게 한다.
 - 매장별 carry-in 행수/합계를 `by_store` 표에 컬럼으로 실어 은폐하지 않는다.
+- `identity_residual`은 잔차를 **재계산해 저장값과 대조**하는 현 설계를 유지한다(공식이 검증됐으므로 대조는 데이터 성질 측정이 된다). 잔차 8%대는 정상 기대값이니 `zero_frac < 0.9`를 실패로 취급하지 말고 **관측값으로 보고**한다.
 
 - [ ] **Step 1: 테스트 작성**
 
@@ -3783,7 +3786,10 @@ _IDENTITY_TOLERANCE = 1e-9
 _NOTE_COST_BASIS = ("waste_cost는 판매가 기준 — 사업 임팩트 인용 시 원가율(≈0.3)을 곱해야 한다.")
 _NOTE_CARRY_IN = ("폐기율은 **순합(net)** 기준이다. waste_qty 음수 행(전일 재고 이월로 판매가 "
                   "당일 생산을 초과, 실측 2.89%)을 clip하지 않으므로 gross 폐기보다 낮다 — "
-                  "clip하면 made−sold−out=0 항등식이 깨지고 폐기율이 부풀려진다(광교 +3.2% 상대).")
+                  "clip하면 폐기율이 부풀려진다(광교 0.12532→0.12933).")
+_NOTE_IDENTITY_BASELINE = ("항등식 잔차 0 비율 실측(2026-07-28): 전체 91.83% / out<0 88.80% / "
+                           "out≥0 91.92%. 8%대 잔차는 정상 기대값이며 실패 신호가 아니다 — "
+                           "재계산 공식은 저장 identity_diff와 100% 일치함이 확인됐다.")
 _NOTE_LEGACY = ("레거시 eda02/04/05(inventory.parquet 직독)와 수치 등가가 아니다 — "
                 "canonical waste_alpha_4stores 기준 재표현이다.")
 
@@ -3882,7 +3888,7 @@ def waste_alpha_identity(inputs: AnalysisInputs) -> AnalysisResult:
         tables=[("residual", residual)],
         figures=[_bar_fig(residual, "store", "zero_frac",
                           "매장별 항등식 성립 비율", "잔차 0 비율")],
-        notes=[_NOTE_LEGACY],
+        notes=[_NOTE_IDENTITY_BASELINE, _NOTE_LEGACY],
     )
 
 
@@ -3915,7 +3921,9 @@ print(pd.read_csv('/tmp/analysis_t11/t11/waste_rate__by_store.csv').to_string(in
 print(pd.read_csv('/tmp/analysis_t11/t11/waste_alpha_identity__residual.csv').to_string(index=False))
 "
 ```
-Expected: 광교 `waste_rate`가 [0, 1] 범위. `zero_frac`이 1.0보다 크게 낮으면(예: <0.9) **항등식이 깨지는 실데이터 발견**이므로 멈추고 `docs/phase6_analysis_layer.md`에 기록한 뒤 사용자에게 보고한다(도구 제작 중 실버그 포착 — 무결성 작업의 선례가 있다).
+Expected: 광교 `waste_rate`가 [0, 1] 범위. `zero_frac`은 **0.9 근처가 정상 기대값**이다(실측 전체 0.9183, `out<0` 행 0.8880 — Task 3에서 확인). 0.9 부근은 발견이 아니라 baseline이므로 멈추지 않는다. 다만 **0.80 미만이거나 매장 간 편차가 0.10을 넘으면** 새 데이터 이상 신호이므로 멈추고 `docs/phase6_analysis_layer.md`에 기록한 뒤 사용자에게 보고한다.
+
+`by_store`의 `n_carry_in`/`carry_in_units`도 함께 확인한다(실측 광교 1,793행 / −2,429단위, 삼성타운 3,047행 / −8,026단위).
 
 - [ ] **Step 6: 커밋**
 
