@@ -104,3 +104,58 @@ def category_mix(inputs: AnalysisInputs) -> AnalysisResult:
         figures=[_share_fig(share), _stability_fig(daily)],
         notes=_coverage_notes(daily, prices),
     )
+
+
+_PERCENTILES = (0.10, 0.50, 0.90)
+
+
+def daily_totals(daily: pd.DataFrame, prices: pd.Series) -> pd.DataFrame:
+    """매장×일 총 수량/매출 + 활성 품목 수."""
+    priced = _with_revenue(daily, prices)
+    return (priced.groupby(["store_id", "date"], observed=True)
+            .agg(sold_units=("sold_units", "sum"), revenue=("revenue", "sum"),
+                 n_items_active=("item_id", "nunique"))
+            .reset_index())
+
+
+def distribution_summary(totals: pd.DataFrame) -> pd.DataFrame:
+    """매장별 일 매출 분포 요약 — cv(변동계수)가 예측 난이도의 1차 지표."""
+    rows = []
+    for store, group in totals.groupby("store_id", observed=True):
+        units = group["sold_units"]
+        p10, median, p90 = (float(units.quantile(q)) for q in _PERCENTILES)
+        mean, std = float(units.mean()), float(units.std())
+        rows.append({"store_id": store, "n_days": int(len(units)), "mean": mean,
+                     "std": std, "p10": p10, "median": median, "p90": p90,
+                     "cv": std / mean if mean else 0.0})
+    return pd.DataFrame(rows)
+
+
+def _totals_fig(totals: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+    for store, group in totals.groupby("store_id", observed=True):
+        fig.add_trace(go.Scatter(x=group["date"], y=group["sold_units"],
+                                 mode="lines", name=str(store)))
+    fig.update_layout(title="매장별 일 판매량 추이", xaxis_title="날짜", yaxis_title="수량")
+    return fig
+
+
+def _histogram_fig(totals: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+    for store, group in totals.groupby("store_id", observed=True):
+        fig.add_trace(go.Histogram(x=group["sold_units"], name=str(store), opacity=0.6))
+    fig.update_layout(title="일 판매량 분포", barmode="overlay",
+                      xaxis_title="수량", yaxis_title="일수")
+    return fig
+
+
+@register_data("sales_distribution", "매장별 일 판매량/매출 분포")
+def sales_distribution(inputs: AnalysisInputs) -> AnalysisResult:
+    prices = median_unit_price(inputs.waste)
+    totals = daily_totals(inputs.daily, prices)
+    return AnalysisResult(
+        name="sales_distribution", kind=KIND_DATA, title="매장별 일 판매량/매출 분포",
+        tables=[("daily_totals", totals), ("summary", distribution_summary(totals))],
+        figures=[_totals_fig(totals), _histogram_fig(totals)],
+        notes=_coverage_notes(inputs.daily, prices),
+    )

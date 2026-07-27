@@ -96,3 +96,37 @@ def test_handler_notes_price_coverage(stub_inputs):
     result = category_mix(stub_inputs(daily=daily, waste=_waste()))
     # 단가 미매핑 10개 / 총 100개 → coverage 0.9. 은폐 방지로 note에 남긴다.
     assert result.notes == ["단가 매핑 커버리지 0.900 — 미매핑 품목의 revenue는 0으로 계산됨"]
+
+
+def test_daily_totals_aggregates_per_store_day():
+    from bakery.analysis.lab.handlers.sales import daily_totals
+
+    totals = daily_totals(_daily(), median_unit_price(_waste()))
+    assert len(totals) == 3                                  # 3일
+    first = totals[totals["date"] == pd.Timestamp("2025-01-01")].iloc[0]
+    assert first["sold_units"] == 15                         # bread 10 + pastry 5
+    assert first["revenue"] == 55000.0                       # 10×3000 + 5×5000
+    assert first["n_items_active"] == 2
+
+
+def test_distribution_summary_exact():
+    from bakery.analysis.lab.handlers.sales import daily_totals, distribution_summary
+
+    totals = daily_totals(_daily(), median_unit_price(_waste()))
+    # 일별 수량 = [15, 35, 40] → mean 30, median 35
+    summary = distribution_summary(totals).iloc[0]
+    assert summary["n_days"] == 3
+    assert summary["mean"] == pytest.approx(30.0)
+    assert summary["median"] == pytest.approx(35.0)
+    assert summary["std"] == pytest.approx(13.228756555322953)   # ddof=1
+    assert summary["cv"] == pytest.approx(13.228756555322953 / 30.0)
+
+
+def test_sales_distribution_handler_shape(stub_inputs):
+    from bakery.analysis.lab.handlers.sales import sales_distribution
+
+    result = sales_distribution(stub_inputs(daily=_daily(), waste=_waste()))
+    assert result.name == "sales_distribution"
+    assert result.verdict is None
+    assert [label for label, _ in result.tables] == ["daily_totals", "summary"]
+    assert len(result.figures) == 2
