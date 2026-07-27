@@ -171,8 +171,11 @@ ref_b=18,490,266)에 대응**하며, `actual_production`(A_actual, 실측 16,782
 `business_metrics.simulate_profit`이 **flat 3000원/개 fallback**(`avg_price = ... else 3000.0`,
 `src/bakery/evaluation/business_metrics.py:88`)로 KRW를 계산했다 — 이번 재측정은 실제
 품목단가(0526 master_xlsx)를 사용하므로 **절대 KRW 규모는 가격 basis 자체가 달라
-직접 비교 불가**하나, 모든 정책이 동일 flat가/동일 실제가를 쓰므로 **정책 간 % delta는
-가격 basis와 무관**(분자·분모에서 상쇄)하여 비교 가능하다.
+직접 비교 불가**하다. 정책 간 % delta는 **방향과 대략적 크기(큰 폐기 절감)는 robust**하나,
+**정확한 pp 비교는 아니다** — flat 3000원(수량가중)에서 실제 품목단가(매출가중)로 바뀐 것은
+전역 스칼라가 아니라 품목별 재가중이라, 옛 %delta(수량가중)와 새 %delta(매출가중)는
+엄밀히 다른 양이다. 따라서 "−4.2pp/−4.4pp 절감폭 확대"는 순수 데이터-vintage 효과가 아니라
+일부 가중치 아티팩트를 포함한다(방향·규모만 신뢰).
 
 ### 새 166 + 신규 closing (이번 재측정, 두 basis 모두 표기)
 

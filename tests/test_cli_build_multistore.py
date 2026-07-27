@@ -1,6 +1,5 @@
 """bakery build-multistore CLI이 multistore_daily.parquet를 생성한다."""
 from unittest.mock import patch
-from pathlib import Path
 from typer.testing import CliRunner
 from bakery.cli import app
 
