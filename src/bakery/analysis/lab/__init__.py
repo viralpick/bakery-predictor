@@ -14,6 +14,7 @@ from bakery.analysis.lab.result import (
     AnalysisResult,
     SkippedResult,
 )
+from bakery.analysis.lab.runner import run_analysis
 from bakery.analysis.lab.spec import (
     DEFAULT_ALPHA,
     DEPRECATED_ANALYSES,
@@ -30,4 +31,5 @@ __all__ = [
     "AnalysisResult", "SkippedResult", "AnalysisReport",
     "AnalysisDataSpec", "AnalysisSpec", "AnalysisSpecError", "load_analysis_spec",
     "DEPRECATED_ANALYSES", "MULTISTORE", "DEFAULT_ALPHA",
+    "run_analysis",
 ]
