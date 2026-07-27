@@ -885,7 +885,6 @@ git commit -m "feat(analysis-lab): AnalysisInputs lazy 로더(paths 기반, pote
   - `register_data(name, title, **flags)` / `register_hypothesis(name, title, **flags)` — 데코레이터
   - `all_names() -> frozenset[str]`, `resolve(name) -> Handler`
   - `run_analysis(spec, *, out_dir: Path) -> AnalysisReport`
-  - `SKIP_REASON_OF: dict[str, str]` (게이트 미충족 → `REASON_*`)
 
 **설계 결정: 데코레이터 등록.** 핸들러 모듈이 `@register_hypothesis("demand_absorption", "카테고리 총량 수요이전 흡수")`로 자기 등록하고, `registry.py`는 `handlers` 패키지를 import해 딕셔너리를 채운다. 이유 — 핸들러 추가 시 registry.py를 매번 수정하지 않아 태스크 간 충돌이 줄고, 이름/제목/게이트가 핸들러 옆에 붙어 드리프트가 없다.
 
@@ -1557,6 +1556,8 @@ def build_analysis_report(report: AnalysisReport, *, out_path: Path) -> Path:
 Run: `uv run pytest tests/analysis_lab/test_report.py -v`
 Expected: PASS (7 passed)
 
+**★ 오타 키 방어는 CLI에만 있다(Task 4 리뷰 지적):** `runner.run_analysis()`는 spec 키를 registry와 대조하지 않는다 — `requested.get(name, False)`라서 `categry_mix: true` 같은 오타는 조용히 "off"로 리포트된다. 방어선은 이 태스크의 CLI가 `load_analysis_spec(config, known_names=analysis_names())`로 거는 것 하나뿐이다. 따라서 `test_analysis_run_rejects_unknown_name`은 **필수 회귀 테스트**이며 삭제·완화 금지. (runner를 직접 호출하는 프로그램적 경로는 검증 없음 — 의도된 경계이며 CLI가 사용자 표면이다.)
+
 - [ ] **Step 5: CLI 실패 테스트 작성**
 
 `tests/analysis_lab/test_cli_analysis.py` (harness `tests/harness/test_cli_harness.py` 패턴):
@@ -2046,6 +2047,40 @@ HANDLER_MODULES: tuple[str, ...] = ("sales",)
 
 Run: `uv run pytest tests/analysis_lab/test_handlers_sales.py -v`
 Expected: PASS (8 passed)
+
+- [ ] **Step 4b: registry 멱등성·중복등록 테스트 추가 (Task 4 리뷰 minor 해소)**
+
+Task 4에서 `_register`의 중복 이름 거부와 `load_handlers()` 멱등성은 registry가 비어 있어 검증되지 못했다. 실제 핸들러가 처음 등록되는 이 태스크가 그 자리다. `tests/analysis_lab/test_registry.py`에 추가:
+
+```python
+def test_load_handlers_is_idempotent():
+    """load_handlers는 all_names/resolve/_handlers_in_order에서 반복 호출된다.
+    sys.modules 캐시로 데코레이터가 재실행되지 않아야 한다(재실행되면 중복 등록으로 터짐)."""
+    from bakery.analysis.lab.registry import DATA_ANALYSES, HYPOTHESES, load_handlers
+
+    load_handlers()
+    before = (len(DATA_ANALYSES), len(HYPOTHESES))
+    load_handlers()
+    load_handlers()
+    assert (len(DATA_ANALYSES), len(HYPOTHESES)) == before
+
+
+def test_duplicate_registration_is_rejected():
+    """같은 이름을 두 섹션 중 어디에든 다시 등록하면 즉시 실패해야 한다."""
+    from bakery.analysis.lab.registry import load_handlers, register_data, register_hypothesis
+
+    load_handlers()
+    # 이미 등록된 category_mix를 재등록 시도 — 같은 섹션
+    with pytest.raises(ValueError, match="category_mix"):   # 메시지 문구는 고정 계약이 아니라 이름 포함만 확인
+        register_data("category_mix", "중복")(lambda inputs: None)
+    # 다른 섹션에 같은 이름을 등록해도 거부돼야 한다(두 딕셔너리 모두 검사)
+    with pytest.raises(ValueError, match="category_mix"):
+        register_hypothesis("category_mix", "중복")(lambda inputs: None)
+```
+
+**주의:** 이 테스트는 registry 전역 딕셔너리를 건드리려 시도하지만 예외로 막히므로 오염되지 않는다. `pytest.raises`가 통과했는데 딕셔너리에 항목이 추가되는 일이 없는지 구현 시 확인하라(`_register`가 예외를 먼저 던지므로 정상).
+
+Run: `uv run pytest tests/analysis_lab/test_registry.py -v --color=no` / Expected: PASS
 
 - [ ] **Step 5: registry xfail 해제 + 전체 lab 테스트**
 
