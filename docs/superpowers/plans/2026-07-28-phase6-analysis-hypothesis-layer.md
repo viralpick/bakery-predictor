@@ -29,6 +29,7 @@
 - **`uv run pytest`로 실행**. repo `addopts`에 이미 `-q`가 있으므로 `-q`를 추가로 붙이지 않는다(`-qq`가 되어 passed 요약이 사라짐). 카운트가 필요하면 `--color=no`.
 - **태스크별 테스트 게이트는 스코프 한정** — 각 태스크는 자기가 만든 테스트 파일 + `tests/analysis_lab/` 디렉토리까지만 돌린다. **전체 repo 스위트(`uv run pytest`)는 PR 경계(Task 9)와 마감(Task 18)에서만** 돌린다. 전체 스위트는 수 분 걸려 foreground 한도를 넘고, 백그라운드로 넘어가면 구현자가 결과를 기다리다 커밋 없이 멈춘다(Task 4에서 실제 발생).
 - **기존 시각화 자산 재사용 거부(스펙 §116 대응 결정)** — `scripts/build_dashboard.py`(1209줄)·`weekly_overlay_series.py`를 재사용하지 않는다. 근거: (1) 두 스크립트는 예측 산출물 대시보드용이라 이 레이어의 섹션 구조(항목별 제목+그래프+표+판정)와 계약이 다르다, (2) 1209줄 모놀리스에서 함수를 끌어오면 `analysis/lab`이 `scripts/`에 의존하게 되어 "paths 기반 canonical 입력만" 원칙이 깨진다, (3) 핸들러당 figure는 1~2개짜리 20줄 이하라 추출 비용이 재작성 비용보다 크다. 대신 **`fig_to_div` stateless 패턴은 harness `report.py`에서 그대로 재사용**한다(자기포함 HTML의 핵심 자산).
+- **`params` 라우팅 규약 (Task 7 리뷰에서 확립)** — `inputs.params_for(name)`은 항목당 하나의 dict다. 그 dict를 **시그니처가 다른 두 개 이상의 함수에 그대로 전개하지 않는다** — 한쪽에만 있는 kwarg를 사용자가 YAML에 쓰면 다른 쪽이 `TypeError`로 죽는다(`demand_absorption`의 `horizon_days`가 실제 사례). 수신 함수가 둘 이상이면 `_split_params` 같은 라우터로 분리한다. 수신 함수가 하나면 그대로 전개해도 되고, 미지원 키의 `TypeError`는 오히려 바람직한 fail-loud다. 반대로 `params.get("...")`만 읽고 나머지를 조용히 버리는 핸들러(`closing_discount`, `event_prior_validation`)는 오타를 삼키므로, 읽는 키를 docstring에 명시한다.
 - **plotly 경계 결정(의도적 이탈)** — harness는 "코어는 viz 무의존"이지만 `AnalysisResult.figures`는 핸들러가 plotly Figure를 담는다. 대신 **회귀 대조·수치 테스트는 `tables`/`verdict`에만** 걸어 핸들러 검증이 plotly 없이 성립하게 한다. 이는 드리프트가 아니라 결정이다.
 
 ---
@@ -2384,6 +2385,19 @@ _NOTE_PLACEBO = ("placebo(미래 d+7 품절강도) β가 real β와 비슷하면
                  "confound다 — 두 arm을 함께 읽어야 한다.")
 
 
+PLACEBO_ONLY_PARAMS = frozenset({"horizon_days"})   # placebo_absorption 전용 kwarg
+
+
+def _split_params(params: dict) -> tuple[dict, dict]:
+    """공유 params를 수신 함수별로 분리한다.
+
+    run_absorption에는 horizon_days kwarg가 없어 공유 dict를 그대로 전개하면
+    TypeError가 난다(placebo 전용 튜너블). Task 7 리뷰에서 포착된 잠재 결함.
+    """
+    real = {k: v for k, v in params.items() if k not in PLACEBO_ONLY_PARAMS}
+    return real, params
+
+
 def results_to_frame(results: list[AbsorptionResult], *, arm: str) -> pd.DataFrame:
     frame = pd.DataFrame([asdict(r) for r in results])
     frame["arm"] = arm
@@ -2451,9 +2465,9 @@ def _delta_fig(table: pd.DataFrame) -> go.Figure:
 @register_hypothesis("demand_absorption", "카테고리 총량 수요이전 흡수 (W0 게이트)")
 def demand_absorption(inputs: AnalysisInputs) -> AnalysisResult:
     daily = inputs.daily
-    params = inputs.params_for("demand_absorption")
-    real = run_absorption(daily, **params)
-    placebo = placebo_absorption(daily, **params)
+    real_params, placebo_params = _split_params(inputs.params_for("demand_absorption"))
+    real = run_absorption(daily, **real_params)
+    placebo = placebo_absorption(daily, **placebo_params)
     table = pd.concat([results_to_frame(real, arm=ARM_REAL),
                        results_to_frame(placebo, arm=ARM_PLACEBO)], ignore_index=True)
     return AnalysisResult(
