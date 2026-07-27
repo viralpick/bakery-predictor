@@ -4005,6 +4005,12 @@ def test_other_discounts_handler_shape(stub_inputs):
     assert [label for label, _ in result.tables] == ["by_code", "by_label", "by_hour"]
     # 마감(0069)은 제외되고 마감 외 코드만 남는다 — 이 fixture엔 마감 외 할인이 없다
     assert result.verdict == "마감 외 할인 0건 — 이 매장은 마감할인이 전부다"
+    # 빈 결과에서도 라벨별 스키마가 유지돼야 한다(오라벨 방지)
+    tables = dict(result.tables)
+    assert tables["by_code"].columns.tolist() == ["discount_code", "n_lines", "qty"]
+    assert tables["by_label"].columns.tolist() == ["label", "n_lines", "qty"]
+    assert tables["by_hour"].columns.tolist() == ["discount_code", "hour", "qty"]
+    assert len(tables["by_code"]) == 0
 ```
 
 - [ ] **Step 2: 실패 확인** — Expected: FAIL `ModuleNotFoundError: ...handlers.discount`
@@ -4119,24 +4125,46 @@ def closing_discount(inputs: AnalysisInputs) -> AnalysisResult:
     )
 
 
+# 빈 결과에서도 테이블 스키마를 유지한다 — 라벨과 컬럼이 어긋나면 CSV 소비자가 깨진다.
+_EMPTY_BY_HOUR = pd.DataFrame({"discount_code": pd.Series(dtype="object"),
+                               "hour": pd.Series(dtype="int64"),
+                               "qty": pd.Series(dtype="float64")})
+_EMPTY_BY_CODE = pd.DataFrame({"discount_code": pd.Series(dtype="object"),
+                               "n_lines": pd.Series(dtype="int64"),
+                               "qty": pd.Series(dtype="float64")})
+_EMPTY_BY_LABEL = pd.DataFrame({"label": pd.Series(dtype="object"),
+                                "n_lines": pd.Series(dtype="int64"),
+                                "qty": pd.Series(dtype="float64")})
+
+
+def _discount_code_hour_fig(by_hour: pd.DataFrame) -> go.Figure:
+    """할인코드별 시각 분포. 빈 프레임이면 빈 축만 그린다(is_empty 은폐 방지는 verdict가 담당)."""
+    fig = go.Figure()
+    for code, group in by_hour.groupby("discount_code", observed=True):
+        fig.add_trace(go.Bar(x=group["hour"], y=group["qty"], name=str(code)))
+    fig.update_layout(title="마감 외 할인코드 시각별 수량", barmode="stack",
+                      xaxis_title="시(hour)", yaxis_title="수량")
+    return fig
+
+
 @register_hypothesis("other_discounts", "마감 외 할인코드 시각 분포")
 def other_discounts(inputs: AnalysisInputs) -> AnalysisResult:
     rows = inputs.discount_rows
     others = rows[(rows["label"] != CLOSING_LABEL) & (rows["discount_amt"] > 0)]
     ds_others = DiscountSales(rows=others)
-    by_hour = (others.groupby(["discount_code", "hour"], observed=True)["qty"]
-               .sum().reset_index()) if len(others) else pd.DataFrame(
-        {"discount_code": [], "hour": [], "qty": []})
-    verdict = ("마감 외 할인 0건 — 이 매장은 마감할인이 전부다" if len(others) == 0
+    is_empty = len(others) == 0
+    by_hour = (_EMPTY_BY_HOUR.copy() if is_empty else
+               others.groupby(["discount_code", "hour"], observed=True)["qty"]
+               .sum().reset_index())
+    verdict = ("마감 외 할인 0건 — 이 매장은 마감할인이 전부다" if is_empty
                else f"마감 외 할인 {len(others):,}건 / 코드 "
                     f"{others['discount_code'].nunique()}종 — 시각 분포로 성격 판별")
     return AnalysisResult(
         name="other_discounts", kind=KIND_HYPOTHESIS, title="마감 외 할인코드 시각 분포",
-        tables=[("by_code", discount_summary(ds_others) if len(others) else by_hour),
-                ("by_label", label_summary(ds_others) if len(others) else by_hour),
+        tables=[("by_code", _EMPTY_BY_CODE.copy() if is_empty else discount_summary(ds_others)),
+                ("by_label", _EMPTY_BY_LABEL.copy() if is_empty else label_summary(ds_others)),
                 ("by_hour", by_hour)],
-        figures=[_hour_fig(by_hour.rename(columns={"discount_code": "category_id"}))
-                 if len(by_hour) else go.Figure()],
+        figures=[_discount_code_hour_fig(by_hour)],
         verdict=verdict,
     )
 
@@ -4170,6 +4198,18 @@ def discount_regime(inputs: AnalysisInputs) -> AnalysisResult:
                "placebo cut이 real과 비슷한 β를 내면 그 전환은 구조가 아니라 추세다."],
     )
 ```
+
+**빈 스키마 주의:** `_EMPTY_BY_CODE`/`_EMPTY_BY_LABEL`의 컬럼은 `discount_summary`/`label_summary`의 실제 반환 컬럼과 **정확히 같아야** 한다. 구현 시 확인해 맞춘다:
+
+```bash
+uv run python -c "
+from bakery.analysis.discount import DiscountSales, discount_summary, label_summary, load_sales_with_discount_v2
+ds = load_sales_with_discount_v2()
+print('by_code:', discount_summary(ds).columns.tolist())
+print('by_label:', label_summary(ds).columns.tolist())
+"
+```
+확인 결과와 다르면 `_EMPTY_*` 정의와 위 테스트의 기대 컬럼 리스트를 **둘 다** 그 이름으로 고친다.
 
 - [ ] **Step 4: 통과 확인** — Run: `uv run pytest tests/analysis_lab/test_handlers_discount.py -v` / Expected: PASS (8 passed)
 
@@ -5477,6 +5517,36 @@ def _weather_segments(preds: pd.DataFrame, weather: pd.DataFrame) -> pd.DataFram
     return merged
 
 
+_EXTREME_SEGMENTS: tuple[tuple[str, tuple[int, ...] | None], ...] = (
+    ("is_heatwave", SUMMER_MONTHS),      # 비교군 = 동계절 비극한일
+    ("is_coldwave", WINTER_MONTHS),
+    ("is_heavy_rain", None),             # 강수는 전 계절
+)
+
+
+def _empty_contrast_row(segment: str, n_segment: int) -> dict:
+    """세그먼트/여집합 한쪽이 비면 대조 불가 — noise로 두되 n을 남겨 은폐하지 않는다."""
+    return {"segment": segment, "wpe_diff": float("nan"), "ci_low": float("nan"),
+            "ci_high": float("nan"), "n_segment": n_segment, "is_signal": False}
+
+
+def _extreme_contrasts(merged: pd.DataFrame) -> pd.DataFrame:
+    """극한날씨 3세그먼트 × 동계절 비교군 WPE 대조."""
+    rows = []
+    for segment, season in _EXTREME_SEGMENTS:
+        scope = merged if season is None else merged[merged["month"].isin(season)]
+        mask = scope[segment].fillna(False)
+        if mask.sum() == 0 or (~mask).sum() == 0:
+            rows.append(_empty_contrast_row(segment, int(mask.sum())))
+            continue
+        contrast = segment_contrast(scope, mask)
+        rows.append({"segment": segment, "wpe_diff": contrast["wpe_diff"],
+                     "ci_low": contrast["ci"][0], "ci_high": contrast["ci"][1],
+                     "n_segment": contrast["n_segment"],
+                     "is_signal": is_signal(contrast)})
+    return pd.DataFrame(rows)
+
+
 def weather_bias_verdict(contrasts: pd.DataFrame) -> str:
     signals = contrasts[contrasts["is_signal"]]["segment"].tolist()
     if not signals:
@@ -5499,22 +5569,7 @@ def weather_bias(inputs: AnalysisInputs) -> AnalysisResult:
         weather = weather[weather["station_id"] == station]
     merged = _weather_segments(_with_axes(inputs.predictions),
                               weather[["date", "maxTa", "minTa", "sumRn"]])
-    rows = []
-    for segment, season in (("is_heatwave", SUMMER_MONTHS), ("is_coldwave", WINTER_MONTHS),
-                            ("is_heavy_rain", None)):
-        scope = merged if season is None else merged[merged["month"].isin(season)]
-        mask = scope[segment].fillna(False)
-        if mask.sum() == 0 or (~mask).sum() == 0:
-            rows.append({"segment": segment, "wpe_diff": float("nan"),
-                         "ci_low": float("nan"), "ci_high": float("nan"),
-                         "n_segment": int(mask.sum()), "is_signal": False})
-            continue
-        contrast = segment_contrast(scope, mask)
-        rows.append({"segment": segment, "wpe_diff": contrast["wpe_diff"],
-                     "ci_low": contrast["ci"][0], "ci_high": contrast["ci"][1],
-                     "n_segment": contrast["n_segment"],
-                     "is_signal": is_signal(contrast)})
-    contrasts = pd.DataFrame(rows)
+    contrasts = _extreme_contrasts(merged)
     fig = go.Figure(go.Bar(
         x=contrasts["segment"], y=contrasts["wpe_diff"],
         error_y=dict(type="data", symmetric=False,
@@ -5530,6 +5585,16 @@ def weather_bias(inputs: AnalysisInputs) -> AnalysisResult:
         notes=[_NOTE_ENGINE, _NOTE_WPE_SIGN,
                f"임계: {EXTREME_THRESHOLDS} / 비교군은 동계절 비극한일이다."],
     )
+
+
+def _baseline_segment_table(baseline_path, event_dates: pd.DatetimeIndex) -> pd.DataFrame:
+    """prior 없는 baseline artifact를 같은 세그먼트 축으로 집계해 A/B 대조군을 만든다."""
+    baseline = pd.read_csv(baseline_path)
+    baseline["date"] = pd.to_datetime(baseline["date"])
+    baseline["segment"] = np.where(baseline["date"].isin(event_dates), "event", "non_event")
+    return bias_by_axis(baseline, "segment").rename(
+        columns={"wpe": "wpe_baseline", "stockout_rate": "stockout_rate_baseline",
+                 "n": "n_baseline"})
 
 
 def event_prior_verdict(table: pd.DataFrame, *, is_ab_mode: bool) -> str:
@@ -5558,14 +5623,8 @@ def event_prior_validation(inputs: AnalysisInputs) -> AnalysisResult:
     baseline_path = params.get("baseline_predictions")
     is_ab_mode = baseline_path is not None and Path(baseline_path).exists()
     if is_ab_mode:
-        baseline = pd.read_csv(baseline_path)
-        baseline["date"] = pd.to_datetime(baseline["date"])
-        baseline["segment"] = np.where(baseline["date"].isin(event_dates),
-                                       "event", "non_event")
-        base_table = bias_by_axis(baseline, "segment").rename(
-            columns={"wpe": "wpe_baseline", "stockout_rate": "stockout_rate_baseline",
-                     "n": "n_baseline"})
-        table = table.merge(base_table, on="segment", how="left")
+        table = table.merge(_baseline_segment_table(baseline_path, event_dates),
+                            on="segment", how="left")
     fig = go.Figure(go.Bar(x=table["segment"], y=table["wpe"]))
     fig.add_hline(y=0.0, line_dash="dash")
     fig.update_layout(title="이벤트일 vs 비이벤트일 WPE", yaxis_title="WPE %")
