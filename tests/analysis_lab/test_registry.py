@@ -42,8 +42,6 @@ def test_resolve_returns_handler_for_data_section():
     assert resolve("category_mix").kind == KIND_DATA
 
 
-# demand_absorption은 Task 7에서 등록된다 — 그 전까지 xfail 유지.
-@pytest.mark.xfail(reason="핸들러는 Task 7에서 등록", strict=True)
 def test_resolve_returns_handler_for_hypothesis_section():
     assert resolve("demand_absorption").kind == KIND_HYPOTHESIS
 

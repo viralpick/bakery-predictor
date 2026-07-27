@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from ._ols import _ols_hc3, _design_matrix, MAX_CONDITION_NUMBER
+from ._ols import _design_matrix, _ols_hc3
 
 DEFAULT_CLOSE_HOUR = 22
 BASELINE_WEEKS = 4
@@ -128,6 +128,31 @@ def run_absorption(daily: pd.DataFrame, *, close_hour: int = DEFAULT_CLOSE_HOUR,
                    baseline_weeks: int = BASELINE_WEEKS) -> list[AbsorptionResult]:
     """Fit absorption for every (store, category) with enough data. Skips None."""
     panel = build_absorption_panel(daily, close_hour=close_hour, baseline_weeks=baseline_weeks)
+    out: list[AbsorptionResult] = []
+    pairs = panel[["store_id", "category_id"]].drop_duplicates().itertuples(index=False)
+    for store_id, category_id in pairs:
+        res = fit_absorption(panel, store_id, category_id)
+        if res is not None:
+            out.append(res)
+    return out
+
+
+PLACEBO_HORIZON_DAYS = 7           # 미래 d+7 품절강도 = 허위상관 하한
+GATE_CATEGORIES = ("bread", "pastry")   # W0 게이트 판정 대상(단일품목/시즌 카테고리 제외)
+
+
+def placebo_absorption(daily: pd.DataFrame, *, close_hour: int = DEFAULT_CLOSE_HOUR,
+                       baseline_weeks: int = BASELINE_WEEKS,
+                       horizon_days: int = PLACEBO_HORIZON_DAYS) -> list[AbsorptionResult]:
+    """미래(d+horizon) 품절강도로 같은 회귀를 돌린다 — 허위상관/잔차 confound 크기 하한.
+
+    실제 β와 부호·크기가 비슷하면 그 β는 인과가 아니라 confound다.
+    """
+    panel = build_absorption_panel(daily, close_hour=close_hour,
+                                   baseline_weeks=baseline_weeks).sort_values("date")
+    panel["stockout_hours"] = (panel.groupby(["store_id", "category_id"])["stockout_hours"]
+                               .shift(-horizon_days))
+    panel = panel.dropna(subset=["stockout_hours"])
     out: list[AbsorptionResult] = []
     pairs = panel[["store_id", "category_id"]].drop_duplicates().itertuples(index=False)
     for store_id, category_id in pairs:
