@@ -88,3 +88,13 @@ def explain_item_order(store_id, item_id, *, daily, date, horizon_days=7,
         [{"store_id": store_id, "item_id": str(item_id), "date": date,
           "step": s, "value": v, "detail": d} for s, v, d in rows]
     )
+
+
+def rank_forward_items(store_id, *, daily, date, k=3, horizon_days=7, use_forecast=False):
+    """forward our_order 기준 top-k 품목 (q_explain_item 진입점).
+
+    [item_id, our_order] 내림차순. explain_item_order의 품목 선택과 동일 seam.
+    """
+    _, iq = _forward_at_date(store_id, daily, date, horizon_days, use_forecast)
+    ranked = iq.sort_values(["our_order", "item_id"], ascending=[False, True]).head(k)
+    return ranked[["item_id", "our_order"]].reset_index(drop=True)

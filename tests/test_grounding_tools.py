@@ -11,12 +11,12 @@ def dataset():
     return load_dataset("synthetic")
 
 
-def test_tool_specs_cover_seven_functions():
+def test_tool_specs_cover_all_functions():
     names = {t.name for t in TOOL_SPECS}
     assert names == {
         "rank_stockout_risk", "rank_stockout_earliness", "explain_order",
         "what_if", "waste_cost", "demand_diff_by_condition", "what_if_driver",
-        "explain_category_total", "explain_item_order",
+        "explain_category_total", "explain_item_order", "rank_forward_items",
     }
     for t in TOOL_SPECS:
         assert t.parameters["type"] == "object"
@@ -152,3 +152,18 @@ def test_dispatch_explain_item_order(dataset):
     res = dispatch(call, dataset)
     rows = json.loads(res.content)
     assert [r["step"] for r in rows] == ["category_total", "proportion", "item_order", "final"]
+
+
+def test_dispatch_rank_forward_items(dataset):
+    import json
+    from bakery.ontology.grounding.llm import ToolCall
+    from bakery.ontology.grounding.tools import dispatch
+    store = str(dataset.daily["store_id"].iloc[0])
+    date = _forward_date(dataset, store)
+    res = dispatch(ToolCall(id="c3", name="rank_forward_items",
+                            arguments={"store_id": store, "date": date, "k": 3}), dataset)
+    rows = json.loads(res.content)
+    assert len(rows) == 3
+    assert all("item_id" in r and "our_order" in r for r in rows)
+    # 내림차순
+    assert [r["our_order"] for r in rows] == sorted([r["our_order"] for r in rows], reverse=True)

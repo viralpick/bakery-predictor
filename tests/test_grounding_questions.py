@@ -69,3 +69,14 @@ def test_gold_explain_item_matches_function(dataset):
     gold = build_gold(q, dataset)
     assert "item_id" in gold and "order_qty" in gold
     assert gold["order_qty"] > 0
+
+
+def test_gold_explain_item_equals_top_forward(dataset):
+    """q_explain_item gold item == rank_forward_items top1 (단일 소스 정합)."""
+    from bakery.ontology.grounding.questions import QUESTIONS, build_gold, _forward_ctx
+    from bakery.ontology import explain
+    q = next(q for q in QUESTIONS if q.id == "q_explain_item")
+    gold = build_gold(q, dataset)
+    store, date = _forward_ctx(dataset)
+    top = explain.rank_forward_items(store, daily=dataset.daily, date=date, k=1, use_forecast=False)
+    assert gold["item_id"] == str(top["item_id"].iloc[0])

@@ -67,3 +67,16 @@ def test_item_order_conservation(daily, ff, target_date):
 
 def test_batch_round_unit_default():
     assert BATCH_ROUND_UNIT == 3
+
+
+def test_rank_forward_items_matches_seam(daily, ff, target_date):
+    """rank_forward_items top-k == seam item_quantities our_order 내림차순."""
+    from bakery.ontology.explain import rank_forward_items
+    ranked = rank_forward_items(STORE, daily=daily, date=target_date, k=3, use_forecast=False)
+    iq = ff.item_quantities
+    iq_d = iq[pd.to_datetime(iq["date"]) == pd.Timestamp(target_date)].copy()
+    iq_d["item_id"] = iq_d["item_id"].astype(str)
+    expected = list(iq_d.sort_values(["our_order", "item_id"], ascending=[False, True])
+                    .head(3)["item_id"])
+    assert list(ranked["item_id"].astype(str)) == expected
+    assert len(ranked) == 3

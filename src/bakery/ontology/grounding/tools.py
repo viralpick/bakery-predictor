@@ -88,6 +88,14 @@ TOOL_SPECS: list[ToolSpec] = [
                  "store_id": {"type": "string"}, "item_id": {"type": "string"},
                  "date": {"type": "string", "description": "forward horizon date YYYY-MM-DD"}},
               "required": ["store_id", "item_id", "date"], "additionalProperties": False}),
+    ToolSpec("rank_forward_items",
+             "Top-k items by forward production quantity (our_order) for a store on a date. "
+             "Use to find which items are produced most next week, then explain one with explain_item_order.",
+             {"type": "object", "properties": {
+                 "store_id": {"type": "string"},
+                 "date": {"type": "string", "description": "forward horizon date YYYY-MM-DD"},
+                 "k": {"type": "integer"}},
+              "required": ["store_id", "date", "k"], "additionalProperties": False}),
 ]
 
 
@@ -139,4 +147,6 @@ def _call(name: str, a: dict, dataset: DailyDataset):
     if name == "explain_item_order":
         return explain.explain_item_order(
             a["store_id"], a["item_id"], daily=dataset.daily, date=a["date"], use_forecast=False)
+    if name == "rank_forward_items":
+        return explain.rank_forward_items(a["store_id"], daily=dataset.daily, date=a["date"], k=a["k"], use_forecast=False)
     raise KeyError(f"unknown tool: {name}")

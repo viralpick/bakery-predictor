@@ -16,7 +16,6 @@ import pandas as pd
 from .. import explain
 from .. import functions as fn
 from ...data.loader import DailyDataset
-from ...forecast.forward import forecast_forward
 from .constants import CALENDAR, DECOMPOSITION, NUMERIC, RANKING, WEATHER
 
 
@@ -39,7 +38,7 @@ def _ctx(dataset: DailyDataset):
     return store, period
 
 
-def _forward_ctx(dataset: DailyDataset, horizon_days: int = 7):
+def _forward_ctx(dataset: DailyDataset):
     """explain 질문용 forward 컨텍스트: (store, 마지막 관측일 다음날).
 
     _ctx(historical)와 달리 forward 대상. forecast_forward가 결정론이라 gold 재현 가능.
@@ -51,20 +50,9 @@ def _forward_ctx(dataset: DailyDataset, horizon_days: int = 7):
 
 
 def _forward_top_item(dataset: DailyDataset, store: str, date: str) -> str:
-    """forward our_order 최대 품목(결정론 선택).
-
-    다중 store daily면 store로 필터 후 forecast_forward — explain._forward_at_date와
-    동일 규칙(단일-store 가정). 필터 없이 넘기면 여러 매장 판매가 합산돼 store별
-    비중과 다른 품목이 뽑혀 explain_item_order(store=store 필터)와 어긋난다.
-    """
-    daily = dataset.daily
-    if "store_id" in daily.columns and daily["store_id"].nunique() > 1:
-        daily = daily[daily["store_id"] == store].copy()
-    iq = forecast_forward(store, daily=daily, horizon_days=7,
-                          use_forecast=False).item_quantities
-    iq_d = iq[iq["date"].astype(str).str.startswith(date)].copy()
-    iq_d["item_id"] = iq_d["item_id"].astype(str)
-    return str(iq_d.sort_values(["our_order", "item_id"], ascending=[False, True]).iloc[0]["item_id"])
+    """forward our_order 최대 품목 = rank_forward_items top1 (단일 소스)."""
+    ranked = explain.rank_forward_items(store, daily=dataset.daily, date=date, k=1, use_forecast=False)
+    return str(ranked["item_id"].iloc[0])
 
 
 QUESTIONS: list[Question] = [
