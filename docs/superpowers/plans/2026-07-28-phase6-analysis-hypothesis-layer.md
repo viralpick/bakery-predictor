@@ -2154,11 +2154,16 @@ def _daily():
                 is_stockout = (day + index) % 3 == 0
                 rows.append({
                     "store_id": "store_gw01", "item_id": item, "category_id": category,
-                    "date": date, "sold_units": 10 + (day % 7) + index * 2,
+                    "date": date, "sold_units": 10 + (day % 7) + (day % 11) + index * 2,
                     "is_stockout": is_stockout,
                     "stockout_time": date + pd.Timedelta(hours=19) if is_stockout else pd.NaT,
                 })
     return pd.DataFrame(rows)
+
+# ★ sold_units에 (day % 11)을 더하는 이유: 11은 7과 서로소라 dow 주기와 어긋난다.
+# 이게 없으면 2024-01-01이 월요일이라 day%7 == dow가 되어 cat_baseline이 dow 더미의
+# 정확한 선형결합이 된다(cond(X)≈2.4e18) → fit_absorption이 전부 None을 반환하고
+# 양쪽 arm이 빈 리스트가 되어 아래 등가 테스트가 무증상 통과한다(2026-07-28 실측 확인).
 
 
 def test_gate_categories_are_bread_and_pastry():
@@ -2179,6 +2184,7 @@ def test_placebo_shifts_treatment_forward_by_horizon():
                 for s, c in panel[["store_id", "category_id"]]
                 .drop_duplicates().itertuples(index=False)]
     expected = [r for r in expected if r is not None]
+    assert len(results) == 2      # bread/pastry 둘 다 fit 성공 — 빈 리스트 비교로 무증상 통과 방지
     assert [r.category_id for r in results] == [r.category_id for r in expected]
     assert [r.n for r in results] == [r.n for r in expected]
     assert [r.beta for r in results] == [r.beta for r in expected]
@@ -2486,9 +2492,12 @@ print('max |Δβ| =', merged['dbeta'].max())
 print('판정 불일치 =', (merged['verdict_script'] != merged['verdict_lab']).sum())
 "
 ```
-Expected: 스크립트는 `data/internal/v2/` 레거시 경로 + 로컬 `apply_fixed_stockout`으로 daily를 만들고, 핸들러는 canonical `multistore_daily`(PR#39 `assign_stockout_fields` 반영)를 쓴다. 두 경로는 같은 재정의를 공유하므로 **판정(verdict) 불일치 0건**이 기대값이고, β는 소수점 차이가 날 수 있다.
+**★ 실측 결과(2026-07-28, Task 7에서 확인) — 이 값들이 기대값이다:**
+`max |Δβ| = 0.144`, 게이트 카테고리 **판정 불일치 2건**(`pastry` @ `store_ss01`, `store_gh01`).
 
-판정이 하나라도 다르거나 `max |Δβ|`가 게이트 카테고리에서 0.01을 넘으면 **멈추고 원인을 규명한 뒤 진행한다**(canonical parquet을 진실로 삼되, 차이의 원인을 반드시 기록). 결과 수치를 `docs/phase6_analysis_layer.md`의 "이식 대조 기록" 표에 그대로 적는다.
+**원인 규명 완료 — 코드 결함 아님:** `src/bakery/data/bonavi_loader_v2.py:52`의 `EXCLUDE_CATEGORIES = frozenset({"salad"})`(사용자 결정 2026-07-23: salad/deli는 당일폐기지만 "구운 빵"이 아니라 예측 타깃 제외)를 canonical `multistore_daily`는 적용하지만, 레거시 `scripts/store_daily.py` 경로는 적용하지 않아 salad 판매가 `other_cat_sold` confound 통제에 섞인다. canonical이 진실이며, 스크립트는 소비처 17곳이라 수정 범위 밖이다.
+
+따라서 **"판정 불일치 0건"은 잘못된 게이트였다**(스코프 변경 이전 가정). 올바른 게이트: 위 수치와 원인이 재현되는지 확인하고, **그 외의 새로운 불일치가 나오면** 멈추고 규명한다. 결과를 `docs/phase6_analysis_layer.md`의 "이식 대조 기록" 표에 적는다.
 
 - [ ] **Step 10: 커밋**
 
