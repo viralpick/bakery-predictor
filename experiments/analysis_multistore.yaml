@@ -1,0 +1,13 @@
+# 4매장 — 매장간 비교가 필요한 항목 위주(광교 예측 보조 데이터 관점)
+name: analysis_multistore
+data:
+  source: real
+  store: multistore
+alpha: 0.8
+data_analyses:
+  sales_distribution: true
+  category_mix: true
+  waste_rate: true
+hypotheses:
+  demand_absorption: true
+  stockout_revenue: true
