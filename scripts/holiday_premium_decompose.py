@@ -1,7 +1,10 @@
 """전 공휴일 프리미엄 분해 — 요일·주말·연휴·대체공휴일 축 (광교).
 
 계산은 `bakery.analysis.holiday_premium.decompose_holiday_premium`로 옮겼다(Phase 6).
-이 스크립트는 동결 시리즈(reports/raw_adjusted_series.csv)를 읽어 표를 print하는 wrapper다.
+이 스크립트는 동결 시리즈(tests/fixtures/frozen/raw_adjusted_series.csv, 2026-07-16
+생성 원본을 추적 fixture로 이동한 것 — Fix round 1)를 읽어 표를 print하는 wrapper다.
+이 경로를 tests/test_holiday_premium.py의 FROZEN_SERIES와 동일하게 맞춰
+wrapper와 golden 테스트가 서로 다른 입력을 보는 drift를 원천 차단한다.
 현 vintage 실행은 `uv run bakery analysis-run experiments/analysis_gwangyo.yaml`을 쓴다.
 
 실행: PYTHONPATH=scripts uv run python scripts/holiday_premium_decompose.py
@@ -19,7 +22,7 @@ import pandas as pd  # noqa: E402
 from bakery.analysis.holiday_premium import decompose_holiday_premium as decompose  # noqa: E402
 from bakery.data.calendar import build_calendar_daily  # noqa: E402
 
-SERIES = Path("reports/raw_adjusted_series.csv")
+SERIES = Path("tests/fixtures/frozen/raw_adjusted_series.csv")
 OUT = Path("reports/holiday_premium_decompose.csv")
 
 

@@ -21,6 +21,7 @@ htmlcov/
 *.parquet
 *.csv
 !tests/**/*.csv
+!tests/**/*.parquet
 !docs/phase7/multistore_reference.csv
 
 # OS / IDE

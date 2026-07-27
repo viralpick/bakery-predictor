@@ -1,8 +1,11 @@
 """holiday_premium 프리미티브 — 동결 입력 golden 대조.
 
 golden은 2026-07-28에 `scripts/holiday_premium_decompose.py`를 실제 실행해 캡처한 값이다
-(reports/raw_adjusted_series.csv = 2026-07-16 생성, 동결). docs 기록 수치를 쓰지 않는 이유는
-Phase 7 신규데이터 편입으로 값이 이동했기 때문이다(측정 헌장/회귀 게이트 규칙).
+(원본은 reports/raw_adjusted_series.csv, 2026-07-16 생성, 동결). docs 기록 수치를 쓰지 않는
+이유는 Phase 7 신규데이터 편입으로 값이 이동했기 때문이다(측정 헌장/회귀 게이트 규칙).
+
+동결 CSV는 tests/fixtures/frozen/에 추적본으로 두었다(reports/는 gitignore 대상이라
+다른 머신/CI에서는 조용히 skip되어 이 게이트가 무력화됐었다 — Fix round 1 교정).
 """
 from pathlib import Path
 
@@ -17,13 +20,14 @@ from bakery.analysis.holiday_premium import (
 )
 from bakery.data.calendar import build_calendar_daily
 
-FROZEN_SERIES = Path("reports/raw_adjusted_series.csv")
+FROZEN_SERIES = Path("tests/fixtures/frozen/raw_adjusted_series.csv")
 
 
 @pytest.fixture(scope="module")
 def frozen_tables():
-    if not FROZEN_SERIES.exists():
-        pytest.skip(f"{FROZEN_SERIES} 없음 — 동결 입력 대조 스킵")
+    # 추적 fixture다 — 없으면 체크아웃이 깨진 것이므로 skip이 아니라 실패여야 한다
+    # (gitignore된 reports/ 를 읽던 옛 경로에서는 CI가 조용히 skip하고 green으로 보였다).
+    assert FROZEN_SERIES.exists(), f"{FROZEN_SERIES} 없음 — 추적 fixture가 누락됐다"
     series = pd.read_csv(FROZEN_SERIES, parse_dates=["date"])[["date", "adjusted_demand_unit"]]
     calendar = build_calendar_daily(series["date"].min(), series["date"].max())
     return decompose_holiday_premium(series, calendar)
@@ -64,6 +68,7 @@ def test_event_ranking_golden_top_entries(frozen_tables):
 
 def test_event_ranking_is_sorted_descending(frozen_tables):
     lifts = frozen_tables["event_ranking"]["median_lift"].tolist()
+    assert len(lifts) == 21        # 빈 리스트로 무증상 통과 방지
     assert lifts == sorted(lifts, reverse=True)
 
 
@@ -72,9 +77,16 @@ def test_by_holiday_row_count_matches_dow_class_total(frozen_tables):
     assert by_holiday["lift"].notna().sum() == 71 + 22
 
 
-def test_streak_buckets_labels(frozen_tables):
-    assert frozen_tables["streak_buckets"]["streak_bucket"].tolist() == [
-        "1(고립)", "2", "3+(연휴)"]
+def test_streak_buckets_golden(frozen_tables):
+    """golden(2026-07-28): 고립 n=20 median 1.345475 / streak2 n=0(NaN) / 연휴 n=51 median 1.190351."""
+    buckets = frozen_tables["streak_buckets"].set_index("streak_bucket")
+    assert buckets.index.tolist() == ["1(고립)", "2", "3+(연휴)"]
+    assert buckets.loc["1(고립)", "n"] == 20
+    assert round(buckets.loc["1(고립)", "median_lift"], 6) == 1.345475
+    assert buckets.loc["2", "n"] == 0
+    assert pd.isna(buckets.loc["2", "median_lift"])       # 관측 0건 → median 정의 불가
+    assert buckets.loc["3+(연휴)", "n"] == 51
+    assert round(buckets.loc["3+(연휴)", "median_lift"], 6) == 1.190351
 
 
 def test_local_dow_baseline_uses_same_dow_only():
