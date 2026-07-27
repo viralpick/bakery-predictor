@@ -404,6 +404,50 @@ Claude-Session: https://claude.ai/code/session_012iHLiUwcdPQUrQZqM5WUKv"
 
 ---
 
+### Task 3.5: 폐기 1차 KPI 재측정 (빵 품목만, unified_policy_kpi 경로)
+
+Task 3에서 발견: harness-run은 폐기 1차 KPI(vs 아띠제 실생산 QT_MADE)를 산출하지 못한다(자기참조 `surplus_rate`만). 옛 "폐기 −33~40%"는 `scripts/unified_policy_kpi.py`(아띠제 실생산을 ground truth로 발주정책 비교) 경로. architect 결정(재측정 진행, **빵 품목=타깃 베이커리만**, 전체 품목 아님)에 따라 이 경로를 새 166 canonical + 신규 closing에서 재실행한다.
+
+**Files:**
+- (코드 변경은 소스 배선이 옛 파일 참조 시에만) `scripts/unified_policy_kpi.py`
+- Create: `docs/phase7/gwangyo_waste_kpi_remeasure.md` (tracked)
+
+**Interfaces:**
+- Consumes: `scripts/unified_policy_kpi.py`(STORE="store_gw01", QT_MADE/QT_OUT 재고정보 기반, argparse). `_real_prospective_inputs`/`_category_order_predictions`/`_artisee_baseline_order`(cli.py). canonical `bonavi_daily`는 이미 타깃 베이커리 166품목만.
+
+- [ ] **Step 1: 데이터 소스 감사 (새 canonical + 빵 품목만 확인)**
+
+`unified_policy_kpi.py`가 rows를 로드하는 `_real_prospective_inputs`(cli.py)와 그 하위가 (a) 새 canonical `bonavi_daily.parquet`(166 타깃)를 읽는지 (b) closing/adjusted_demand가 신규 클린 parquet 소스(Task 0 이후)인지 (c) 스코프가 타깃 베이커리(bread/pastry/cake/sandwich, salad 제외)만인지 확인. canonical이 이미 타깃만이면 (c)는 자동 충족 — 그래도 실제 rows의 category_id 분포를 출력해 음료/완제품이 섞이지 않았음을 확인.
+
+- [ ] **Step 2: 옛 파일 참조 발견 시 배선 수정**
+
+만약 로드 경로 어딘가가 옛 0520 xlsx나 stale 캐시를 참조하면(예: `load_sales_with_discount` default), 신규 소스로 교체. 참조가 이미 신규면 코드 변경 없음.
+
+- [ ] **Step 3: 재실행**
+
+Run (FOREGROUND, ~수분): `uv run python scripts/unified_policy_kpi.py` (argparse 기본값 = 광교; store 인자가 있으면 명시). 산출 = 아띠제 실생산(A) 대비 각 발주정책(actual_production_sim/artisee_reimpl/our_cat_quantile 등)의 폐기 delta·매진 KPI.
+
+- [ ] **Step 4: delta 리포트 작성**
+
+`docs/phase7/gwangyo_waste_kpi_remeasure.md`(tracked)에:
+- 빵 품목(타깃 베이커리)만 대상임을 명시 + 실제 rows category 분포.
+- 각 정책의 폐기율 delta(vs 아띠제 실측 A), 매진 KPI 표.
+- 옛 "폐기 −33~40%"와 새 166 기준 비교. **경계 명시**: 146→166 품목/타깃정의 + 신규 closing 변화분, 2021~2025-12(전향 아님).
+- Task 3(총량 WAPE)과 상호참조.
+
+- [ ] **Step 5: Commit**
+
+```bash
+mkdir -p docs/phase7
+git add docs/phase7/gwangyo_waste_kpi_remeasure.md scripts/unified_policy_kpi.py
+git commit -m "docs: 폐기 1차 KPI 재측정 (빵 품목만, 새 166 canonical, Phase 7 Task 3.5)
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012iHLiUwcdPQUrQZqM5WUKv"
+```
+
+---
+
 ### Task 4: 타 3매장 참조 예측 (타깃 아님)
 
 multistore_daily 위에서 삼성·메세나·광화문 category_total 예측을 돌려 참조표를 만든다. **event_prior는 광교 전용이라 타매장엔 미적용**(base category_total만). 헤드라인·성공기준에 쓰지 않는다.
