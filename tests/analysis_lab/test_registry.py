@@ -38,17 +38,12 @@ def test_every_handler_has_korean_title():
         assert handler.title != handler.name        # 제목은 이름 재사용 금지(한국어 산문)
 
 
-# 아래 두 테스트는 Task 6(category_mix)·Task 7(demand_absorption)에서 핸들러가
-# 등록되기 전까지 KeyError로 실패한다. 두 이름을 각각 별도 테스트로 분리해
-# xfail을 걸어야, Task 6에서 category_mix만 등록됐을 때 그 테스트만 정상적으로
-# xfail 해제될 수 있다(하나로 묶으면 demand_absorption 미등록 탓에 계속 xfail로
-# 남아 category_mix 쪽 회귀를 못 알아챈다).
-@pytest.mark.xfail(reason="핸들러는 Task 6/7에서 등록", strict=True)
 def test_resolve_returns_handler_for_data_section():
     assert resolve("category_mix").kind == KIND_DATA
 
 
-@pytest.mark.xfail(reason="핸들러는 Task 6/7에서 등록", strict=True)
+# demand_absorption은 Task 7에서 등록된다 — 그 전까지 xfail 유지.
+@pytest.mark.xfail(reason="핸들러는 Task 7에서 등록", strict=True)
 def test_resolve_returns_handler_for_hypothesis_section():
     assert resolve("demand_absorption").kind == KIND_HYPOTHESIS
 
@@ -63,3 +58,28 @@ def test_resolve_raises_on_unknown():
 
 def test_all_names_is_union_of_two_sections():
     assert all_names() == frozenset(DATA_ANALYSES) | frozenset(HYPOTHESES)
+
+
+def test_load_handlers_is_idempotent():
+    """load_handlers는 all_names/resolve/_handlers_in_order에서 반복 호출된다.
+    sys.modules 캐시로 데코레이터가 재실행되지 않아야 한다(재실행되면 중복 등록으로 터짐)."""
+    from bakery.analysis.lab.registry import DATA_ANALYSES, HYPOTHESES, load_handlers
+
+    load_handlers()
+    before = (len(DATA_ANALYSES), len(HYPOTHESES))
+    load_handlers()
+    load_handlers()
+    assert (len(DATA_ANALYSES), len(HYPOTHESES)) == before
+
+
+def test_duplicate_registration_is_rejected():
+    """같은 이름을 두 섹션 중 어디에든 다시 등록하면 즉시 실패해야 한다."""
+    from bakery.analysis.lab.registry import load_handlers, register_data, register_hypothesis
+
+    load_handlers()
+    # 이미 등록된 category_mix를 재등록 시도 — 같은 섹션
+    with pytest.raises(ValueError, match="category_mix"):   # 메시지 문구는 고정 계약이 아니라 이름 포함만 확인
+        register_data("category_mix", "중복")(lambda inputs: None)
+    # 다른 섹션에 같은 이름을 등록해도 거부돼야 한다(두 딕셔너리 모두 검사)
+    with pytest.raises(ValueError, match="category_mix"):
+        register_hypothesis("category_mix", "중복")(lambda inputs: None)

@@ -23,11 +23,6 @@ def test_analysis_run_all_off_produces_html(tmp_path):
     assert "섹션 B — 가설 검증" in html
 
 
-# registry가 아직 비어 있어(HANDLER_MODULES=(), Task 6에서 첫 핸들러 등록) off로 표기될
-# 항목 자체가 없다 — CLI 배선 검증(위 테스트)과 분리해 이 조각만 xfail한다. 하나로 묶으면
-# Task 6에서 category_mix가 등록돼도 무관한 wiring 회귀까지 가려진다(test_registry.py와
-# 동일한 분리 관례).
-@pytest.mark.xfail(reason="registry가 Task 6 전까지 비어 있어 off 항목 없음", strict=True)
 def test_off_items_are_labelled_in_html(tmp_path):
     config = _yaml(tmp_path, {"name": "analysis_smoke", "data": {"source": "real"}})
     result = runner.invoke(app, ["analysis-run", str(config), "--out", str(tmp_path)])
