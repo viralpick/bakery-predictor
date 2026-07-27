@@ -23,10 +23,18 @@ from bakery.analysis.lab.result import KIND_HYPOTHESIS, AnalysisResult
 
 ARM_REAL = "real"
 ARM_PLACEBO = "placebo"
+PLACEBO_ONLY_PARAMS = frozenset({"horizon_days"})   # placebo_absorption 전용 kwarg
 _NOTE_CENSORING = ("품절일 판매량은 censored — β는 흡수의 하한 추정. "
                    "처치변수는 마감시각 기준 품절강도(시간)이다.")
 _NOTE_PLACEBO = ("placebo(미래 d+7 품절강도) β가 real β와 비슷하면 그 β는 인과가 아니라 "
                  "confound다 — 두 arm을 함께 읽어야 한다.")
+
+
+def _split_params(params: dict) -> tuple[dict, dict]:
+    """공유 params를 수신 함수별로 분리한다 — run_absorption엔 horizon_days가 없어
+    그대로 전개하면 TypeError가 난다(placebo 전용 튜너블)."""
+    real = {k: v for k, v in params.items() if k not in PLACEBO_ONLY_PARAMS}
+    return real, params
 
 
 def results_to_frame(results: list[AbsorptionResult], *, arm: str) -> pd.DataFrame:
@@ -96,9 +104,9 @@ def _delta_fig(table: pd.DataFrame) -> go.Figure:
 @register_hypothesis("demand_absorption", "카테고리 총량 수요이전 흡수 (W0 게이트)")
 def demand_absorption(inputs: AnalysisInputs) -> AnalysisResult:
     daily = inputs.daily
-    params = inputs.params_for("demand_absorption")
-    real = run_absorption(daily, **params)
-    placebo = placebo_absorption(daily, **params)
+    real_params, placebo_params = _split_params(inputs.params_for("demand_absorption"))
+    real = run_absorption(daily, **real_params)
+    placebo = placebo_absorption(daily, **placebo_params)
     table = pd.concat([results_to_frame(real, arm=ARM_REAL),
                        results_to_frame(placebo, arm=ARM_PLACEBO)], ignore_index=True)
     return AnalysisResult(

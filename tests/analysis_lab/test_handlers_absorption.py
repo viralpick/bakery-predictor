@@ -48,6 +48,23 @@ def test_verdict_when_no_gate_category_present():
         "불확실 — 게이트 카테고리(bread/pastry) 결과 없음")
 
 
+def test_horizon_days_param_reaches_placebo_only(stub_inputs):
+    """horizon_days는 placebo 전용 kwarg — 공유 params를 그냥 전개하면
+    run_absorption이 TypeError를 낸다. 라우팅이 되는지 정확값으로 고정한다."""
+    import sys
+    sys.path.insert(0, "tests")
+    from test_demand_absorption_placebo import _daily
+
+    daily = _daily()
+    inputs = stub_inputs(daily=daily, params={"demand_absorption": {"horizon_days": 14}})
+    result = demand_absorption(inputs)                       # TypeError 없이 통과해야 한다
+    table = dict(result.tables)["results"]
+    placebo_n = table[table["arm"] == "placebo"]["n"].tolist()
+    real_n = table[table["arm"] == "real"]["n"].tolist()
+    # horizon_days=14가 실제로 placebo에만 반영됐는지: placebo n = real n − 14
+    assert placebo_n == [n - 14 for n in real_n]
+
+
 @pytest.mark.slow
 def test_handler_tables_equal_primitive_output():
     """핸들러는 프리미티브를 호출만 한다 — 재구현 드리프트가 있으면 이 테스트가 깨진다."""
@@ -57,6 +74,7 @@ def test_handler_tables_equal_primitive_output():
     inputs = AnalysisInputs.from_spec(AnalysisSpec(name="t", data={"source": "real"}))
     result = demand_absorption(inputs)
     assert result.kind == KIND_HYPOTHESIS
+    assert len(result.figures) == 2
     table = dict(result.tables)["results"]
     expected = pd.concat([results_to_frame(run_absorption(inputs.daily), arm="real"),
                           results_to_frame(placebo_absorption(inputs.daily), arm="placebo")],
