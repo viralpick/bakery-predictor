@@ -70,7 +70,7 @@
 - `scripts/absorption_4stores.py` — `placebo_results` → 프리미티브 import 하는 얇은 wrapper
 - `scripts/holiday_premium_decompose.py` — 프리미티브 호출 + print만
 - `scripts/weekday_bias_isowaste.py` — 프리미티브 호출 + print만
-- `.claude/CLAUDE.md` — 실행 섹션에 `analysis-run` 한 줄
+- `.claude/CLAUDE.md` — 실행 섹션에 `analysis-run` 한 줄. ※2026-07-28 인수인계 작업에서 CLAUDE.md를 backbone-first로 전면 개편하면서 이 줄을 **주석 처리 상태로 미리 넣어뒀다**(`# uv run bakery analysis-run ...  ← Phase 6 구현 중`). Task 18에서는 새로 추가하지 말고 **주석만 해제**하고 라우팅 표의 "구현 중" 표기를 지운다.
 - `experiments/analysis_gwangyo.yaml` (신규), `experiments/analysis_multistore.yaml` (신규)
 
 **테스트** — `tests/analysis_lab/` (harness는 `tests/harness/` 패턴)
@@ -650,13 +650,21 @@ def test_daily_is_cached_single_read():
 
 
 @pytest.mark.slow
-def test_waste_frame_renames_to_charter_columns():
+def test_waste_frame_renames_without_transforming_values():
+    import pandas as pd
+    from bakery.data import paths
+
     inputs = AnalysisInputs.from_spec(_spec())
     waste = inputs.waste
     assert set(waste.columns) >= {"item_id", "date", "production_qty", "waste_qty"}
     assert waste["cd"].unique().tolist() == ["1000000047"]
-    # 폐기량/생산량은 음수 불가
-    assert waste["waste_qty"].min() == 0 or waste["waste_qty"].min() > 0
+    # 순수 rename 계약: made→production_qty, out→waste_qty 값 변형 없음.
+    # 음수 waste_qty는 전일 재고 이월(carry-in)로 판매가 당일 생산을 초과한 실제 신호이며
+    # (해당 행에서 identity_diff==0), clip하면 항등식이 깨지고 폐기율이 부풀려진다.
+    raw = pd.read_parquet(paths.dataset("waste_alpha_4stores"))
+    raw = raw[raw["cd"].astype(str) == "1000000047"].reset_index(drop=True)
+    assert waste["production_qty"].tolist() == raw["made"].tolist()
+    assert waste["waste_qty"].tolist() == raw["out"].tolist()
 
 
 @pytest.mark.slow
@@ -807,7 +815,12 @@ class AnalysisInputs:
 
     @cached_property
     def waste(self) -> pd.DataFrame:
-        """생산/폐기/마감 실측(4매장). production_qty=made, waste_qty=out."""
+        """생산/폐기/마감 실측(4매장). production_qty=made, waste_qty=out.
+
+        waste_qty 음수는 전일 재고 이월(carry-in)로 판매가 당일 생산을 초과한 경우다
+        (그 행에서도 made−(normal+closing)−out=0 항등식은 성립). 값을 clip하지 않는다 —
+        clip하면 항등식이 깨지고 폐기율(1차 KPI)이 부풀려진다.
+        """
         df = pd.read_parquet(paths.dataset("waste_alpha_4stores"))
         df["cd"] = df["cd"].astype(str)
         df["item_id"] = df["item_id"].astype(str)
@@ -3627,6 +3640,12 @@ git commit -m "feat(analysis-lab): sales_distribution 핸들러"
 
 **항등식 정의:** `waste_alpha_4stores`의 `identity_diff`는 `production − sold_total − waste`의 잔차다(빌드 시 계산됨). 이 핸들러는 잔차를 **재계산하지 않고 검증**한다: `production_qty − (normal_qty + closing_qty) − waste_qty`가 `identity_diff`와 일치하는지 확인하고, 0이 아닌 행의 비중·크기를 표로 낸다. 재계산 공식이 컬럼과 어긋나면 그 자체가 발견이므로 note에 남긴다.
 
+**★ carry-in 음수 폐기 (2026-07-28 실측 확인, Task 3에서 발견):** `waste_qty`(=`out`)는 8,108/280,779행(2.89%, min −282, 4매장 전부)에서 **음수**다. 손상이 아니라 **전일 재고 이월** 신호다 — 판매가 당일 생산을 초과한 경우이며, 그 행에서도 `identity_diff == 0`이다(`out`은 정의상 `made − sold`). 따라서:
+- **clip 금지.** 광교 폐기율이 0.12532 → 0.12933로 +3.2% 상대 부풀려진다(1차 KPI 왜곡).
+- 항등식 검증은 음수 영향 없음(정의상 성립) — `identity_residual`은 그대로 둔다.
+- 폐기율은 순합(net) 기준이며, 이를 **note에 명시**해 소비자가 gross로 오독하지 않게 한다.
+- 매장별 carry-in 행수/합계를 `by_store` 표에 컬럼으로 실어 은폐하지 않는다.
+
 - [ ] **Step 1: 테스트 작성**
 
 `tests/analysis_lab/test_handlers_waste.py`:
@@ -3675,6 +3694,19 @@ def test_waste_rate_by_store_exact():
     assert row["waste_qty"] == 30                # 6+4+10+10
     assert row["waste_rate"] == pytest.approx(0.2)
     assert row["waste_cost"] == 130000
+    assert row["n_carry_in"] == 0                 # 이 fixture엔 음수 폐기 없음
+    assert row["carry_in_units"] == pytest.approx(0.0)
+
+
+def test_waste_rate_by_store_surfaces_carry_in_negatives():
+    """음수 waste_qty(전일 재고 이월)는 clip하지 않고 순합 + 건수/합계로 노출한다."""
+    frame = _waste().copy()
+    frame.loc[0, "waste_qty"] = -4               # 판매가 당일 생산 초과 → carry-in
+    row = waste_rate_by_store(frame).iloc[0]
+    assert row["waste_qty"] == 20                 # -4+4+10+10 (clip 안 함)
+    assert row["n_carry_in"] == 1
+    assert row["carry_in_units"] == pytest.approx(-4.0)
+    assert row["waste_rate"] == pytest.approx(20 / 150)
 
 
 def test_waste_rate_by_item_exact_and_filters_low_production():
@@ -3749,6 +3781,9 @@ from bakery.analysis.lab.result import KIND_DATA, AnalysisResult
 MIN_PRODUCTION_FOR_ITEM_RATE = 30      # 생산 누적 30 미만은 비율이 불안정 → 제외
 _IDENTITY_TOLERANCE = 1e-9
 _NOTE_COST_BASIS = ("waste_cost는 판매가 기준 — 사업 임팩트 인용 시 원가율(≈0.3)을 곱해야 한다.")
+_NOTE_CARRY_IN = ("폐기율은 **순합(net)** 기준이다. waste_qty 음수 행(전일 재고 이월로 판매가 "
+                  "당일 생산을 초과, 실측 2.89%)을 clip하지 않으므로 gross 폐기보다 낮다 — "
+                  "clip하면 made−sold−out=0 항등식이 깨지고 폐기율이 부풀려진다(광교 +3.2% 상대).")
 _NOTE_LEGACY = ("레거시 eda02/04/05(inventory.parquet 직독)와 수치 등가가 아니다 — "
                 "canonical waste_alpha_4stores 기준 재표현이다.")
 
@@ -3758,10 +3793,18 @@ def _rate(waste_qty: pd.Series, production_qty: pd.Series) -> pd.Series:
 
 
 def waste_rate_by_store(waste: pd.DataFrame) -> pd.DataFrame:
-    grouped = (waste.groupby(["cd", "store"], observed=True)
+    """매장별 폐기율(순합 기준). carry-in 음수 행수/합계를 함께 실어 은폐하지 않는다."""
+    frame = waste.copy()
+    frame["is_carry_in"] = frame["waste_qty"] < 0
+    grouped = (frame.groupby(["cd", "store"], observed=True)
                .agg(production_qty=("production_qty", "sum"),
-                    waste_qty=("waste_qty", "sum"), waste_cost=("waste_cost", "sum"))
+                    waste_qty=("waste_qty", "sum"), waste_cost=("waste_cost", "sum"),
+                    n_carry_in=("is_carry_in", "sum"))
                .reset_index())
+    carry_in_sum = (frame[frame["is_carry_in"]].groupby(["cd", "store"], observed=True)
+                    ["waste_qty"].sum().rename("carry_in_units"))
+    grouped = grouped.merge(carry_in_sum, on=["cd", "store"], how="left")
+    grouped["carry_in_units"] = grouped["carry_in_units"].fillna(0.0)
     grouped["waste_rate"] = _rate(grouped["waste_qty"], grouped["production_qty"])
     return grouped
 
@@ -3826,7 +3869,7 @@ def waste_rate(inputs: AnalysisInputs) -> AnalysisResult:
         figures=[_bar_fig(by_store, "store", "waste_rate", "매장별 폐기율", "폐기율"),
                  _bar_fig(by_item.head(20), "item_id", "waste_rate",
                           "품목별 폐기율 상위 20", "폐기율")],
-        notes=[_NOTE_COST_BASIS, _NOTE_LEGACY],
+        notes=[_NOTE_COST_BASIS, _NOTE_CARRY_IN, _NOTE_LEGACY],
     )
 
 
@@ -3853,7 +3896,7 @@ def overproduction_breakdown(inputs: AnalysisInputs) -> AnalysisResult:
                           "카테고리별 폐기비용 비중", "비중"),
                  _bar_fig(by_category, "category_id", "waste_rate",
                           "카테고리별 폐기율", "폐기율")],
-        notes=[_NOTE_COST_BASIS, _NOTE_LEGACY],
+        notes=[_NOTE_COST_BASIS, _NOTE_CARRY_IN, _NOTE_LEGACY],
     )
 ```
 
