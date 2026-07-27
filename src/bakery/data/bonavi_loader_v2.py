@@ -20,6 +20,7 @@ YYYYMMDDHHMMSS)에 묶여 있다. 신규 파일은 4중 확장(4매장·전품�
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -272,19 +273,18 @@ def build_multistore(
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out_path.parent
     frames = []
-    for store_id, store_code in STORE_CODE_MAPPING.items():
-        daily_path = tmp / f"_ms_{store_id}_daily.parquet"
-        receipts_path = tmp / f"_ms_{store_id}_receipts.parquet"
-        build_v2(
-            clean_parquet=clean_parquet, master_xlsx=master_xlsx,
-            store_code=store_code, rename_store_id=store_id,
-            out_path=daily_path, receipts_path=receipts_path,
-        )
-        frames.append(pd.read_parquet(daily_path))
-        daily_path.unlink(missing_ok=True)
-        receipts_path.unlink(missing_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        for store_id, store_code in STORE_CODE_MAPPING.items():
+            daily_path = tmp / f"_ms_{store_id}_daily.parquet"
+            receipts_path = tmp / f"_ms_{store_id}_receipts.parquet"
+            build_v2(
+                clean_parquet=clean_parquet, master_xlsx=master_xlsx,
+                store_code=store_code, rename_store_id=store_id,
+                out_path=daily_path, receipts_path=receipts_path,
+            )
+            frames.append(pd.read_parquet(daily_path))
     daily = pd.concat(frames, ignore_index=True)
     daily.to_parquet(out_path, index=False)
     return out_path

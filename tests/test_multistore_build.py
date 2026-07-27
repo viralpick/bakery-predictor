@@ -16,7 +16,9 @@ def multistore(tmp_path_factory):
 
 
 def test_multistore_has_four_stores(multistore):
-    assert set(multistore["store_id"].unique()) == {
+    counts = multistore.groupby("store_id").size()
+    assert (counts > 0).all()
+    assert set(counts.index) == {
         "store_gw01", "store_ss01", "store_gh01", "store_mp01"}
 
 
@@ -34,5 +36,5 @@ def test_multistore_gwangyo_matches_canonical(multistore):
     canon = canon.sort_values(keys).reset_index(drop=True)
     assert len(gw) == len(canon)
     for c in gw.select_dtypes(include=[np.number]).columns:
-        max_diff = float((gw[c].fillna(-9e9).to_numpy() - canon[c].fillna(-9e9).to_numpy()).max())
+        max_diff = float(np.abs(gw[c].fillna(-9e9).to_numpy() - canon[c].fillna(-9e9).to_numpy()).max())
         assert max_diff == 0.0, f"{c} diff={max_diff}"
