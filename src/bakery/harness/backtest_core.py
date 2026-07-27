@@ -54,8 +54,9 @@ def windowed_backtest(
         prod_pred = model.predict_production(test_df)
         # 특수일 레벨-앵커 prior: pre-test 전체 history로 fit (train window보다 길게, leakage-safe)
         hist = df[df["date"] < test_start_date]
-        prior = EventLevelPrior(events=events, lunar_events=lunar_events).fit(hist, target_col=target_col)
-        exp_pred, prod_pred = prior.blend(test_df["date"].values, exp_pred, prod_pred)
+        if events or lunar_events:   # event_prior 명시적으로 있을 때만 적용 (None/{}=비활성, EventLevelPrior의 xmas default fallback 방지)
+            prior = EventLevelPrior(events=events, lunar_events=lunar_events).fit(hist, target_col=target_col)
+            exp_pred, prod_pred = prior.blend(test_df["date"].values, exp_pred, prod_pred)
         actual = test_df[target_col].values
         wape = np.abs(actual - exp_pred).sum() / max(np.abs(actual).sum(), 1)
         folds.append(dict(
