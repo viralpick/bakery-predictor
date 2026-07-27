@@ -73,10 +73,12 @@ def alpha_estimates_table(report: dict) -> pd.DataFrame:
 
 
 def regime_verdict(report: dict) -> str:
-    """run_discount_regime 반환 dict → 판정. p_value가 없어 CI90로 읽는다."""
+    """run_discount_regime 반환 dict → 판정. p_value가 없어 CI로 읽는다."""
     share = report["closing_share"]
+    # CI95: discount_regime.Z_95(1.9599…) 기준 — demand_absorption의 CI90(norm.ppf(0.95)
+    # two-sided)과 신뢰수준이 다르다. 프리미티브가 만드는 구간을 그대로 라벨링한다.
     return (f"레짐 전환 {report['verdict']} — closing_share β={share.beta:.4f} "
-            f"CI90[{share.ci_low:.4f},{share.ci_high:.4f}], "
+            f"CI95[{share.ci_low:.4f},{share.ci_high:.4f}], "
             f"placebo {len(report['placebo'])}건, n={report['n']} "
             f"(cut={pd.Timestamp(report['cut_date']).date()})")
 
@@ -110,12 +112,11 @@ def closing_discount(inputs: AnalysisInputs) -> AnalysisResult:
     report = run_closing_demand(inputs.discount_rows, closing_waste_frame(inputs.waste),
                                inputs.item_to_category, category=category)
     estimates = alpha_estimates_table(report)
+    by_hour = discount_hour_table(ds, inputs.item_to_category)
     return AnalysisResult(
         name="closing_discount", kind=KIND_HYPOTHESIS, title="마감할인 실수요 비율 α 추정",
-        tables=[("estimates", estimates), ("panel", report["panel"]),
-                ("by_hour", discount_hour_table(ds, inputs.item_to_category))],
-        figures=[_panel_fig(report["panel"]),
-                 _hour_fig(discount_hour_table(ds, inputs.item_to_category))],
+        tables=[("estimates", estimates), ("panel", report["panel"]), ("by_hour", by_hour)],
+        figures=[_panel_fig(report["panel"]), _hour_fig(by_hour)],
         verdict=alpha_verdict(report["alpha"]),
         notes=[_NOTE_ALPHA_STRUCTURAL, _NOTE_WASTE_SOURCE, f"카테고리={category}"],
     )

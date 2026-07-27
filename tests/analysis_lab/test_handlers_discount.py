@@ -87,7 +87,7 @@ def test_regime_verdict_uses_ci_and_placebo():
               "closing_share": share, "closing_intensity": share,
               "placebo": [], "verdict": "shift"}
     assert regime_verdict(report) == (
-        "레짐 전환 shift — closing_share β=-0.0500 CI90[-0.0700,-0.0300], "
+        "레짐 전환 shift — closing_share β=-0.0500 CI95[-0.0700,-0.0300], "
         "placebo 0건, n=500 (cut=2024-01-01)")
 
 
