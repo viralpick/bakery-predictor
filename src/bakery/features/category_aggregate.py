@@ -91,14 +91,27 @@ def build_category_daily(
     daily = _attach_unit_price(daily)
     daily["revenue"] = daily["sold_units"] * daily["unit_price"]
 
-    # closing
+    # closing (신규 클린 parquet 우선, 없으면 옛 0520 폴백 — build_item_adjusted_demand와 동일 패턴)
     if discount_rows is None:
-        ds = load_sales_with_discount()
-        discount_rows = ds.closing_discount().copy()
-        discount_rows["item_id"] = discount_rows["item_id"].astype(str)
-        if closing_returns is None:
-            from bakery.analysis.discount import load_closing_returns
-            closing_returns = load_closing_returns()
+        from bakery.analysis.discount import (
+            CLEAN_PARQUET_DEFAULT,
+            load_closing_returns,
+            load_closing_returns_v2,
+            load_sales_with_discount,
+            load_sales_with_discount_v2,
+        )
+        if CLEAN_PARQUET_DEFAULT.exists():
+            ds = load_sales_with_discount_v2()
+            discount_rows = ds.closing_discount().copy()
+            discount_rows["item_id"] = discount_rows["item_id"].astype(str)
+            if closing_returns is None:
+                closing_returns = load_closing_returns_v2()
+        else:
+            ds = load_sales_with_discount()
+            discount_rows = ds.closing_discount().copy()
+            discount_rows["item_id"] = discount_rows["item_id"].astype(str)
+            if closing_returns is None:
+                closing_returns = load_closing_returns()
 
     cd = filter_seasonal(discount_rows)
     cd["date"] = pd.to_datetime(cd["date"])

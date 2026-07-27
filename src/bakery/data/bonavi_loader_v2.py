@@ -20,6 +20,7 @@ YYYYMMDDHHMMSS)에 묶여 있다. 신규 파일은 4중 확장(4매장·전품�
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -255,3 +256,35 @@ def build_v2(
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     daily.to_parquet(out_path, index=False)
     return Path(out_path)
+
+
+def build_multistore(
+    *,
+    clean_parquet: Path | str = CLEAN_PARQUET,
+    master_xlsx: Path | str = MASTER_XLSX,
+    out_path: Path | str = paths.dataset("multistore_daily"),
+) -> Path:
+    """4매장 daily를 별도 parquet로. 각 매장은 build_v2 재사용, concat 후 저장.
+
+    광교(store_gw01) 파트는 build_v2(canonical과 동일 경로)라 bonavi_daily와 정합.
+    receipts는 매장별 임시경로에 쓰고 버린다(multistore는 daily만 소비).
+    """
+    from ..ingest.inventory import STORE_CODE_MAPPING
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    frames = []
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        for store_id, store_code in STORE_CODE_MAPPING.items():
+            daily_path = tmp / f"_ms_{store_id}_daily.parquet"
+            receipts_path = tmp / f"_ms_{store_id}_receipts.parquet"
+            build_v2(
+                clean_parquet=clean_parquet, master_xlsx=master_xlsx,
+                store_code=store_code, rename_store_id=store_id,
+                out_path=daily_path, receipts_path=receipts_path,
+            )
+            frames.append(pd.read_parquet(daily_path))
+    daily = pd.concat(frames, ignore_index=True)
+    daily.to_parquet(out_path, index=False)
+    return out_path

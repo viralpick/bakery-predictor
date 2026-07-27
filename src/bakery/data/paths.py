@@ -30,6 +30,7 @@ _DATASETS: dict[str, Path] = {
     "sales_lines_clean": INTERIM_DIR / "sales_lines_clean.parquet",
     # --- processed / internal (rebuild-deterministic) ---
     "bonavi_daily": _INTERNAL / "bonavi_daily.parquet",
+    "multistore_daily": _INTERNAL / "multistore_daily.parquet",
     "bonavi_receipts": _INTERNAL / "bonavi_receipts.parquet",
     # waste_alpha_4stores: 유일하게 src/가 소비하는 data/internal/v2/ 파일
     # (cli.py:1616 CLOSING_DEMAND_WASTE_PARQUET, 읽기는 :1630, :1713). Task 5에서 이관.

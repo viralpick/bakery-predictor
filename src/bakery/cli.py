@@ -1316,6 +1316,15 @@ def cmd_format_bonavi_v2(
     )
 
 
+@app.command("build-multistore")
+def cmd_build_multistore() -> None:
+    """4매장 multistore_daily.parquet 생성 (광교 canonical 불변, 참조/분석용)."""
+    from .data import bonavi_loader_v2 as v2
+
+    out = v2.build_multistore()
+    console.print(f"[green]wrote[/] {out}")
+
+
 @app.command("check-integrity")
 def cmd_check_integrity(source: str = "sales_lines_clean", strict: bool = False) -> None:
     """신규 데이터 forward 무결성 게이트. 타깃 품목 누락=fail(exit non-zero),
