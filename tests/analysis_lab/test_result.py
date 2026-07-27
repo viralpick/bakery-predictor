@@ -2,8 +2,14 @@ import pandas as pd
 import pytest
 
 from bakery.analysis.lab.result import (
-    KIND_DATA, KIND_HYPOTHESIS, REASON_OFF, REASON_PREDS_REQUIRED,
-    REASON_SINGLE_STORE_REQUIRED, AnalysisReport, AnalysisResult, SkippedResult,
+    KIND_DATA,
+    KIND_HYPOTHESIS,
+    REASON_OFF,
+    REASON_PREDS_REQUIRED,
+    REASON_SINGLE_STORE_REQUIRED,
+    AnalysisReport,
+    AnalysisResult,
+    SkippedResult,
 )
 
 
