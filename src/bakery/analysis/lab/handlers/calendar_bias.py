@@ -12,6 +12,13 @@ from bakery.analysis.holiday_premium import SERIES_VALUE_COLUMN, decompose_holid
 from bakery.analysis.lab.inputs import AnalysisInputs
 from bakery.analysis.lab.registry import register_hypothesis
 from bakery.analysis.lab.result import KIND_HYPOTHESIS, AnalysisResult
+from bakery.analysis.month_dow import (
+    ADJUSTED_COLUMN,
+    DOW_LABELS,
+    RAW_COLUMN,
+    adjust_effect_table,
+    month_dow_matrix,
+)
 
 PREMIUM_THRESHOLD = 0.05      # 평일 프리미엄 판정 임계(5%)
 _NOTE_VINTAGE = ("시리즈는 현 vintage build_category_daily(alpha)에서 생성 — "
@@ -85,4 +92,45 @@ def holiday_premium(inputs: AnalysisInputs) -> AnalysisResult:
         figures=[_dow_class_fig(tables["dow_class"]), _ranking_fig(tables["event_ranking"])],
         verdict=premium_verdict(tables["dow_class"]),
         notes=[_NOTE_VINTAGE, _NOTE_CALENDAR],
+    )
+
+
+_NOTE_MONTH_DOW_SOURCE = ("출처 스크립트는 레거시 sales.parquet 직독 + α=0.5였다. "
+                          "여기는 canonical category_daily + 헌장 α — 수치 등가가 아니라 "
+                          "구조/방향만 비교 가능하다.")
+
+
+def month_dow_verdict(table: pd.DataFrame) -> str:
+    """조정이 특정 월×요일 칸에 편중되면 그 축에 구조가 있다는 신호."""
+    worst = table.loc[table["delta_pct"].idxmin()]
+    spread = float(table["delta_pct"].max() - table["delta_pct"].min())
+    return (f"조정 효과 최대 칸: {int(worst['month'])}월 "
+            f"{DOW_LABELS[int(worst['dow'])]}요일 {worst['delta_pct']:.1f}%, "
+            f"칸간 편차 {spread:.1f}%p")
+
+
+def _heatmap_fig(matrix: pd.DataFrame, title: str) -> go.Figure:
+    fig = go.Figure(go.Heatmap(z=matrix.to_numpy(), x=matrix.columns.tolist(),
+                               y=matrix.index.tolist(), colorscale="Blues"))
+    fig.update_layout(title=title, xaxis_title="요일", yaxis_title="월")
+    return fig
+
+
+@register_hypothesis("month_dow_adjust", "월×요일 매트릭스 — 마감 조정 전후",
+                     needs_single_store=True)
+def month_dow_adjust(inputs: AnalysisInputs) -> AnalysisResult:
+    series = inputs.category_daily
+    table = adjust_effect_table(series)
+    raw_matrix = month_dow_matrix(series, RAW_COLUMN)
+    adjusted_matrix = month_dow_matrix(series, ADJUSTED_COLUMN)
+    return AnalysisResult(
+        name="month_dow_adjust", kind=KIND_HYPOTHESIS,
+        title="월×요일 매트릭스 — 마감 조정 전후",
+        tables=[("effect", table),
+                ("raw_matrix", raw_matrix.reset_index()),
+                ("adjusted_matrix", adjusted_matrix.reset_index())],
+        figures=[_heatmap_fig(raw_matrix, "raw 일평균 (월×요일)"),
+                 _heatmap_fig(adjusted_matrix, "adjusted 일평균 (월×요일)")],
+        verdict=month_dow_verdict(table),
+        notes=[_NOTE_MONTH_DOW_SOURCE],
     )
