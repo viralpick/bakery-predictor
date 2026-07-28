@@ -57,7 +57,7 @@
 | `lab/handlers/waste.py` | `waste_rate`, `waste_alpha_identity`, `overproduction_breakdown` |
 | `lab/handlers/absorption.py` | `demand_absorption` |
 | `lab/handlers/discount.py` | `closing_discount`, `other_discounts`, `discount_regime` |
-| `lab/handlers/stockout.py` | `stockout_revenue`, `popularity_stockout` |
+| `lab/handlers/stockout.py` | `stockout_lost_demand`, `popularity_stockout` |
 | `lab/handlers/substitution.py` | `substitution` |
 | `lab/handlers/calendar_bias.py` | `holiday_premium`, `month_dow_adjust` |
 | `lab/handlers/model_bias.py` | `seasonal_bias`, `weather_bias`, `weekday_bias`, `event_prior_validation` (preds 의존 4종) |
@@ -1698,7 +1698,7 @@ data_analyses:
 hypotheses:
   demand_absorption: true
   substitution: false
-  stockout_revenue: true
+  stockout_lost_demand: true
   closing_discount: true
   other_discounts: false
   discount_regime: false
@@ -1727,7 +1727,7 @@ data_analyses:
   waste_rate: true
 hypotheses:
   demand_absorption: true
-  stockout_revenue: true
+  stockout_lost_demand: true
 ```
 
 `.claude/CLAUDE.md`의 실행 블록에 한 줄 추가 (`harness-run` 관련 줄 근처):
@@ -4380,7 +4380,14 @@ git commit -m "feat(analysis-lab): 할인 3종(마감α/마감외/레짐) 핸들
 
 ---
 
-### Task 13: `stockout_revenue` + `popularity_stockout` (형태②)
+### Task 13: `stockout_lost_demand` + `popularity_stockout` (형태②)
+
+> **⚠️ 실행 후 재범위화 (2026-07-28, Task 13 리뷰 결과) — 아래 원안과 실제 구현이 다르다.**
+> 1. **`stockout_revenue` → `stockout_lost_demand`로 개명하고 가설 판정을 제거했다.** 원안 핸들러는 제목이 "매진의 매장 매출 영향(무영향 가정 검증)"이고 지지/부분기각 verdict를 냈지만, 실제로 재는 것은 traffic 통제가 없는 **집계 검열 규모**다. 진짜 검정은 `scripts/verify_stockout_revenue_4stores.py`의 4-layer OLS(`smf.ols("log_rev ~ n_stockout + C(dow) + C(month) + yr")`, 207줄, statsmodels)이며 **이식되지 않았다**. 실측: 이 핸들러는 4매장 전부 "부분 기각"(광교 19.6%·광화문 40.2%·삼성 35.4%·메세나 26.8%)을 내지만, 원 스크립트를 돌리면 여전히 **3/4 매장 무영향**을 재현한다 — 방법론 차이다. 그대로 출하하면 2회 검증된 결론(2026-06-03, 07-10 재검증)과 상충하는 판정이 고객 HTML에 실린다. 그래서 제목을 "매진 추정 손실 규모(하한)", verdict를 **규모 서술**로 바꾸고 `_NOTE_NOT_THE_HYPOTHESIS_TEST`로 미이식 사실과 기존 결론을 명시했다. OLS 정식 이식은 **백로그**.
+> 2. **`popularity_stockout`의 측정을 ablation으로 교체했다.** 원안(`avg_daily_sold` vs `avg_daily_sold × adj_stockout`)은 `adj_stockout ∈ [1.0, 1.2]`라 곱이 원본에 지배되어 tautology였고, 중간 수정(`base_sold` vs `proportion`)도 4개 조정계수(`adj_trend`/`adj_stockout`/`adj_closing`/`adj_new`)가 한 rho에 섞여 부스트 기여를 분리하지 못했다. 최종: **`adj_stockout`만 1.0으로 되돌린 반사실 배분과 비교**(나머지 계수 동일 → 순위 차이가 곧 부스트 효과) + `n_top_changed`(top10 교체)·`max_abs_share_delta` 병기. 실측 광교: spearman 0.996(n=37), `n_top_changed`=0, `max_abs_share_delta`=0.0030 → 세 신호가 독립적으로 "부스트가 순위를 안 바꾼다"를 확인.
+> 3. `n_stockout_days` → `n_stockout_item_days`(item-day를 센다).
+>
+> 아래 원안 코드/테스트는 브리프 기록으로 남긴다 — **구현 진실은 `src/bakery/analysis/lab/handlers/stockout.py`**다.
 
 **Files:**
 - Create: `src/bakery/analysis/lab/handlers/stockout.py`
