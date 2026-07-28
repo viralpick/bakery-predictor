@@ -19,7 +19,7 @@ data_analyses:
 hypotheses:
   demand_absorption: true
   substitution: false
-  stockout_revenue: true
+  stockout_lost_demand: true
   closing_discount: true
   other_discounts: false
   discount_regime: false

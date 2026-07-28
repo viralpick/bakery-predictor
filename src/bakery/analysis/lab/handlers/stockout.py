@@ -1,9 +1,15 @@
-"""가설 — 매진의 매출 영향 / 매진 보정이 인기 신호를 흔드는가.
+"""매진 추정 손실 규모(하한) 보고 / 매진 보정이 인기 신호를 흔드는가.
 
 계산은 `bakery.analysis.{self_fulfillment, popularity}` 프리미티브 호출.
 출처 스크립트: verify_stockout_revenue_4stores(_fixed), revalidate_popularity_stockout.
 
-측정 헌장: 품절일 판매량은 censored — 추정 손실은 하한이다(무영향 판정은 보수적).
+측정 헌장: 품절일 판매량은 censored — 추정 손실은 하한이다.
+
+★`stockout_lost_demand`는 "매진의 매장 매출 영향(무영향 가정)" 가설 검정이 **아니다**.
+그 가설은 traffic 통제 4-layer OLS(scripts/verify_stockout_revenue_4stores.py)로
+2026-06-03/07-10 두 차례 검증됐고(3/4 매장 무영향·메세나만 약신호), 그 OLS는 아직
+프리미티브로 이식되지 않았다. 여기서는 그와 다른 것 — 대체구매를 통제하지 않은
+품목단위 손실 합산 규모 — 만 보고한다. 자세한 사유는 `_NOTE_NOT_THE_HYPOTHESIS_TEST`.
 """
 from __future__ import annotations
 
@@ -23,17 +29,29 @@ from bakery.analysis.self_fulfillment import (
 LOST_UNITS_COLUMN = "lost_units"                 # estimated_lost_demand의 손실량 컬럼
 _LOCAL_ESTIMATE_COLUMNS = ("potential_demand",)  # 함수 내부 추정치 — 출력에서 드롭
 
-LOST_SHARE_THRESHOLD = 0.02      # 추정 손실 비중 2% 미만 = 무영향
+LOST_SHARE_THRESHOLD = 0.02      # 보고 임계(가설 게이트 아님) — 이 비중 이상이면 표에 표시
 POPULARITY_CORR_THRESHOLD = 0.8  # 순위 상관 0.8 이상 = 신호 안정
 _TOP_ITEMS = 15
 _NOTE_CENSORED = ("품절일 판매량은 censored — 추정 손실은 하한이다. "
-                  "따라서 '무영향' 판정은 보수적이고, '영향 있음'은 강한 신호다.")
+                  "실제 손실은 이 수치 이상일 수 있다.")
 _NOTE_LOST_MODEL = ("손실 추정은 features/potential_demand와 같은 시간가중 공식 "
                     "(estimated_lost_demand) — 모델 예측이 아니라 관측 기반 산식이다.")
+_NOTE_NOT_THE_HYPOTHESIS_TEST = (
+    "이 항목은 매진으로 인한 추정 손실 **규모**만 보고한다 — '매진이 매장 매출에 영향 없다'는 "
+    "가설의 검정이 아니다. 그 검정은 traffic 통제 4-layer OLS"
+    "(scripts/verify_stockout_revenue_4stores.py, log_rev ~ n_stockout + C(dow) + C(month) + yr)이며 "
+    "아직 프리미티브로 이식되지 않았다. 기존 확정 결론(2026-06-03, 2026-07-10 재검증)은 "
+    "3/4 매장(광교·삼성·광화문) 무영향 / 메세나폴리스 약신호이고, 여기 수치와 상충하지 않는다 "
+    "— 서로 다른 것을 재기 때문이다."
+)
 
 
 def lost_demand_summary(daily: pd.DataFrame) -> pd.DataFrame:
-    """매장별 매진일 수 + 추정 손실 수량 + sold 대비 비중."""
+    """매장별 매진 품목-일 건수 + 추정 손실 수량 + sold 대비 비중.
+
+    `n_stockout_item_days`는 캘린더 일수가 아니라 (품목×일) 단위로 `is_stockout`이
+    True인 행수다 — 한 매장이 하루에 여러 품목이 동시에 매진되면 그만큼 여러 번 잡힌다.
+    """
     lost = estimated_lost_demand(daily)
     per_store_lost = lost.groupby("store_id")[LOST_UNITS_COLUMN].sum()
     rows = []
@@ -41,41 +59,41 @@ def lost_demand_summary(daily: pd.DataFrame) -> pd.DataFrame:
         sold = float(group["sold_units"].sum())
         est_lost = float(per_store_lost.get(store, 0.0))
         rows.append({"store_id": store,
-                     "n_stockout_days": int(group["is_stockout"].sum()),
+                     "n_stockout_item_days": int(group["is_stockout"].sum()),
                      "est_lost_units": est_lost,
                      "lost_share_of_sold": est_lost / sold if sold else 0.0})
     return pd.DataFrame(rows)
 
 
-def stockout_revenue_verdict(summary: pd.DataFrame) -> str:
-    material = summary[summary["lost_share_of_sold"] >= LOST_SHARE_THRESHOLD]
-    max_share = float(summary["lost_share_of_sold"].max()) * 100
-    if len(material) == 0:
-        return (f"지지(무영향) — 매장 {len(summary)}곳 전부 추정 손실 비중 2% 미만 "
-                f"(최대 {max_share:.1f}%)")
-    return (f"부분 기각 — {material['store_id'].tolist()} 매장에서 추정 손실 비중 "
-            f"2% 이상 (최대 {max_share:.1f}%)")
+def lost_demand_verdict(summary: pd.DataFrame) -> str:
+    """규모 보고 — 무영향 가설의 판정이 아니다(그 검정은 이식되지 않았다)."""
+    worst = summary.loc[summary["lost_share_of_sold"].idxmax()]
+    return (f"추정 손실 비중(하한) 최대 {worst['store_id']} "
+            f"{worst['lost_share_of_sold'] * 100:.1f}%, "
+            f"매장 {len(summary)}곳 중 "
+            f"{int((summary['lost_share_of_sold'] >= LOST_SHARE_THRESHOLD).sum())}곳이 "
+            f"보고 임계 {LOST_SHARE_THRESHOLD * 100:.0f}% 이상")
 
 
 def popularity_boost_correlation(daily: pd.DataFrame, closing: pd.DataFrame, *,
                                  target_date: pd.Timestamp) -> pd.DataFrame:
-    """원시 인기 순위(avg_daily_sold) vs 매진 부스트 적용 배분 순위의 spearman.
+    """원시 인기(base_sold) 순위 vs 실제 배분(proportion) 순위의 spearman.
 
-    옛/새 매진 라벨 A/B는 canonical에 옛 라벨이 없어 불가 — 대신 부스트가 순위를
-    얼마나 재배열하는지를 잰다(Stage2 배분에 실제로 쓰이는 경로).
+    옛/새 매진 라벨 A/B는 canonical에 옛 라벨이 없어 불가하므로, Stage2가 실제로
+    내보내는 proportion과 원시 인기의 순위를 비교한다. adj_stockout 산포를 함께 실어
+    부스트가 순위를 흔들 여지가 얼마나 있었는지 드러낸다(상관만 보면 tautology가 된다).
     """
-    from bakery.analysis.popularity import compute_popularity_signals
     from bakery.models.item_proportion import compute_proportions
 
-    signals = compute_popularity_signals(daily, closing, today=target_date)
     proportions = compute_proportions(daily, target_date)
-    merged = signals[["item_id", "avg_daily_sold"]].merge(
-        proportions[["item_id", "adj_stockout"]], on="item_id", how="inner")
-    merged["boosted_rank_value"] = merged["avg_daily_sold"] * merged["adj_stockout"]
-    pair = merged[["avg_daily_sold", "boosted_rank_value"]].dropna()
-    rho = float(spearmanr(pair["avg_daily_sold"], pair["boosted_rank_value"]).statistic)
-    return pd.DataFrame([{"pair": "raw_vs_stockout_boosted", "spearman": rho,
-                          "n": int(len(pair))}])
+    pair = proportions[["base_sold", "proportion", "adj_stockout"]].dropna()
+    rho = float(spearmanr(pair["base_sold"], pair["proportion"]).statistic)
+    return pd.DataFrame([{
+        "pair": "base_sold_vs_proportion", "spearman": rho, "n": int(len(pair)),
+        "adj_stockout_min": float(pair["adj_stockout"].min()),
+        "adj_stockout_max": float(pair["adj_stockout"].max()),
+        "adj_stockout_std": float(pair["adj_stockout"].std(ddof=0)),
+    }])
 
 
 def popularity_verdict(corr: pd.DataFrame) -> str:
@@ -106,20 +124,20 @@ def _hour_fig(hours: pd.DataFrame) -> go.Figure:
     return fig
 
 
-@register_hypothesis("stockout_revenue", "매진의 매장 매출 영향(무영향 가정 검증)")
-def stockout_revenue(inputs: AnalysisInputs) -> AnalysisResult:
+@register_hypothesis("stockout_lost_demand", "매진 추정 손실 규모(하한)")
+def stockout_lost_demand(inputs: AnalysisInputs) -> AnalysisResult:
     daily = inputs.daily
     summary = lost_demand_summary(daily)
     hours = stockout_hour_distribution(daily)
     return AnalysisResult(
-        name="stockout_revenue", kind=KIND_HYPOTHESIS,
-        title="매진의 매장 매출 영향(무영향 가정 검증)",
+        name="stockout_lost_demand", kind=KIND_HYPOTHESIS,
+        title="매진 추정 손실 규모(하한)",
         tables=[("summary", summary),
                 ("top_self_fulfilling", top_self_fulfilling_items(daily, n=_TOP_ITEMS)),
                 ("hour_distribution", hours)],
         figures=[_lost_fig(summary), _hour_fig(hours)],
-        verdict=stockout_revenue_verdict(summary),
-        notes=[_NOTE_CENSORED, _NOTE_LOST_MODEL],
+        verdict=lost_demand_verdict(summary),
+        notes=[_NOTE_CENSORED, _NOTE_LOST_MODEL, _NOTE_NOT_THE_HYPOTHESIS_TEST],
     )
 
 

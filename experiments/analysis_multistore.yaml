@@ -10,4 +10,4 @@ data_analyses:
   waste_rate: true
 hypotheses:
   demand_absorption: true
-  stockout_revenue: true
+  stockout_lost_demand: true

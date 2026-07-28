@@ -56,8 +56,8 @@ def test_shipped_gwangyo_yaml_loads_with_registry_names():
     assert spec.data.store == "store_gw01"
 
 
-@pytest.mark.xfail(reason="핸들러 전량 등록은 Task 17에서 완료", strict=True)
 def test_shipped_multistore_yaml_is_multistore():
+    # Task 13에서 stockout_lost_demand 등록으로 이 YAML의 이름이 전부 커버됨 — xfail 해제.
     from bakery.analysis.lab.registry import all_names
     from bakery.analysis.lab.spec import load_analysis_spec
 
