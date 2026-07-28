@@ -1,0 +1,33 @@
+# 광교 단독 — 입력 데이터 분석 + 가설 검증
+# predictions는 harness-run 산출 artifact. 지정하면 preds 의존 가설이 활성된다.
+name: analysis_gwangyo
+data:
+  source: real
+  store: store_gw01
+alpha: 0.8                        # 측정 헌장: adjusted_demand = 정상 + 0.8×마감
+predictions: reports/gwangyo_default/category_total/predictions.csv
+params:
+  # event_prior_validation A/B 대조군(layers: [] 로 돌린 harness 산출). Task 17 Step 6b에서 생성.
+  event_prior_validation:
+    baseline_predictions: reports/gwangyo_no_prior/category_total/predictions.csv
+data_analyses:
+  sales_distribution: true
+  category_mix: true
+  waste_rate: true
+  waste_alpha_identity: false
+  overproduction_breakdown: true
+hypotheses:
+  demand_absorption: true
+  substitution: false
+  stockout_lost_demand: true
+  closing_discount: true
+  other_discounts: false
+  discount_regime: false
+  seasonal_bias: false
+  weather_bias: false
+  weekday_bias: false
+  holiday_premium: true
+  month_dow_adjust: false
+  popularity_stockout: false
+  modeling_v4_assumptions: false
+  event_prior_validation: false

@@ -16,17 +16,17 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
-
-from bakery.analysis.demand_absorption import (
-    build_absorption_panel,
-    fit_absorption,
-    run_absorption,
-)
 from store_daily import STORE_MAP, build_store_daily
 from v4_new_data_backtest import V2
 
+from bakery.analysis.demand_absorption import (
+    GATE_CATEGORIES,
+    placebo_absorption,
+    run_absorption,
+)
+
 OUT_DIR = Path("reports/demand_absorption")
-GENERAL_CATEGORIES = ("bread", "pastry")   # 게이트 판정 대상 (단일품목/시즌 제외)
+GENERAL_CATEGORIES = GATE_CATEGORIES   # 게이트 판정 대상(단일품목/시즌 제외) — 프리미티브 별칭
 
 
 def _last_sale_ts(store_cd: str, *, exclude_bulk: bool = True) -> pd.DataFrame:
@@ -94,18 +94,7 @@ def build_all_stores_daily() -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
-def placebo_results(daily: pd.DataFrame) -> list:
-    """미래(d+7) 품절강도로 회귀 — 허위상관/잔차 confound 크기 하한."""
-    panel = build_absorption_panel(daily).sort_values("date")
-    panel["stockout_hours"] = (panel.groupby(["store_id", "category_id"])["stockout_hours"]
-                               .shift(-7))
-    panel = panel.dropna(subset=["stockout_hours"])
-    out = []
-    for store_id, category_id in panel[["store_id", "category_id"]].drop_duplicates().itertuples(index=False):
-        res = fit_absorption(panel, store_id, category_id)
-        if res is not None:
-            out.append(res)
-    return out
+placebo_results = placebo_absorption   # 프리미티브로 승격(demand_absorption.py) — 재구현 금지
 
 
 def _print_table(title: str, results: list) -> None:

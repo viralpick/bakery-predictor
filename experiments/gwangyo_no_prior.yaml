@@ -1,0 +1,9 @@
+# event_prior 없는 baseline — analysis-run의 event_prior_validation A/B 대조군.
+# layers: [] 이므로 특수일 레벨-앵커 블렌드가 적용되지 않는다(Phase 6 Task 17).
+name: gwangyo_no_prior
+data:
+  source: real
+  store: store_gw01
+forecaster: category_total
+layers: []
+event_priors: null

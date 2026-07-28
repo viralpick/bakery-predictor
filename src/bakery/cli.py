@@ -89,6 +89,9 @@ from .models.moving_average import MovingAverage
 from .models.seasonal_naive import SeasonalNaive
 from .models.stockout_classifier import StockoutClassifier
 from .harness import load_spec, run_experiment, build_report
+from .analysis.lab import build_analysis_report, load_analysis_spec, run_analysis
+from .analysis.lab.registry import all_names as analysis_names
+from .analysis.lab.spec import AnalysisSpecError
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 console = Console()
@@ -116,6 +119,37 @@ def cmd_harness_run(
     report_store = spec.data.store if spec.data.source == "real" else None
     report_path = build_report(result, out_path=out / result.name / "report.html", store=report_store)
     console.print(f"[green]report[/] {report_path}")
+
+
+ANALYSIS_DIR = REPORTS_DIR / "analysis"
+
+
+@app.command("analysis-run")
+def cmd_analysis_run(
+    config: Path,
+    out: Path = ANALYSIS_DIR,
+) -> None:
+    """YAML 1개로 입력 데이터 분석 + 가설 검증을 실행한다 (analysis 단일 표면)."""
+    try:
+        spec = load_analysis_spec(config, known_names=analysis_names())
+    except AnalysisSpecError as exc:
+        console.print(f"[red]spec 오류[/] {exc}")
+        raise typer.Exit(code=1) from exc
+    console.print(f"[cyan]analysis[/] {spec.name} store={spec.data.store} "
+                  f"analyses={spec.enabled('data_analyses')} "
+                  f"hypotheses={spec.enabled('hypotheses')}")
+    report = run_analysis(spec, out_dir=out)
+    table = Table(title=f"{spec.name} — 실행 결과")
+    table.add_column("항목")
+    table.add_column("구분")
+    table.add_column("판정/상태")
+    for result in report.results:
+        table.add_row(result.name, result.kind, result.verdict or "실행 완료")
+    for skip in report.skipped:
+        table.add_row(skip.name, skip.kind, skip.reason)
+    console.print(table)
+    path = build_analysis_report(report, out_path=out / spec.name / "analysis_report.html")
+    console.print(f"[green]report[/] {path}")
 
 
 @app.command("generate-data")
