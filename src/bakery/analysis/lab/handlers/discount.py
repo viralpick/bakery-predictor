@@ -22,9 +22,14 @@ from bakery.analysis.lab.result import KIND_HYPOTHESIS, AnalysisResult
 
 CLOSING_CATEGORY_DEFAULT = "bread"
 CLOSING_LABEL = "closing"
-_NOTE_ALPHA_STRUCTURAL = ("광교는 저녁 상시할인 구조라 structural α가 식별되지 않는다"
-                          "(A1 degenerate). 증거는 높은 α 방향이며 헌장 기본값은 0.8이다.")
+_NOTE_ALPHA_STRUCTURAL = ("광교 저녁 상시할인 때문에 A1의 floor가 검증되지 않아 제외되고 "
+                          "A2가 degenerate다. 증거는 높은 α 방향이며 헌장 기본값은 0.8이다.")
 _NOTE_WASTE_SOURCE = "폐기는 waste_alpha_4stores(생산−판매 실측) 기준이다."
+_NOTE_REGIME_POOLING = ("multistore spec에서 build_regime_panel은 store 컬럼(cd)이 없어 "
+                        "4매장을 store 항 없이 한 회귀로 pool한다 — β는 매장별 효과가 아니라 "
+                        "pooled 평균이다. discount_rows 교차 join이 없어 needs_single_store "
+                        "게이트는 걸지 않는다(closing_discount/other_discounts/"
+                        "popularity_stockout보다 약한 문제).")
 
 
 def closing_waste_frame(waste: pd.DataFrame) -> pd.DataFrame:
@@ -103,7 +108,8 @@ def _panel_fig(panel: pd.DataFrame) -> go.Figure:
     return fig
 
 
-@register_hypothesis("closing_discount", "마감할인 실수요 비율 α 추정")
+@register_hypothesis("closing_discount", "마감할인 실수요 비율 α 추정",
+                     needs_single_store=True)
 def closing_discount(inputs: AnalysisInputs) -> AnalysisResult:
     """params: `category`(기본 bread)만 읽는다 — 그 외 키는 무시된다."""
     ds = DiscountSales(rows=inputs.discount_rows)
@@ -157,7 +163,8 @@ def _discount_code_hour_fig(by_hour: pd.DataFrame) -> go.Figure:
     return fig
 
 
-@register_hypothesis("other_discounts", "마감 외 할인코드 시각 분포")
+@register_hypothesis("other_discounts", "마감 외 할인코드 시각 분포",
+                     needs_single_store=True)
 def other_discounts(inputs: AnalysisInputs) -> AnalysisResult:
     rows = inputs.discount_rows
     others = rows[(rows["label"] != CLOSING_LABEL) & (rows["discount_amt"] > 0)]
@@ -221,5 +228,6 @@ def discount_regime(inputs: AnalysisInputs) -> AnalysisResult:
         figures=[_regime_fig(report)],
         verdict=regime_verdict(report),
         notes=[f"카테고리={category}",
-               "placebo cut이 real과 비슷한 β를 내면 그 전환은 구조가 아니라 추세다."],
+               "placebo cut이 real과 비슷한 β를 내면 그 전환은 구조가 아니라 추세다.",
+               _NOTE_REGIME_POOLING],
     )

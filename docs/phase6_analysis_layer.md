@@ -22,10 +22,13 @@ uv run bakery analysis-run experiments/analysis_multistore.yaml         # 4매�
 preds 의존 4종(`seasonal_bias`/`weather_bias`/`weekday_bias`/`event_prior_validation`)은
 artifact가 없으면 리포트에 `(preds 필요 — 미실행)`으로 표기되고 실행되지 않는다.
 
-광교 전용 소스(`category_daily`)를 쓰는 `holiday_premium`/`month_dow_adjust`는
-`needs_single_store` 게이트가 걸려 있어 `analysis_multistore.yaml`로 돌리면
-`(단매장 spec 필요 — 미실행)`으로 표기되고 스킵된다 — 광교 수치가 4매장 분석으로
-잘못 라벨링되는 것을 막기 위한 의도된 동작이다.
+광교 전용 소스(`category_daily`)를 쓰는 `holiday_premium`/`month_dow_adjust`,
+그리고 광교 전용 `discount_rows`(store_code 스코프)를 4매장 소스와 섞어 쓰는
+`closing_discount`/`other_discounts`/`popularity_stockout`은 `needs_single_store`
+게이트가 걸려 있어 `analysis_multistore.yaml`로 돌리면 `(단매장 spec 필요 — 미실행)`으로
+표기되고 스킵된다 — 광교 수치가 4매장 분석으로 잘못 라벨링되는 것을 막기 위한 의도된
+동작이다(`discount_regime`은 store 항 없이 pooling만 되는 약한 문제라 게이트 대상이
+아니다 — 핸들러 note 참조).
 
 ### `event_prior_validation` A/B 모드 전제조건
 
@@ -125,7 +128,8 @@ uv run bakery harness-run experiments/gwangyo_no_prior.yaml
     포함한다. ⚠️ n=11~17은 **underpowered**(검정력 부족)이지 "효과 없음"의 증거가 아니다 —
     캐비앗 2 참조.
   - `event_prior_validation`: A/B 모드(baseline artifact 존재 시) 이벤트일 WPE −2.5707
-    (baseline −19.7625), 개선 −17.19%p, 매진률 0.0 vs baseline 66.67, **n=3**. 비이벤트일
+    (baseline −19.7625), |WPE| 감소 +17.19%p(baseline |19.76| → −2.57), 매진률 0.0 vs
+    baseline 66.67, **n=3**. 비이벤트일
     WPE 0.6775 n=361(baseline 동일). baseline artifact 364행 WAPE 0.0788;
     2025-12-25 expected 240.991106 vs prior 315.833938, actual 307.6; 364행 중 3행만 상이.
     ⚠️ n=3은 **underpowered** — 캐비앗 2 참조.
@@ -155,3 +159,6 @@ uv run bakery harness-run experiments/gwangyo_no_prior.yaml
    각주가 아니라 후속 조치가 필요한 실측 결과로 취급한다.
 7. **DEPRECATED 3종**(`diag_anchor_gh`, `diag_chuseok_gh`, `diagnose_conformal_residual`)은
    `AnalysisSpecError`로 거부된다 — v5 conformal 폐기 계열이므로 이식하지 않았다.
+8. **신뢰수준이 항목마다 다르다 — 교차 비교 금지.** `demand_absorption`은 CI90,
+   `discount_regime`/`pred_bias.segment_contrast`(`seasonal_bias`/`weather_bias`가 소비)는
+   CI95다. 서로 다른 신뢰수준의 구간을 나란히 놓고 "이게 더 넓다/좁다"로 비교하지 말 것.

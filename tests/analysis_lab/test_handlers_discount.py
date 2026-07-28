@@ -108,3 +108,16 @@ def test_other_discounts_handler_shape(stub_inputs):
         "label", "rows", "qty_total", "amt_total", "share_at_pm8"]
     assert tables["by_hour"].columns.tolist() == ["discount_code", "hour", "qty"]
     assert len(tables["by_code"]) == 0
+
+
+def test_closing_discount_and_other_discounts_need_single_store():
+    """fix(final review 2): closing_discount는 광교 discount_rows(store_code 스코프)를
+    4매장 waste와 join하고, other_discounts는 광교 discount_rows만으로 4매장 타이틀
+    아래 결과를 낸다 — 둘 다 holiday_premium과 같은 needs_single_store 게이트가
+    필요하다(mirror test_handlers_calendar_bias.py::test_handler_uses_fresh_...).
+    """
+    from bakery.analysis.lab.registry import HYPOTHESES, load_handlers
+
+    load_handlers()
+    assert HYPOTHESES["closing_discount"].needs_single_store is True
+    assert HYPOTHESES["other_discounts"].needs_single_store is True

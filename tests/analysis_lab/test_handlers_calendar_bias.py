@@ -3,6 +3,7 @@ import pytest
 
 from bakery.analysis.lab.handlers.calendar_bias import (
     _NOTE_MONTH_DOW_SOURCE,
+    _NOTE_NOT_A_VERDICT,
     holiday_premium,
     month_dow_adjust,
     month_dow_verdict,
@@ -87,5 +88,6 @@ def test_month_dow_adjust_handler_structure_and_gate(stub_inputs):
     from bakery.analysis.lab.registry import HYPOTHESES, load_handlers
     load_handlers()
     assert HYPOTHESES["month_dow_adjust"].needs_single_store is True
-    # 출처 α=0.5 직독과의 비등가 고지가 누락되면 안 된다(정확 비교, 존재만 확인 X)
-    assert result.notes == [_NOTE_MONTH_DOW_SOURCE]
+    # 출처 α=0.5 직독과의 비등가 고지 + "규모 보고일 뿐 판정 아님" 고지가 누락되면
+    # 안 된다(정확 비교, 존재만 확인 X)
+    assert result.notes == [_NOTE_MONTH_DOW_SOURCE, _NOTE_NOT_A_VERDICT]

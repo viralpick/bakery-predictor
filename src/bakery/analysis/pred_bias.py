@@ -18,10 +18,8 @@ EXTREME_THRESHOLDS: dict[str, float] = {
     "coldwave_min_ta": -10.0,
     "heavy_rain_mm": 30.0,
 }
-SPIKE_Z = 3.0            # robust z 이상 = 산발 spike(체계적 성분과 분리)
 N_BOOT = 2000
 SEED = 42
-_MAD_SCALE = 0.6745
 _CI_PERCENTILES = (2.5, 97.5)
 
 
@@ -47,18 +45,6 @@ def bias_by_axis(preds: pd.DataFrame, axis_column: str) -> pd.DataFrame:
                      "wpe": wpe_percent(group),
                      "stockout_rate": stockout_rate_percent(group)})
     return pd.DataFrame(rows)
-
-
-def robust_z(values: pd.Series) -> pd.Series:
-    """MAD 기반 robust z. MAD=0이면 0 시리즈(상수 입력)."""
-    median = float(values.median())
-    mad = float((values - median).abs().median())
-    if mad == 0:
-        fallback = float(values.std())
-        if not fallback:
-            return pd.Series(0.0, index=values.index)
-        return _MAD_SCALE * (values - median) / fallback
-    return _MAD_SCALE * (values - median) / mad
 
 
 def segment_contrast(preds: pd.DataFrame, mask: pd.Series, *, n_boot: int = N_BOOT,

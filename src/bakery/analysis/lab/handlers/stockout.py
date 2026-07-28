@@ -76,7 +76,7 @@ def lost_demand_verdict(summary: pd.DataFrame) -> str:
             f"보고 임계 {LOST_SHARE_THRESHOLD * 100:.0f}% 이상")
 
 
-def popularity_boost_correlation(daily: pd.DataFrame, closing: pd.DataFrame, *,
+def popularity_boost_correlation(daily: pd.DataFrame, *,
                                  target_date: pd.Timestamp) -> pd.DataFrame:
     """매진 부스트 ablation — 실제 배분 vs 부스트만 제거한 반사실 배분의 순위 상관.
 
@@ -152,7 +152,8 @@ def stockout_lost_demand(inputs: AnalysisInputs) -> AnalysisResult:
     )
 
 
-@register_hypothesis("popularity_stockout", "매진 재정의가 인기 신호를 흔드는가")
+@register_hypothesis("popularity_stockout", "매진 부스트가 배분 순위를 재배열하는가",
+                     needs_single_store=True)
 def popularity_stockout(inputs: AnalysisInputs) -> AnalysisResult:
     from bakery.analysis.popularity import compute_popularity_signals
     from bakery.models.item_proportion import STOCKOUT_MAX_BOOST
@@ -161,7 +162,7 @@ def popularity_stockout(inputs: AnalysisInputs) -> AnalysisResult:
     closing = closing[closing["label"] == "closing"][["item_id", "date", "qty"]]
     target_date = pd.Timestamp(inputs.daily["date"].max())
     signals = compute_popularity_signals(inputs.daily, closing, today=target_date)
-    corr = popularity_boost_correlation(inputs.daily, closing, target_date=target_date)
+    corr = popularity_boost_correlation(inputs.daily, target_date=target_date)
     fig = go.Figure(go.Bar(x=corr["pair"], y=corr["spearman"]))
     fig.add_hline(y=POPULARITY_CORR_THRESHOLD, line_dash="dash")
     fig.update_layout(title="인기 신호 순위 상관(점선=0.8 임계)", yaxis_title="spearman")

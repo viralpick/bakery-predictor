@@ -76,8 +76,11 @@ def _run_one(handler: registry.Handler, inputs: AnalysisInputs,
     """핸들러 1개 실행. 성공하면 results에 추가하고 None, 실패하면 사유 문자열."""
     try:
         result = handler.fn(inputs)
+        _write_tables(result, out)
+        results.append(result)
     except Exception as exc:                     # noqa: BLE001 — 항목 단위 격리가 목적
+        # fix(final review 6): _write_tables/append가 try 밖에 있으면 to_csv 실패
+        # (중복 컬럼명, 직렬화 불가 dtype 등)가 여기서 안 잡히고 run_analysis 전체를
+        # 죽인다 — N개 항목 중 하나가 실패해도 나머지는 나와야 한다는 계약 위반.
         return f"error: {exc}"
-    _write_tables(result, out)
-    results.append(result)
     return None

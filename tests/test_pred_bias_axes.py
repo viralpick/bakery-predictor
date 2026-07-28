@@ -6,7 +6,6 @@ from bakery.analysis.pred_bias import (
     WEEKEND_DOW,
     WINTER_MONTHS,
     bias_by_axis,
-    robust_z,
     segment_contrast,
     stockout_rate_percent,
     wpe_percent,
@@ -56,18 +55,6 @@ def test_bias_by_axis_groups_and_computes():
     # 매진률: 월 actual 100 > production 95 → 100%
     assert table.loc[0, "stockout_rate"] == 100.0
     assert table.loc[1, "stockout_rate"] == 0.0
-
-
-def test_robust_z_is_zero_at_median():
-    values = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0])
-    z = robust_z(values)
-    assert z[2] == 0.0                            # median=3
-    assert z[4] > 0.0
-
-
-def test_robust_z_handles_zero_mad():
-    z = robust_z(pd.Series([2.0, 2.0, 2.0]))
-    assert z.tolist() == [0.0, 0.0, 0.0]
 
 
 def test_segment_contrast_ci_is_deterministic():

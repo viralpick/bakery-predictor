@@ -119,7 +119,13 @@ def _winner(ci_low: float, ci_high: float) -> str:
 def isowaste_grid(preds: pd.DataFrame, *, w_targets: tuple[float, ...] = W_TARGETS,
                   trims: tuple[float, ...] = E_TRIMS, n_boot: int = N_BOOT,
                   seed: int = SEED) -> pd.DataFrame:
-    """(waste 타겟 × 트림) 격자에서 gap + 부트스트랩 CI + 승자 판정."""
+    """(waste 타겟 × 트림) 격자에서 gap + 부트스트랩 CI + 승자 판정.
+
+    의도된 common-random-numbers: 매 칸마다 같은 `seed`로 bootstrap_gap_ci를 호출하므로
+    9칸이 전부 동일한 주(week) 리샘플 draw를 쓴다(출처 scripts/weekday_bias_isowaste.py는
+    rng 하나를 9칸에 공유 — 동작이 다르지만 점추정엔 영향 없다). 칸간 CI가 상관되므로
+    "칸 하나가 CI 0을 배제"를 여러 칸에 걸쳐 독립 사건처럼 다중비교하면 안 된다.
+    """
     rows = []
     for w_target in w_targets:
         for trim in trims:

@@ -36,6 +36,14 @@ def test_every_handler_has_korean_title():
     for handler in list(DATA_ANALYSES.values()) + list(HYPOTHESES.values()):
         assert handler.title != ""
         assert handler.title != handler.name        # 제목은 이름 재사용 금지(한국어 산문)
+    # fix(final review 1): 데코레이터 title이 AnalysisResult.title과 어긋나면(예:
+    # popularity_stockout이 폐기된 프레이밍을 데코레이터에 남겨뒀던 사고), SkippedResult가
+    # handler.title을 그대로 찍어 잘못된 문구가 리포트에 실린다. 전 핸들러를 실행해
+    # 대조하려면 실데이터/preds artifact IO가 필요해 여기서는 불가능하다 — 대신 재발
+    # 지점인 popularity_stockout/stockout_lost_demand 두 핸들러만 stub_inputs로 실행해
+    # title 일치를 직접 대조한다:
+    # tests/analysis_lab/test_handlers_stockout.py::test_popularity_stockout_handler_shape_and_gate
+    # tests/analysis_lab/test_handlers_stockout.py::test_stockout_lost_demand_handler_shape
 
 
 def test_resolve_returns_handler_for_data_section():

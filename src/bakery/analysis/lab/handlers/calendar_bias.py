@@ -98,6 +98,12 @@ def holiday_premium(inputs: AnalysisInputs) -> AnalysisResult:
 _NOTE_MONTH_DOW_SOURCE = ("출처 스크립트는 레거시 sales.parquet 직독 + α=0.5였다. "
                           "여기는 canonical category_daily + 헌장 α — 수치 등가가 아니라 "
                           "구조/방향만 비교 가능하다.")
+# 크로스컷 cleanup: 이 항목은 stockout_lost_demand와 같은 클래스 — 조정 효과의
+# 크기/모양만 보고하고 가설 채택/기각 판정이 아니다(verdict은 "최악 칸"을 지목할
+# 뿐 유의성 검정이 아니다).
+_NOTE_NOT_A_VERDICT = ("이 항목은 마감 조정 전후 효과의 크기/모양만 보고한다 — 유의성 "
+                      "검정이나 가설 채택/기각 판정이 아니다(stockout_lost_demand와 같은 "
+                      "'규모 보고' 클래스).")
 
 
 def month_dow_verdict(table: pd.DataFrame) -> str:
@@ -132,5 +138,5 @@ def month_dow_adjust(inputs: AnalysisInputs) -> AnalysisResult:
         figures=[_heatmap_fig(raw_matrix, "raw 일평균 (월×요일)"),
                  _heatmap_fig(adjusted_matrix, "adjusted 일평균 (월×요일)")],
         verdict=month_dow_verdict(table),
-        notes=[_NOTE_MONTH_DOW_SOURCE],
+        notes=[_NOTE_MONTH_DOW_SOURCE, _NOTE_NOT_A_VERDICT],
     )

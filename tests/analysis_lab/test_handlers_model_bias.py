@@ -64,14 +64,45 @@ def test_seasonal_bias_verdict_rejects_when_both_noise():
         "여름 WPE 차 +0.50%p CI[-1.00,+2.00] noise(CI 0 포함)")
 
 
-def test_weather_bias_verdict_rejects_when_no_signal():
+def test_weather_bias_verdict_reports_underpowered_not_refuted():
+    """fix(final review 5): n=17/11/14에서 "기각 … 정당화되지 않음"은 반증 주장이라
+    캐비앗("Underpowered ≠ refuted") 위반이었다 — "신호 없음(검정력 부족)"으로 교정."""
     from bakery.analysis.lab.handlers.model_bias import weather_bias_verdict
 
-    contrasts = pd.DataFrame([{"segment": s, "is_signal": False}
-                              for s in ("is_heatwave", "is_coldwave", "is_heavy_rain")])
+    contrasts = pd.DataFrame([
+        {"segment": "is_heatwave", "wpe_diff": 1.984, "n_segment": 17, "is_signal": False},
+        {"segment": "is_coldwave", "wpe_diff": -4.566, "n_segment": 11, "is_signal": False},
+        {"segment": "is_heavy_rain", "wpe_diff": -0.829, "n_segment": 14, "is_signal": False},
+    ])
     assert weather_bias_verdict(contrasts) == (
-        "기각 — 폭염/한파/강한비 전부 CI 0 포함(noise). "
-        "극한날씨 전용 feature는 정당화되지 않음")
+        "신호 없음(검정력 부족) — 폭염/한파/강한비 전부 CI 0 포함. "
+        "표본이 작아(is_heatwave n=17, is_coldwave n=11, is_heavy_rain n=14) "
+        "'효과 없음'으로 단정할 수 없다")
+
+
+def test_weather_bias_verdict_all_segments_empty_is_not_a_ci_claim():
+    """세그먼트/여집합이 전부 비면 CI 자체가 계산되지 않는다 — "CI 0 포함"이라 적으면
+    없는 CI를 있는 것처럼 은폐한다(fix round 1 _empty_contrast_row 경로)."""
+    from bakery.analysis.lab.handlers.model_bias import weather_bias_verdict
+
+    contrasts = pd.DataFrame([
+        {"segment": s, "wpe_diff": float("nan"), "n_segment": 0, "is_signal": False}
+        for s in ("is_heatwave", "is_coldwave", "is_heavy_rain")
+    ])
+    assert weather_bias_verdict(contrasts) == (
+        "판정 불가 — 폭염/한파/강한비 전부 대조군 없음(세그먼트 또는 여집합이 비어 CI 계산 불가)")
+
+
+def test_weather_bias_verdict_supports_when_one_segment_is_signal():
+    from bakery.analysis.lab.handlers.model_bias import weather_bias_verdict
+
+    contrasts = pd.DataFrame([
+        {"segment": "is_heatwave", "wpe_diff": 5.0, "n_segment": 100, "is_signal": True},
+        {"segment": "is_coldwave", "wpe_diff": -1.0, "n_segment": 11, "is_signal": False},
+        {"segment": "is_heavy_rain", "wpe_diff": -0.8, "n_segment": 14, "is_signal": False},
+    ])
+    assert weather_bias_verdict(contrasts) == (
+        "지지 — ['is_heatwave'] 세그먼트에서 CI 0 배제(체계적 편향)")
 
 
 def test_event_prior_verdict_single_artifact_mode():
@@ -83,6 +114,23 @@ def test_event_prior_verdict_single_artifact_mode():
     assert event_prior_verdict(table, is_ab_mode=False) == (
         "단일 artifact 모드 — 이벤트일 WPE -3.00% vs 비이벤트일 -0.50% "
         "(prior 적용 후 잔여 편향; base 대비 개선폭은 baseline preds 필요)")
+
+
+def test_event_prior_verdict_ab_mode_reports_bias_reduction_not_raw_diff():
+    """fix(final review 4): baseline −19.76 / prior −2.57일 때 raw diff(baseline−wpe)
+    −17.19를 "개선 −17.19%p"로 찍으면 17점 악화처럼 읽힌다. WPE는 부호 있는 편향이라
+    개선은 |WPE| 감소량이어야 한다(19.76 → 2.57, 즉 +17.19%p 감소)."""
+    from bakery.analysis.lab.handlers.model_bias import event_prior_verdict
+
+    table = pd.DataFrame([
+        {"segment": "event", "n": 3, "wpe": -2.57, "wpe_baseline": -19.76,
+         "stockout_rate": 0.0, "stockout_rate_baseline": 66.67, "n_baseline": 3},
+        {"segment": "non_event", "n": 361, "wpe": 0.68, "wpe_baseline": 0.68,
+         "stockout_rate": 21.88, "stockout_rate_baseline": 21.88, "n_baseline": 361},
+    ])
+    assert event_prior_verdict(table, is_ab_mode=True) == (
+        "A/B 모드 — 이벤트일 WPE -2.57% (baseline -19.76%), "
+        "|WPE| 감소 +17.19%p (baseline |19.76| → -2.57)")
 
 
 def test_event_dates_for_expands_solar_and_lunar():

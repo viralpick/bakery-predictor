@@ -7,9 +7,11 @@ from bakery.analysis.lab.handlers.stockout import (
     lost_demand_summary,
     lost_demand_verdict,
     popularity_boost_correlation,
+    popularity_stockout,
     popularity_verdict,
     stockout_lost_demand,
 )
+from bakery.analysis.lab.registry import HYPOTHESES, load_handlers
 from bakery.analysis.lab.result import KIND_HYPOTHESIS
 
 
@@ -110,8 +112,7 @@ def test_popularity_boost_correlation_not_vacuous():
     """
     history = _proportions_history()
     target_date = pd.Timestamp("2024-01-01") + pd.Timedelta(days=40)
-    closing = pd.DataFrame(columns=["item_id", "date", "qty"])
-    corr = popularity_boost_correlation(history, closing, target_date=target_date).iloc[0]
+    corr = popularity_boost_correlation(history, target_date=target_date).iloc[0]
     assert corr["pair"] == "proportion_vs_no_stockout_boost"
     assert corr["n"] == 4  # 크기 단언 — 빈 프레임이면 여기서 바로 드러난다
     assert corr["spearman"] == pytest.approx(1.0)
@@ -132,3 +133,32 @@ def test_stockout_lost_demand_handler_shape(stub_inputs):
     hours = dict(result.tables)["hour_distribution"]
     assert hours.columns.tolist() == ["store_id", "item_id", "dow",
                                       "stockout_hour_mean", "stockout_hour_std", "n_weeks"]
+    # fix(final review 1): 등록 title(데코레이터)과 AnalysisResult.title이 어긋나면
+    # 꺼진 항목의 SkippedResult가 잘못된(예: 폐기된) 문구를 그대로 찍는다.
+    load_handlers()
+    assert result.title == HYPOTHESES["stockout_lost_demand"].title
+
+
+def _empty_discount_rows():
+    """discount_rows 계약(item_id/date/qty/label) — popularity_stockout closing 필터 입력."""
+    return pd.DataFrame({
+        "item_id": pd.Series(dtype="object"),
+        "date": pd.Series(dtype="datetime64[ns]"),
+        "qty": pd.Series(dtype="float64"),
+        "label": pd.Series(dtype="object"),
+    })
+
+
+def test_popularity_stockout_handler_shape_and_gate(stub_inputs):
+    inputs = stub_inputs(daily=_proportions_history(), discount_rows=_empty_discount_rows())
+    result = popularity_stockout(inputs)
+    assert result.kind == KIND_HYPOTHESIS
+    assert result.name == "popularity_stockout"
+    assert result.title == "매진 부스트가 배분 순위를 재배열하는가"
+    assert [label for label, _ in result.tables] == ["rank_correlation", "signals"]
+    load_handlers()
+    assert HYPOTHESES["popularity_stockout"].needs_single_store is True
+    # fix(final review 1): 이 핸들러가 바로 리뷰에서 지적된 title 불일치 자리다 —
+    # 데코레이터 title(레지스트리)과 AnalysisResult.title(리포트가 실제로 찍는 값)을
+    # 여기서 직접 대조해 회귀 고정한다.
+    assert result.title == HYPOTHESES["popularity_stockout"].title

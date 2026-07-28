@@ -165,9 +165,10 @@ def _sample_size_note(contrasts: pd.DataFrame) -> str:
 
     ★fix round 1(리뷰 Important): CI가 0을 포함하는 결과를 verdict 문자열에서
     "기각"이라 적으면, n이 작아 검정력이 부족했을 뿐인 경우도 "효과 없음이 확정됐다"로
-    오독된다. verdict은 exact-value 테스트로 고정돼 있어 여기서 못 고치므로, note에
-    표본 크기 + 해석 주의를 명시해 다운스트림(리포트 HTML)에서 verdict만 보고
-    확정 기각으로 인용하지 못하게 한다.
+    오독된다. seasonal_bias는 주말·여름이 둘 다 noise면 여전히 "기각"이라 적는 경로가
+    남아 있어(실측 데이터에선 안 걸림) 이 note가 보강 안전장치로 남는다.
+    weather_bias는 최종 리뷰(fix 5)에서 verdict 문자열 자체를 "신호 없음(검정력 부족)"
+    으로 고쳤으므로 그쪽은 이 note가 중복 안전장치일 뿐이다.
     """
     sizes = ", ".join(f"{row.segment} n={int(row.n_segment)}" for row in contrasts.itertuples())
     return (f"세그먼트 표본: {sizes}. CI가 0을 포함하는 것은 '효과 없음'이 아니라 "
@@ -246,11 +247,25 @@ def _bootstrap_kwargs(params: dict) -> dict:
 
 
 def weather_bias_verdict(contrasts: pd.DataFrame) -> str:
+    """CI 0 포함을 "기각/정당화되지 않음"으로 읽지 않는다 — underpowered ≠ refuted.
+
+    fix(final review 5): 옛 문구("기각 … 정당화되지 않음")는 n=17/11/14 표본에서
+    반증(refutation)을 주장했다 — 이 브랜치의 캐비앗("Underpowered ≠ refuted",
+    docs/phase6_analysis_layer.md)이 명시적으로 금지하는 것과 같은 오류다. verdict은
+    exact-value 테스트로 고정돼 있지만 그 테스트는 우리가 바꿀 수 있다 — 틀린 문구를
+    보존할 이유가 아니다.
+    """
     signals = contrasts[contrasts["is_signal"]]["segment"].tolist()
-    if not signals:
-        return ("기각 — 폭염/한파/강한비 전부 CI 0 포함(noise). "
-                "극한날씨 전용 feature는 정당화되지 않음")
-    return f"지지 — {signals} 세그먼트에서 CI 0 배제(체계적 편향)"
+    if signals:
+        return f"지지 — {signals} 세그먼트에서 CI 0 배제(체계적 편향)"
+    if contrasts["wpe_diff"].isna().all():
+        # 세그먼트/여집합 한쪽이 전부 비어 CI 자체가 계산되지 않은 경우 — "CI가 0을
+        # 포함한다"고 말하면 없는 CI를 있는 것처럼 은폐하게 된다.
+        return ("판정 불가 — 폭염/한파/강한비 전부 대조군 없음"
+                "(세그먼트 또는 여집합이 비어 CI 계산 불가)")
+    sizes = ", ".join(f"{row.segment} n={int(row.n_segment)}" for row in contrasts.itertuples())
+    return (f"신호 없음(검정력 부족) — 폭염/한파/강한비 전부 CI 0 포함. "
+            f"표본이 작아({sizes}) '효과 없음'으로 단정할 수 없다")
 
 
 @register_hypothesis("weather_bias", "극한날씨(폭염·한파·강한비) 편향",
@@ -309,9 +324,14 @@ def event_prior_verdict(table: pd.DataFrame, *, is_ab_mode: bool) -> str:
         return "이벤트일 0건 — 판정 불가"
     event = event_rows.iloc[0]
     if is_ab_mode:
+        # fix(final review 4): WPE는 부호 있는 편향이라 baseline−wpe는 "개선폭"이 아니다
+        # (예: baseline −19.76, wpe −2.57 → 차이 −17.19를 "개선 −17.19%p"로 찍으면
+        # 17점 악화로 읽힌다). 개선은 |WPE|의 감소량이다.
+        bias_reduction = abs(event["wpe_baseline"]) - abs(event["wpe"])
         return (f"A/B 모드 — 이벤트일 WPE {event['wpe']:+.2f}% "
                 f"(baseline {event['wpe_baseline']:+.2f}%), "
-                f"개선 {event['wpe_baseline'] - event['wpe']:+.2f}%p")
+                f"|WPE| 감소 {bias_reduction:+.2f}%p "
+                f"(baseline |{abs(event['wpe_baseline']):.2f}| → {event['wpe']:.2f})")
     non_event = table[table["segment"] == "non_event"].iloc[0]
     return (f"단일 artifact 모드 — 이벤트일 WPE {event['wpe']:+.2f}% vs "
             f"비이벤트일 {non_event['wpe']:+.2f}% "

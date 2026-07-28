@@ -153,6 +153,27 @@ def test_handler_exception_becomes_skip_not_crash(fake_registry, tmp_path, monke
     assert [s.reason for s in report.skipped if s.name == "stub_data"] == ["error: 데이터 부족"]
 
 
+def test_table_serialization_failure_degrades_to_error_skip_not_crash(
+        fake_registry, tmp_path, monkeypatch):
+    """fix(final review 6): _write_tables/results.append이 try 밖에 있으면 to_csv 실패
+    (여기서는 path-hostile 테이블 라벨이 존재하지 않는 하위디렉터리를 가리켜 발생)가
+    이 항목만이 아니라 run_analysis 전체를 죽였다 — 다른 항목(stub_hypo)은 계속
+    실행되고 리포트가 나와야 한다는 "항목 단위 격리" 계약을 지킨다.
+    """
+    def bad_table(inputs):
+        return AnalysisResult(name="stub_data", kind=KIND_DATA, title="스텁 데이터",
+                              tables=[("bad/label", pd.DataFrame({"v": [1]}))], figures=[])
+
+    monkeypatch.setitem(registry.DATA_ANALYSES, "stub_data",
+                        registry.Handler("stub_data", KIND_DATA, "스텁 데이터", bad_table))
+    report = run_analysis(_spec(data_analyses={"stub_data": True},
+                                hypotheses={"stub_hypo": True}), out_dir=tmp_path)
+    assert [r.name for r in report.results] == ["stub_hypo"]
+    bad_skips = [s for s in report.skipped if s.name == "stub_data"]
+    assert len(bad_skips) == 1
+    assert bad_skips[0].reason.startswith("error: ")
+
+
 def test_report_carries_spec_resolved(fake_registry, tmp_path):
     report = run_analysis(_spec(name="analysis_x"), out_dir=tmp_path)
     assert report.name == "analysis_x"
