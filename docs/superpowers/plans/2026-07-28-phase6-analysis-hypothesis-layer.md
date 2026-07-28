@@ -4915,6 +4915,13 @@ git commit -m "feat(analysis-lab): substitution 핸들러(RD/DiD/MNL/Nested 4추
 
 ### Task 15: `modeling_v4_assumptions` (형태③)
 
+> **⚠️ 실행 후 교정 (2026-07-28, Task 15) — 아래 원안과 실제 구현이 다르다.**
+> 1. **`basket_composition_summary` 호출과 `("basket_composition", ...)` 테이블을 삭제했다.** `classify_baskets`는 `basket_id, label, category_id, qty, paid`를 요구하는데(docstring 명시) `bonavi_receipts`엔 `label`/`paid`가 없고 파생도 불가하다 — 원안 주의문은 `category_id`만 예상했다. 게다가 그 프리미티브는 **마감할인 바스켓 분류**라 저녁 시간대에 묶인 다른 범위의 지표이며, 4가정 리포트에 섞으면 Task 13(`stockout_revenue`)·Task 14(`λ_min`)와 같은 "제목이 약속한 것과 다른 것을 재는" 실패를 반복한다. `basket` 가정은 `_multi_category_basket_share`(영수증당 카테고리 다양성)로 측정하며 이는 프리미티브 재구현이 아니라 **다른 통계**다. 결정 근거를 `_NOTE_BASKET_SCOPE`로 코드에 남긴다.
+> 2. **`2-1-b`(신제품 교란) 자동 통과 차단.** `_new_item_disruption`은 `changes`가 비면 `0.0`을 반환해 `0.0 < 0.10`이 "지지"로 읽힌다 — 관측이 0건인데 통과로 보인다. `assumption_table`에 `n_observations` 컬럼을 추가하고, 지지 판정된 가정 중 관측 0건이 있으면 verdict에 `"(관측 0건: [...] — 통과가 아니라 미검증)"`을 명시한다.
+> 3. `AnalysisResult.tables`는 `list[tuple[str, pd.DataFrame]]`이므로 dict 반환값을 그대로 넣을 수 없다(1번으로 해소).
+>
+> 임계 4종(`1-1-b` 0.7 / `2-1-a` 0.05 / `2-1-b` 0.10 / `basket` 0.30)은 modeling_v4 설계 문서의 실무 기준선이며 **통계 검정이 아니다** — 결과에 맞춰 조정 금지. 아래 원안 코드는 브리프 기록이다.
+
 **Files:**
 - Create: `src/bakery/analysis/lab/handlers/basket.py`
 - Modify: `src/bakery/analysis/lab/handlers/__init__.py`
