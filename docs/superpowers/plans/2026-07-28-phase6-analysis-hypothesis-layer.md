@@ -4665,6 +4665,14 @@ git commit -m "feat(analysis-lab): stockout_revenue + popularity_stockout 핸들
 
 ### Task 14: `substitution` (형태②, 무거운 항목)
 
+> **⚠️ 실행 후 교정 (2026-07-28, Task 14) — 아래 원안과 실제 구현이 다르다.**
+> **컨트롤러 실측(2회 독립 실행, 마지막 자리까지 동일 = 결정적):** nested λ = pastry 0.999878 / sandwich 0.999842 / bread 0.996803 / cake 0.992605 / **sweets 0.715539**, NaN 0/5. DiD 1914행 NaN 0 평균 β = −0.0023428383871375007. RD 3944행 sub_rate 평균 0.2336873512417798, outflow_ratio 평균 0.588.
+> 1. **λ 집계를 게이트 카테고리 기준으로 바꿨다.** 원안의 `λ_min`(전체 nest)은 비타깃 카테고리 하나(`sweets` 0.7156)가 임계 0.95 아래로 끌어내려 verdict를 "불확실"로 뒤집는다 — 나머지 4개가 0.9926~0.9999이고 DiD β≈0으로 **기존 광교 결론(λ≈0.99, 약한 대체)이 재현되는데도** outlier를 전체 신호처럼 제시하게 된다. `sweets`/`cake`는 `TARGET_CATEGORIES = ("bread","pastry","sandwich")` 밖이다. fix = `demand_absorption.GATE_CATEGORIES`(bread/pastry) 기준 판정 + 게이트 밖은 verdict에 별도 명시(숨기지 않음), 5개 nest 전부 테이블에 보고. **임계 0.95/0.02는 불변**(결과에 맞춘 조정 금지).
+> 2. **NaN fails-loud.** `.min()`/`.mean()`이 `skipna=True`이고 `isna` 체크가 없어, fit 실패 시 `nan`이 박힌 정상 형식 고객 문구가 나온다. `_MISSING_VERDICT`를 **최우선 가드**로 두고 `n_lambda_nan`/`n_did_nan`을 `estimator_health` 테이블로 노출. 빈 DiD 프레임 `KeyError`도 같은 가드로 흡수.
+> 3. 최종 verdict(실측): `"기각(대체 약함) — nested λ_min 0.997(≈1=독립), DiD 평균 β -0.0023, RD 평균 유출 0.588. 카테고리는 한 묶음 수요로 취급 가능 | 게이트=['bread', 'pastry'] 기준, 게이트 밖: sandwich λ=1.000, cake λ=0.993, sweets λ=0.716"`
+>
+> 아래 원안 코드는 브리프 기록이다 — **구현 진실은 `src/bakery/analysis/lab/handlers/substitution.py`**.
+
 **Files:**
 - Create: `src/bakery/analysis/lab/handlers/substitution.py`
 - Modify: `src/bakery/analysis/lab/handlers/__init__.py`
