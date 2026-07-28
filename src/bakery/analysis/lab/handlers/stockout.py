@@ -1,4 +1,4 @@
-"""매진 추정 손실 규모(하한) 보고 / 매진 보정이 인기 신호를 흔드는가.
+"""매진 추정 손실 규모(하한) 보고 / 매진 부스트 ablation이 배분 순위를 흔드는가.
 
 계산은 `bakery.analysis.{self_fulfillment, popularity}` 프리미티브 호출.
 출처 스크립트: verify_stockout_revenue_4stores(_fixed), revalidate_popularity_stockout.
@@ -32,6 +32,7 @@ _LOCAL_ESTIMATE_COLUMNS = ("potential_demand",)  # 함수 내부 추정치 — �
 LOST_SHARE_THRESHOLD = 0.02      # 보고 임계(가설 게이트 아님) — 이 비중 이상이면 표에 표시
 POPULARITY_CORR_THRESHOLD = 0.8  # 순위 상관 0.8 이상 = 신호 안정
 _TOP_ITEMS = 15
+_TOP_RANK_N = 10  # top-N 멤버십 교체건수 보고 기준 — 통계적 임계가 아니라 리포팅 관례상 선택
 _NOTE_CENSORED = ("품절일 판매량은 censored — 추정 손실은 하한이다. "
                   "실제 손실은 이 수치 이상일 수 있다.")
 _NOTE_LOST_MODEL = ("손실 추정은 features/potential_demand와 같은 시간가중 공식 "
@@ -77,19 +78,29 @@ def lost_demand_verdict(summary: pd.DataFrame) -> str:
 
 def popularity_boost_correlation(daily: pd.DataFrame, closing: pd.DataFrame, *,
                                  target_date: pd.Timestamp) -> pd.DataFrame:
-    """원시 인기(base_sold) 순위 vs 실제 배분(proportion) 순위의 spearman.
+    """매진 부스트 ablation — 실제 배분 vs 부스트만 제거한 반사실 배분의 순위 상관.
 
-    옛/새 매진 라벨 A/B는 canonical에 옛 라벨이 없어 불가하므로, Stage2가 실제로
-    내보내는 proportion과 원시 인기의 순위를 비교한다. adj_stockout 산포를 함께 실어
-    부스트가 순위를 흔들 여지가 얼마나 있었는지 드러낸다(상관만 보면 tautology가 된다).
+    proportion은 base_sold × adj_trend × adj_stockout × adj_closing × adj_new를 정규화한
+    값이라, 원시 인기와 직접 비교하면 (1) base_sold에 지배되고 (2) 네 조정계수가 한 rho에
+    섞여 매진 부스트의 기여를 분리할 수 없다. 그래서 adj_stockout만 1.0으로 되돌린
+    반사실 배분을 만들어 비교한다 — 나머지 계수가 동일하므로 순위 차이는 부스트 효과다.
     """
     from bakery.models.item_proportion import compute_proportions
 
     proportions = compute_proportions(daily, target_date)
-    pair = proportions[["base_sold", "proportion", "adj_stockout"]].dropna()
-    rho = float(spearmanr(pair["base_sold"], pair["proportion"]).statistic)
+    pair = proportions[["item_id", "proportion", "adj_stockout"]].dropna().copy()
+    # 반사실: adj_stockout을 나눠 제거하고 다시 정규화(Σ=1)
+    ablated_weight = pair["proportion"] / pair["adj_stockout"]
+    total = ablated_weight.sum()
+    pair["proportion_no_boost"] = ablated_weight / total if total else 0.0
+    rho = float(spearmanr(pair["proportion"], pair["proportion_no_boost"]).statistic)
+    top_actual = pair.nlargest(_TOP_RANK_N, "proportion")["item_id"].tolist()
+    top_ablated = pair.nlargest(_TOP_RANK_N, "proportion_no_boost")["item_id"].tolist()
     return pd.DataFrame([{
-        "pair": "base_sold_vs_proportion", "spearman": rho, "n": int(len(pair)),
+        "pair": "proportion_vs_no_stockout_boost", "spearman": rho, "n": int(len(pair)),
+        "n_top_changed": int(len(set(top_actual) ^ set(top_ablated)) // 2),
+        "max_abs_share_delta": float(
+            (pair["proportion"] - pair["proportion_no_boost"]).abs().max()),
         "adj_stockout_min": float(pair["adj_stockout"].min()),
         "adj_stockout_max": float(pair["adj_stockout"].max()),
         "adj_stockout_std": float(pair["adj_stockout"].std(ddof=0)),
@@ -97,13 +108,13 @@ def popularity_boost_correlation(daily: pd.DataFrame, closing: pd.DataFrame, *,
 
 
 def popularity_verdict(corr: pd.DataFrame) -> str:
-    rho = float(corr["spearman"].iloc[0])
-    n = int(corr["n"].iloc[0])
-    if rho >= POPULARITY_CORR_THRESHOLD:
-        return (f"매진 부스트가 배분 순위를 거의 바꾸지 않음 — spearman {rho:.3f} "
-                f"(n={n}), 부스트 기여 작음")
-    return (f"매진 부스트가 배분 순위를 크게 재배열 — spearman {rho:.3f} (n={n}), "
-            "임계 0.8 미만이므로 부스트 강도 검토 필요")
+    row = corr.iloc[0]
+    rho, n = float(row["spearman"]), int(row["n"])
+    churn, delta = int(row["n_top_changed"]), float(row["max_abs_share_delta"])
+    prefix = ("매진 부스트가 배분 순위를 거의 바꾸지 않음" if rho >= POPULARITY_CORR_THRESHOLD
+              else "매진 부스트가 배분 순위를 크게 재배열")
+    return (f"{prefix} — ablation spearman {rho:.3f} (n={n}), "
+            f"top{_TOP_RANK_N} 교체 {churn}건, 최대 비중 변화 {delta:.4f}")
 
 
 def _lost_fig(summary: pd.DataFrame) -> go.Figure:
@@ -161,7 +172,8 @@ def popularity_stockout(inputs: AnalysisInputs) -> AnalysisResult:
         figures=[fig], verdict=popularity_verdict(corr),
         notes=["매진 라벨은 재정의(폐기0=완판) 반영본 — 옛 92.7% 정의가 아니다.",
                ("출처 스크립트의 옛/새 라벨 A/B는 canonical에 옛(오염) 라벨이 없어 "
-                "불가 — 원시 인기 vs 매진 부스트 순위 비교로 재정의했다."),
+                "불가 — 실제 배분(proportion) vs adj_stockout만 제거한 반사실 배분의 "
+                "순위 ablation으로 재정의했다."),
                f"부스트 상한 STOCKOUT_MAX_BOOST={STOCKOUT_MAX_BOOST}, "
                f"기준일={target_date.date()}"],
     )

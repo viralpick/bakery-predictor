@@ -87,32 +87,36 @@ def test_lost_demand_verdict_reports_magnitude_multi_store():
 
 
 def test_popularity_verdict_reports_rank_stability():
-    corr = pd.DataFrame([{"pair": "base_sold_vs_proportion", "spearman": 0.95, "n": 100}])
+    corr = pd.DataFrame([{"pair": "proportion_vs_no_stockout_boost", "spearman": 0.95,
+                         "n": 100, "n_top_changed": 0, "max_abs_share_delta": 0.0012}])
     assert popularity_verdict(corr) == (
-        "매진 부스트가 배분 순위를 거의 바꾸지 않음 — spearman 0.950 (n=100), "
-        "부스트 기여 작음")
+        "매진 부스트가 배분 순위를 거의 바꾸지 않음 — ablation spearman 0.950 (n=100), "
+        "top10 교체 0건, 최대 비중 변화 0.0012")
 
 
 def test_popularity_verdict_flags_reordering():
-    corr = pd.DataFrame([{"pair": "base_sold_vs_proportion", "spearman": 0.55, "n": 100}])
+    corr = pd.DataFrame([{"pair": "proportion_vs_no_stockout_boost", "spearman": 0.55,
+                         "n": 100, "n_top_changed": 4, "max_abs_share_delta": 0.0532}])
     assert popularity_verdict(corr) == (
-        "매진 부스트가 배분 순위를 크게 재배열 — spearman 0.550 (n=100), "
-        "임계 0.8 미만이므로 부스트 강도 검토 필요")
+        "매진 부스트가 배분 순위를 크게 재배열 — ablation spearman 0.550 (n=100), "
+        "top10 교체 4건, 최대 비중 변화 0.0532")
 
 
 def test_popularity_boost_correlation_not_vacuous():
     """빈 프레임/상수입력이면 spearman이 NaN이거나 n=0으로 무증상 통과할 수 있다.
 
     4품목·비상수 base_sold·비상수 avg_stockout_h 픽스처로 그 경로를 막고, 실측값을
-    직접 재현(compute_proportions)해 정확값으로 고정한다.
+    직접 재현(compute_proportions으로 반사실 배분을 손계산)해 정확값으로 고정한다.
     """
     history = _proportions_history()
     target_date = pd.Timestamp("2024-01-01") + pd.Timedelta(days=40)
     closing = pd.DataFrame(columns=["item_id", "date", "qty"])
     corr = popularity_boost_correlation(history, closing, target_date=target_date).iloc[0]
-    assert corr["pair"] == "base_sold_vs_proportion"
+    assert corr["pair"] == "proportion_vs_no_stockout_boost"
     assert corr["n"] == 4  # 크기 단언 — 빈 프레임이면 여기서 바로 드러난다
     assert corr["spearman"] == pytest.approx(1.0)
+    assert corr["n_top_changed"] == 0  # 품목 4개 < top10 → 멤버십은 항상 동일 집합
+    assert corr["max_abs_share_delta"] == pytest.approx(0.009277155005798177)
     assert corr["adj_stockout_min"] == pytest.approx(1.0)
     assert corr["adj_stockout_max"] == pytest.approx(1.0 + 0.2 * 2 / 3)
     assert corr["adj_stockout_std"] > 0.0  # 상수였다면 0 — 산포가 있어야 부스트가 검증 가능했다는 뜻
