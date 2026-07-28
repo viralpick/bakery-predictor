@@ -149,7 +149,7 @@ def seasonal_bias(inputs: AnalysisInputs) -> AnalysisResult:
         figures=[_axis_fig(bias_by_axis(preds, "dow"), "dow", "요일별 WPE"),
                  _axis_fig(bias_by_axis(preds, "month"), "month", "월별 WPE")],
         verdict=seasonal_bias_verdict(weekend, summer),
-        notes=[_NOTE_ENGINE, _NOTE_WPE_SIGN],
+        notes=[_NOTE_ENGINE, _NOTE_WPE_SIGN, _sample_size_note(contrasts)],
     )
 
 
@@ -158,6 +158,20 @@ def _axis_fig(table: pd.DataFrame, axis: str, title: str) -> go.Figure:
     fig.add_hline(y=0.0, line_dash="dash")
     fig.update_layout(title=title, xaxis_title=axis, yaxis_title="WPE %")
     return fig
+
+
+def _sample_size_note(contrasts: pd.DataFrame) -> str:
+    """세그먼트별 표본 크기(n_segment)를 note에 노출한다.
+
+    ★fix round 1(리뷰 Important): CI가 0을 포함하는 결과를 verdict 문자열에서
+    "기각"이라 적으면, n이 작아 검정력이 부족했을 뿐인 경우도 "효과 없음이 확정됐다"로
+    오독된다. verdict은 exact-value 테스트로 고정돼 있어 여기서 못 고치므로, note에
+    표본 크기 + 해석 주의를 명시해 다운스트림(리포트 HTML)에서 verdict만 보고
+    확정 기각으로 인용하지 못하게 한다.
+    """
+    sizes = ", ".join(f"{row.segment} n={int(row.n_segment)}" for row in contrasts.itertuples())
+    return (f"세그먼트 표본: {sizes}. CI가 0을 포함하는 것은 '효과 없음'이 아니라 "
+            "이 표본에서 **검정력이 부족**하다는 뜻이다 — 확정 기각으로 인용하지 말 것.")
 
 
 def _weather_station_id(inputs: AnalysisInputs, params: dict) -> int:
@@ -197,8 +211,13 @@ def _empty_contrast_row(segment: str, n_segment: int) -> dict:
             "ci_high": float("nan"), "n_segment": n_segment, "is_signal": False}
 
 
-def _extreme_contrasts(merged: pd.DataFrame) -> pd.DataFrame:
-    """극한날씨 3세그먼트 × 동계절 비교군 WPE 대조."""
+def _extreme_contrasts(merged: pd.DataFrame, **contrast_kwargs) -> pd.DataFrame:
+    """극한날씨 3세그먼트 × 동계절 비교군 WPE 대조.
+
+    contrast_kwargs는 segment_contrast로 그대로 전달(n_boot/seed) — fix round 1(Minor 1):
+    seasonal_bias는 params_for를 통해 n_boot을 조정할 수 있는데 이 함수만 N_BOOT
+    하드코딩이라 일관성이 깨져 있었다.
+    """
     rows = []
     for segment, season in _EXTREME_SEGMENTS:
         scope = merged if season is None else merged[merged["month"].isin(season)]
@@ -206,12 +225,24 @@ def _extreme_contrasts(merged: pd.DataFrame) -> pd.DataFrame:
         if mask.sum() == 0 or (~mask).sum() == 0:
             rows.append(_empty_contrast_row(segment, int(mask.sum())))
             continue
-        contrast = segment_contrast(scope, mask)
+        contrast = segment_contrast(scope, mask, **contrast_kwargs)
         rows.append({"segment": segment, "wpe_diff": contrast["wpe_diff"],
                      "ci_low": contrast["ci"][0], "ci_high": contrast["ci"][1],
                      "n_segment": contrast["n_segment"],
                      "is_signal": is_signal(contrast)})
     return pd.DataFrame(rows)
+
+
+_BOOTSTRAP_PARAM_NAMES = ("n_boot", "seed")
+
+
+def _bootstrap_kwargs(params: dict) -> dict:
+    """params_for("weather_bias")에서 segment_contrast용 부트스트랩 인자만 걸러낸다.
+
+    params에는 station_id도 섞여 있을 수 있어(대상은 _weather_station_id) 그대로
+    **params를 넘기면 segment_contrast가 모르는 키워드 인자로 TypeError가 난다.
+    """
+    return {name: params[name] for name in _BOOTSTRAP_PARAM_NAMES if name in params}
 
 
 def weather_bias_verdict(contrasts: pd.DataFrame) -> str:
@@ -240,7 +271,7 @@ def weather_bias(inputs: AnalysisInputs) -> AnalysisResult:
     weather = weather[weather["station_id"] == station]
     merged = _weather_segments(_with_axes(inputs.predictions),
                               weather[["date", "maxTa", "minTa", "sumRn"]])
-    contrasts = _extreme_contrasts(merged)
+    contrasts = _extreme_contrasts(merged, **_bootstrap_kwargs(params))
     fig = go.Figure(go.Bar(
         x=contrasts["segment"], y=contrasts["wpe_diff"],
         error_y=dict(type="data", symmetric=False,
@@ -255,7 +286,8 @@ def weather_bias(inputs: AnalysisInputs) -> AnalysisResult:
         verdict=weather_bias_verdict(contrasts),
         notes=[_NOTE_ENGINE, _NOTE_WPE_SIGN,
                f"임계: {EXTREME_THRESHOLDS} / 비교군은 동계절 비극한일이다. "
-               f"관측소 station_id={station}."],
+               f"관측소 station_id={station}.",
+               _sample_size_note(contrasts)],
     )
 
 
@@ -270,7 +302,12 @@ def _baseline_segment_table(baseline_path, event_dates: pd.DatetimeIndex) -> pd.
 
 
 def event_prior_verdict(table: pd.DataFrame, *, is_ab_mode: bool) -> str:
-    event = table[table["segment"] == "event"].iloc[0]
+    event_rows = table[table["segment"] == "event"]
+    if event_rows.empty:
+        # fix round 1(Minor 2): 등록 이벤트일이 preds 윈도우에 0건이면 .iloc[0]가
+        # IndexError를 던지고 runner가 "error:"로 삼켜 스킵처럼 보인다 — 명시적 판정으로 대체.
+        return "이벤트일 0건 — 판정 불가"
+    event = event_rows.iloc[0]
     if is_ab_mode:
         return (f"A/B 모드 — 이벤트일 WPE {event['wpe']:+.2f}% "
                 f"(baseline {event['wpe_baseline']:+.2f}%), "
@@ -279,6 +316,20 @@ def event_prior_verdict(table: pd.DataFrame, *, is_ab_mode: bool) -> str:
     return (f"단일 artifact 모드 — 이벤트일 WPE {event['wpe']:+.2f}% vs "
             f"비이벤트일 {non_event['wpe']:+.2f}% "
             f"(prior 적용 후 잔여 편향; base 대비 개선폭은 baseline preds 필요)")
+
+
+def _event_sample_note(table: pd.DataFrame) -> str:
+    """이벤트일 표본 크기를 note에 노출 — fix round 1(리뷰 Important).
+
+    n=3처럼 작은 표본에서 나온 개선폭을 verdict 문자열만 보고 정밀한 효과 크기로
+    인용하면 안 된다. 방향(부호)은 신뢰할 수 있어도 크기는 아니다.
+    """
+    event_rows = table[table["segment"] == "event"]
+    if event_rows.empty:
+        return "이벤트일 n=0 — 표본 없음(등록 prior 이벤트일만 집계), 판정 불가."
+    n = int(event_rows.iloc[0]["n"])
+    return (f"이벤트일 n={n} — 방향은 뚜렷하나 표본이 작아 정확한 효과 크기로 인용하면 "
+            "안 된다(등록 prior 이벤트일만 집계).")
 
 
 @register_hypothesis("event_prior_validation", "이벤트 prior 적용 후 이벤트일 정확도",
@@ -313,7 +364,7 @@ def event_prior_validation(inputs: AnalysisInputs) -> AnalysisResult:
         notes=[_NOTE_ENGINE, _NOTE_WPE_SIGN,
                ("모델을 실행하지 않으므로 base vs prior A/B는 baseline preds artifact"
                 "(layers: [] 로 돌린 harness-run 산출)가 있을 때만 가능하다."),
-               f"A/B 모드: {is_ab_mode}"],
+               f"A/B 모드: {is_ab_mode}", _event_sample_note(table)],
     )
 
 

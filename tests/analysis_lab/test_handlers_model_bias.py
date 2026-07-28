@@ -107,3 +107,64 @@ def test_all_three_registered_as_needs_predictions():
     load_handlers()
     for name in ("seasonal_bias", "weather_bias", "event_prior_validation"):
         assert HYPOTHESES[name].needs_predictions is True, name
+
+
+# fix round 1(리뷰 Important) — verdict 문자열은 exact-value 테스트로 고정돼 있어 표본
+# 크기를 못 담는다. notes는 substring 단언만 하므로 "n=" 마커 존재만 확인한다.
+
+def test_seasonal_bias_note_reports_segment_sample_sizes():
+    from bakery.analysis.lab.handlers.model_bias import _sample_size_note
+
+    contrasts = pd.DataFrame([{"segment": "weekend", "n_segment": 104, "is_signal": True},
+                              {"segment": "summer", "n_segment": 122, "is_signal": False}])
+    note = _sample_size_note(contrasts)
+    assert "n=" in note
+
+
+def test_weather_bias_note_reports_segment_sample_sizes():
+    from bakery.analysis.lab.handlers.model_bias import _sample_size_note
+
+    contrasts = pd.DataFrame([{"segment": "is_heatwave", "n_segment": 17, "is_signal": False},
+                              {"segment": "is_coldwave", "n_segment": 11, "is_signal": False},
+                              {"segment": "is_heavy_rain", "n_segment": 14, "is_signal": False}])
+    note = _sample_size_note(contrasts)
+    assert "n=" in note
+
+
+def test_event_prior_validation_note_reports_event_sample_size():
+    from bakery.analysis.lab.handlers.model_bias import _event_sample_note
+
+    table = pd.DataFrame([{"segment": "event", "n": 3, "wpe": -2.57, "stockout_rate": 0.0},
+                          {"segment": "non_event", "n": 361, "wpe": 0.68,
+                           "stockout_rate": 21.88}])
+    note = _event_sample_note(table)
+    assert "n=" in note
+
+
+def test_event_prior_verdict_handles_zero_event_days():
+    """등록 이벤트일이 preds 윈도우에 0건이면 .iloc[0] IndexError 대신 명시 판정(Minor 2)."""
+    from bakery.analysis.lab.handlers.model_bias import event_prior_verdict
+
+    table = pd.DataFrame([{"segment": "non_event", "n": 364, "wpe": 0.1, "stockout_rate": 5.0}])
+    assert event_prior_verdict(table, is_ab_mode=False) == "이벤트일 0건 — 판정 불가"
+
+
+def test_extreme_contrasts_honours_n_boot_param():
+    """weather_bias의 params_for(n_boot)가 하드코딩 N_BOOT를 밀어내는지 확인(Minor 1)."""
+    from bakery.analysis.lab.handlers.model_bias import _extreme_contrasts
+
+    merged = pd.DataFrame({
+        "date": pd.date_range("2025-06-01", periods=10),
+        "actual": [100.0] * 10,
+        "expected": [90.0, 110.0] * 5,
+        "production": [95.0] * 10,
+        "month": [6] * 10,
+        "is_heatwave": [True] * 5 + [False] * 5,
+        "is_coldwave": [False] * 10,
+        "is_heavy_rain": [False] * 10,
+    })
+    first = _extreme_contrasts(merged, n_boot=20, seed=7)
+    second = _extreme_contrasts(merged, n_boot=20, seed=7)
+    # is_coldwave/is_heavy_rain 세그먼트는 fixture에 아예 없어 NaN 대조행이 된다
+    # (_empty_contrast_row) — NaN != NaN이라 tolist() 비교가 아니라 프레임 단위로 맞춘다.
+    pd.testing.assert_frame_equal(first, second)
