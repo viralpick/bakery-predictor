@@ -51,3 +51,59 @@ def test_handler_consumes_predictions_artifact(tmp_path):
     assert len(grid) == 9
     assert set(grid["winner"]) <= {"DOW 우위", "GLOBAL 우위", "0포함(무차)"}
     assert any("엔진" in note for note in result.notes)
+
+
+def test_seasonal_bias_verdict_rejects_when_both_noise():
+    import numpy as np
+
+    from bakery.analysis.lab.handlers.model_bias import seasonal_bias_verdict
+
+    noise = {"wpe_diff": 0.5, "ci": np.array([-1.0, 2.0]), "n_segment": 100, "n_rest": 900}
+    assert seasonal_bias_verdict(noise, noise) == (
+        "기각 — 주말 WPE 차 +0.50%p CI[-1.00,+2.00] noise(CI 0 포함) / "
+        "여름 WPE 차 +0.50%p CI[-1.00,+2.00] noise(CI 0 포함)")
+
+
+def test_weather_bias_verdict_rejects_when_no_signal():
+    from bakery.analysis.lab.handlers.model_bias import weather_bias_verdict
+
+    contrasts = pd.DataFrame([{"segment": s, "is_signal": False}
+                              for s in ("is_heatwave", "is_coldwave", "is_heavy_rain")])
+    assert weather_bias_verdict(contrasts) == (
+        "기각 — 폭염/한파/강한비 전부 CI 0 포함(noise). "
+        "극한날씨 전용 feature는 정당화되지 않음")
+
+
+def test_event_prior_verdict_single_artifact_mode():
+    from bakery.analysis.lab.handlers.model_bias import event_prior_verdict
+
+    table = pd.DataFrame([{"segment": "event", "n": 20, "wpe": -3.0, "stockout_rate": 10.0},
+                          {"segment": "non_event", "n": 980, "wpe": -0.5,
+                           "stockout_rate": 5.0}])
+    assert event_prior_verdict(table, is_ab_mode=False) == (
+        "단일 artifact 모드 — 이벤트일 WPE -3.00% vs 비이벤트일 -0.50% "
+        "(prior 적용 후 잔여 편향; base 대비 개선폭은 baseline preds 필요)")
+
+
+def test_event_dates_for_expands_solar_and_lunar():
+    from bakery.analysis.lab.handlers.model_bias import event_dates_for
+
+    priors = {"gwangyo": {"events": {"xmas": (12, 25), "childrens": (5, 5)},
+                          "lunar_events": {"chuseok": {2024: "2024-09-17",
+                                                       2025: "2025-10-06"}}}}
+    dates = event_dates_for("gwangyo", range(2024, 2026), priors)
+    assert dates.tolist() == [pd.Timestamp("2024-05-05"), pd.Timestamp("2024-09-17"),
+                              pd.Timestamp("2024-12-25"), pd.Timestamp("2025-05-05"),
+                              pd.Timestamp("2025-10-06"), pd.Timestamp("2025-12-25")]
+
+
+def test_event_dates_for_unknown_key_is_empty():
+    from bakery.analysis.lab.handlers.model_bias import event_dates_for
+
+    assert event_dates_for("nope", range(2024, 2025), {}).tolist() == []
+
+
+def test_all_three_registered_as_needs_predictions():
+    load_handlers()
+    for name in ("seasonal_bias", "weather_bias", "event_prior_validation"):
+        assert HYPOTHESES[name].needs_predictions is True, name

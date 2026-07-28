@@ -1,4 +1,3 @@
-import pytest
 import yaml
 from typer.testing import CliRunner
 
@@ -45,8 +44,8 @@ def test_analysis_run_rejects_unknown_name(tmp_path):
     assert result.exit_code == 1
 
 
-@pytest.mark.xfail(reason="핸들러 전량 등록은 Task 17에서 완료", strict=True)
 def test_shipped_gwangyo_yaml_loads_with_registry_names():
+    # Task 17에서 seasonal_bias/weather_bias/event_prior_validation 등록 완료 —
     # experiments/analysis_gwangyo.yaml의 모든 키가 registry에 실제 등록돼 있는지
     from bakery.analysis.lab.registry import all_names
     from bakery.analysis.lab.spec import load_analysis_spec
