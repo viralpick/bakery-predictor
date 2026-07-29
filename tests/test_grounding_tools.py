@@ -132,7 +132,18 @@ def test_dispatch_explain_category_total(dataset):
                     arguments={"store_id": store, "date": date})
     res = dispatch(call, dataset)
     rows = json.loads(res.content)
-    assert [r["step"] for r in rows] == ["base_median", "event_prior", "prior_median", "quantile_buffer", "prior_prod"]
+    steps = [r["step"] for r in rows]
+    # 단계 행(계약)은 순서·이름 고정. 그 앞에 붙는 기여 행은 **크기순 정렬**이라
+    # 날짜마다 순서가 달라지므로 배열 전체를 고정값으로 단언하지 않는다.
+    assert steps[-5:] == ["base_median", "event_prior", "prior_median",
+                          "quantile_buffer", "prior_prod"]
+    assert all(s.startswith("contrib_") for s in steps[:-5])
+    assert "contrib_base_value" in steps
+    # 기여 행만으로 base_median이 복원된다(설명이 계산을 반영한다는 계약).
+    value = {r["step"]: r["value"] for r in rows}
+    groups = [s for s in steps[:-5] if s != "contrib_base_value"]
+    total = value["contrib_base_value"] + sum(value[g] for g in groups)
+    assert total == pytest.approx(value["base_median"], rel=1e-9)
 
 
 def test_dispatch_explain_item_order(dataset):
