@@ -9,6 +9,10 @@ import numpy as np
 import pandas as pd
 
 
+# 기대수요(center) 모델 목적함수. L1=조건부 중앙값(헤드라인), L2=조건부 평균(실험).
+EXPECTED_OBJECTIVE_L1 = "regression_l1"
+EXPECTED_OBJECTIVE_L2 = "regression"
+
 # 학습 시 target 외에 leak 되는 컬럼 (다른 target도 leak 처리)
 LEAK_COLS = (
     "sold_total_unit", "sold_total_revenue",
@@ -57,12 +61,22 @@ def fit_category_total(
     max_depth: int = 6,
     num_leaves: int = 31,
     random_state: int = 42,
+    expected_objective: str = EXPECTED_OBJECTIVE_L1,
 ) -> CategoryTotalModel:
-    """Fit the expected (L1) and q0.90 production models.
+    """Fit the expected and q0.90 production models.
 
     When `q_lo` is given, also fits an adaptive lower-quantile model used as the
     asymmetric interval's lower anchor. Symmetric intervals don't need it, so it
     stays off by default.
+
+    `expected_objective` 는 **기대수요(center) 모델의 목적함수**다. 기본 L1(조건부
+    중앙값)이 헤드라인이며, `regression`(L2, 조건부 평균)은 실험용 대안이다.
+    생산량(quantile) 모델은 이 인자와 무관하게 항상 quantile 목적함수를 쓴다.
+
+    ★왜 인자로 뺐나: 평가 지표(WAPE/WPE)는 **합계 기준**이라 평균성 대상을 가리키는데
+    L1은 중앙값을 맞춘다 — 훈련 목표와 평가 지표의 불일치가 요일별 편향·예측 압축의
+    후보 원인으로 실측됐다(docs/expected_objective_result.md). 축을 실험 파라미터로
+    노출해 데이터로 판정한다.
     """
     feat_cols = select_feature_cols(train, target_col)
     X = train[feat_cols]
@@ -72,7 +86,7 @@ def fit_category_total(
         max_depth=max_depth, num_leaves=num_leaves,
         random_state=random_state, verbosity=-1,
     )
-    expected = lgb.LGBMRegressor(objective="regression_l1", **common).fit(X, y)
+    expected = lgb.LGBMRegressor(objective=expected_objective, **common).fit(X, y)
     quantile = lgb.LGBMRegressor(objective="quantile", alpha=production_q, **common).fit(X, y)
     production_lo = None
     if q_lo is not None:

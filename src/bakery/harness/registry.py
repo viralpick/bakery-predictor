@@ -11,6 +11,7 @@ class ForecasterKind(str, Enum):
 
 _KIND: dict[str, ForecasterKind] = {
     "category_total": ForecasterKind.CATEGORY_TOTAL,
+    "category_total_l2": ForecasterKind.CATEGORY_TOTAL,   # expected만 L2(목적함수 A/B)
     "distributional_total": ForecasterKind.DISTRIBUTIONAL,
     "seasonal_naive": ForecasterKind.POINT,
     "moving_average": ForecasterKind.POINT,
@@ -44,10 +45,11 @@ def is_runnable(name: str) -> bool:
 def build_forecaster(name: str):
     """forecaster 이름 → 어댑터 인스턴스. 미등록 KeyError."""
     from bakery.harness.forecasters import (
-        CategoryTotalForecaster, DistributionalTotalForecaster,
+        CategoryTotalForecaster, CategoryTotalL2Forecaster, DistributionalTotalForecaster,
     )
     factories = {
         "category_total": CategoryTotalForecaster,
+        "category_total_l2": CategoryTotalL2Forecaster,
         "distributional_total": DistributionalTotalForecaster,
     }
     return factories[name]()
