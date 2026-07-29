@@ -85,3 +85,36 @@ feature 프레임(46 컬럼)에는 타깃의 자기회귀 feature가 들어 있�
 이름에 박았다: **`gwangyo_train_aged5`**(학습 데이터 5일 노후화). 이 실험의 열화는
 **운영 열화의 하한(lower bound)** 이다 — feature가 아직 원점 이후를 보므로 완전 정렬 시
 열화는 이보다 커진다.
+
+
+---
+
+## 7. 2단계 추가 (2026-07-29, 같은 세션)
+
+`align_features` 플래그로 **원점 이후를 보는 자기회귀 feature를 차단**하는 경로를 추가했다.
+
+- `WindowSpec.align_features: bool = False` (기본 off = 현 동작)
+- `windowed_backtest(..., ar_history=...)` — **dropna 이전의 날짜 연속 프레임**을 받는다.
+  runner가 `align_features` 일 때만 넘긴다.
+- fold마다 타깃을 `cutoff` 이후로 마스킹 → `add_lag_rolling_ewma` 재계산 → test 행의
+  AR 컬럼만 date-join으로 덮어쓴다. train 행(전부 `< cutoff`)과 타깃 컬럼은 불변.
+
+### 왜 gapless 프레임이 필요한가 (함정)
+`shift()`는 위치 기반이고 backtest가 받는 프레임은 `dropna` 로 gap이 생겨 있다
+(광교 실측: pre-dropna 1826행 gap 0 / post-dropna 1791행 **gap 7건**). gappy 프레임에서
+재계산하면 `lag7`이 7일 전이 아니게 되어 leakage 차단이 아니라 **lag 정의 변경**이 된다.
+→ `_require_gapless` 가 fails-loud로 거부하고, 의미론 보존은
+`test_gapless_recompute_reproduces_engine_ar`(rtol=1e-12)가 지킨다.
+
+### 2단계도 "운영 수치"가 아니다 — 느슨한 상한
+실측 결과와 근거는 `docs/operational_horizon_ar_align_result.md`. 요약:
+- WAPE 0.0772 → **0.1207**(+4.35pp), wpe +0.006 → **−0.092**(체계적 과소예측),
+  매진 위험 0.217 → **0.591**
+- 이유 (a) 타깃-날짜 lag 집합 {1,7,14,28}에 6이 없어 **원점 시점 최신 실측을 버린다**
+- 이유 (b) ★**train/test 가용성 불일치**: blinding은 test에만 적용 → train AR 결측 0.0% vs
+  test 34.3%. AR 완비로 학습하고 AR 34% 결측으로 예측한다(공변량 shift)
+- → 운영 성능은 **[0.0783, 0.1207]** 사이. 이 구간은 너무 넓어 보고 불가.
+
+### 3단계 (필요, 미착수)
+origin-anchored feature 재정의 + **train도 같은 가용성으로 구성**(offset별 학습셋·모델).
+`scripts/operational_backtest.py` 로직 참고 후 harness로 승격. 비용 52×7=364 fit.
