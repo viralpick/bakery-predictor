@@ -91,6 +91,7 @@ def run_experiment(
             n_folds=spec.window.n_folds, horizon_days=spec.window.horizon_days,
             production_q=spec.production_q, alpha=spec.alpha,
             events=events, lunar_events=lunar, forecaster=fc,
+            lead_days=spec.window.lead_days, anchor_dow=spec.window.anchor_dow,
         )
         metrics = metrics_from_preds(bt.predictions)
         fout = out / fname

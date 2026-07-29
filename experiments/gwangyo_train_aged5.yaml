@@ -1,0 +1,32 @@
+# 학습 데이터 5일 노후화 실험 — 운영 리드타임 정렬의 "1단계"
+#
+# 운영 제약: 수요일 오전까지 발주 시스템 전달 → 데이터는 화요일까지, 대상은 다음주 월~일.
+#   anchor_dow=0  월요일 시작 블록 → 대상 = 월~일
+#   lead_days=5   월요일 − 5일 = 수요일, 즉 train/prior는 화요일까지 (첫 대상일 = 원점+6)
+#
+# ⚠️⚠️ 이름을 "operational"로 쓰지 않은 이유 — 이건 완전한 운영 시나리오가 아니다.
+#   lead_days는 **모델 학습 시점**만 옮긴다. test 행의 자기회귀 feature
+#   (adjusted_demand_unit_lag1/lag7/... , rmean, ewma)는 프레임 전체에 대해 한 번
+#   계산되므로 여전히 원점 이후 실측을 본다(실측: 월요일 test 행의 lag1 = 전날 일요일
+#   = cutoff+4일). 따라서 이 실험의 열화는 **운영 열화의 하한(lower bound)** 이다.
+#   완전 정렬은 horizon별 feature 재구성이 필요하고 그건 feature 레이어 작업이다.
+#   → 상세: docs/superpowers/specs/2026-07-29-operational-horizon-design.md §6
+#
+# ⚠️ 헤드라인 아님. 헤드라인 = experiments/gwangyo_default.yaml (lead_days=0, anchor_dow=None).
+name: gwangyo_train_aged5
+data:
+  source: real
+  store: store_gw01
+target: adjusted_demand_unit
+forecaster: [category_total]
+layers: [event_prior]
+event_priors: gwangyo
+window:
+  scheme: expanding
+  n_folds: 52
+  window_days: 730
+  horizon_days: 7
+  lead_days: 5
+  anchor_dow: 0
+alpha: 0.8
+production_q: 0.85
