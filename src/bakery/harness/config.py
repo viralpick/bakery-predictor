@@ -70,6 +70,9 @@ class ExperimentSpec(BaseModel):
     alpha: float = 0.8
     production_q: float = 0.85
     allow_deprecated: bool = False
+    # "windowed" = 대상일 블록 fold(헤드라인). "panel" = 원점 기준 fold + 원점기준
+    # AR feature(운영 정렬). 기본값은 헤드라인 경로다.
+    engine: Literal["windowed", "panel"] = "windowed"
 
     @field_validator("forecaster", "layers", mode="before")
     @classmethod

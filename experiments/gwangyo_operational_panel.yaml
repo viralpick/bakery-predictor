@@ -1,0 +1,32 @@
+# ★운영 예측 패널 (C1 3단계) — 예측 시점에 쓸 수 있는 값으로만 feature를 정의
+#
+# engine: panel  → fold를 **원점**으로 자르고, AR feature를 **원점 기준**으로 만든다.
+#   원점 = 화요일(수요일 오전 발주 전달 제약) / 대상 = 다음주 월~일(offset 6~12)
+#   학습은 매일 원점(약 12,700행), 평가는 화요일 원점만(fold당 7행 × 52 = n_test 364)
+#   → gwangyo_train_aged5(하한)·gwangyo_lead5_ar_aligned(상한)과 직접 비교 가능
+#
+# 1·2단계가 남긴 두 문제를 동시에 해소한다:
+#   (a) 원점 시점 최신 실측을 버리던 문제 → y_same_dow_latest 등 원점 기준 feature
+#   (b) train/test 가용성 불일치(공변량 shift) → 모든 행이 정의상 원점-가용
+#
+# ⚠️ 정렬하지 않은 축: **날씨는 여전히 관측값**을 쓴다(현 헤드라인과 동일).
+#    D+6~D+12를 예측하며 그날 관측 기온·강수를 쓰므로 이 축은 낙관적이다.
+#    중기예보 정렬은 별도 단계 — 스펙 §6. 인용 시 "AR 정렬 / 날씨 미정렬"로 병기.
+#
+# ⚠️ 헤드라인 아님. 헤드라인 = experiments/gwangyo_default.yaml (engine: windowed).
+name: gwangyo_operational_panel
+engine: panel
+data:
+  source: real
+  store: store_gw01
+target: adjusted_demand_unit
+forecaster: [category_total]
+layers: [event_prior]
+event_priors: gwangyo
+window:
+  scheme: expanding
+  n_folds: 52          # 평가 원점(화요일) 수
+  window_days: 730
+  horizon_days: 7      # panel engine에선 미사용(offset이 패널에 박혀 있다)
+alpha: 0.8
+production_q: 0.85
