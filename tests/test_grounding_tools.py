@@ -151,7 +151,13 @@ def test_dispatch_explain_item_order(dataset):
                     arguments={"store_id": store, "item_id": item, "date": date})
     res = dispatch(call, dataset)
     rows = json.loads(res.content)
-    assert [r["step"] for r in rows] == ["category_total", "proportion", "item_order", "final"]
+    # 비중 인자 5종 + 정규화 분모가 category_total과 proportion 사이에 노출된다.
+    assert [r["step"] for r in rows] == [
+        "category_total",
+        "base_sold", "adj_trend", "adj_stockout", "adj_closing", "adj_new",
+        "raw_weight", "weight_sum",
+        "proportion", "item_order", "final",
+    ]
 
 
 def test_dispatch_rank_forward_items(dataset):
