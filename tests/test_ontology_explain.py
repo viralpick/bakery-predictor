@@ -152,3 +152,86 @@ def test_rank_forward_items_matches_seam(daily, ff, target_date):
                     .head(3)["item_id"])
     assert list(ranked["item_id"].astype(str)) == expected
     assert len(ranked) == 3
+
+
+# ---------------------------------------------------------------------------
+# 피처 기여도 분해 (b) — SHAP 가법 분해를 설명 행으로 노출
+# ---------------------------------------------------------------------------
+
+def test_seam_contributions_are_additive(ff):
+    """★가법성 앵커: base_value + Σ기여 == raw_prediction (트리 SHAP 성질)."""
+    import numpy as np
+    contrib = ff.contributions
+    assert contrib is not None
+    feats = [c for c in contrib.columns if c not in ("date", "base_value", "raw_prediction")]
+    total = contrib["base_value"] + contrib[feats].sum(axis=1)
+    assert np.allclose(total.to_numpy(), contrib["raw_prediction"].to_numpy(), rtol=1e-12)
+
+
+def test_seam_raw_prediction_matches_base_median(ff):
+    """clip이 걸리지 않는 정상 구간에서 raw_prediction == base_median."""
+    import numpy as np
+    assert (ff.category_totals["base_median"] > 0).all()
+    assert np.allclose(
+        ff.contributions["raw_prediction"].to_numpy(),
+        ff.category_totals["base_median"].to_numpy(), rtol=1e-12,
+    )
+
+
+def test_grouping_is_exhaustive_and_disjoint(ff):
+    """그룹 합 == 전체 피처 기여 합. 누락/중복이 있으면 가법 분해가 깨진다."""
+    from bakery.ontology.explain import group_contributions
+    row = ff.contributions.iloc[0]
+    feats = [c for c in ff.contributions.columns
+             if c not in ("date", "base_value", "raw_prediction")]
+    grouped = group_contributions(row, target_col="adjusted_demand_unit")
+    assert sum(grouped.values()) == pytest.approx(float(row[feats].sum()), rel=1e-12)
+
+
+def test_cyclic_features_collapse_into_one_axis():
+    """dow_sin/cos가 하나의 '요일' 축으로 합쳐진다 — 사람이 읽을 수 있게."""
+    from bakery.ontology.explain import _contrib_group
+    for feature in ("dow", "dow_sin", "dow_cos", "is_weekend"):
+        assert _contrib_group(feature, "adjusted_demand_unit") == "contrib_dow"
+    for feature in ("month_sin", "month_cos", "dom_sin"):
+        assert _contrib_group(feature, "adjusted_demand_unit") == "contrib_month"
+
+
+def test_autoregressive_features_group_for_both_engines():
+    """대상일 기준(windowed)과 원점 기준(panel) AR 피처 모두 '최근 수요'로."""
+    from bakery.ontology.explain import _contrib_group
+    for feature in ("adjusted_demand_unit_lag7", "adjusted_demand_unit_rmean28",
+                    "y_origin_lag0", "y_same_dow_latest"):
+        assert _contrib_group(feature, "adjusted_demand_unit") == "contrib_recent_demand"
+
+
+def test_explain_rows_reconstruct_base_median(daily, target_date):
+    """★설명 행만으로 base_median이 복원된다 — 설명이 계산을 반영한다는 계약."""
+    rows = explain_category_total(STORE, daily=daily, date=target_date, use_forecast=False)
+    got = rows.set_index("step")["value"]
+    groups = [s for s in rows["step"]
+              if s.startswith("contrib_") and s != "contrib_base_value"]
+    assert groups, "기여 그룹 행이 없다"
+    total = got["contrib_base_value"] + sum(got[g] for g in groups)
+    assert total == pytest.approx(got["base_median"], rel=1e-9)
+
+
+def test_contribution_rows_sorted_by_magnitude(daily, target_date):
+    """기여 큰 축이 위에 온다(읽는 순서 = 중요한 순서)."""
+    rows = explain_category_total(STORE, daily=daily, date=target_date, use_forecast=False)
+    groups = rows[rows["step"].str.startswith("contrib_")
+                  & (rows["step"] != "contrib_base_value")]
+    magnitudes = groups["value"].abs().tolist()
+    assert magnitudes == sorted(magnitudes, reverse=True)
+
+
+def test_stage_rows_unchanged_by_contribution_addition(daily, ff, target_date):
+    """기여 행을 추가해도 기존 단계 행(계약)은 그대로다 — 소비처 gold가 이걸 읽는다."""
+    rows = explain_category_total(STORE, daily=daily, date=target_date, use_forecast=False)
+    got = rows.set_index("step")["value"]
+    ct = ff.category_totals[
+        pd.to_datetime(ff.category_totals["date"]) == pd.Timestamp(target_date)
+    ].iloc[0]
+    assert got["base_median"] == pytest.approx(ct["base_median"], rel=1e-9)
+    assert got["prior_prod"] == pytest.approx(ct["prior_prod"], rel=1e-9)
+    assert rows["step"].is_unique

@@ -30,6 +30,49 @@ from .loaders import load_forecast_weather, load_real_daily
 console = Console()
 
 
+def _expected_contributions(model, test: pd.DataFrame) -> pd.DataFrame:
+    """LightGBM `pred_contrib` → 피처별 기여도 프레임(가법 분해).
+
+    반환: [date, *feature_cols, base_value, raw_prediction].
+    `base_value + Σ기여 == raw_prediction` 이 정확히 성립한다(트리 SHAP는 가법적).
+    ⚠️`raw_prediction` 은 clip≥0 **이전** 값이다 — base_median은 clip 후이므로 음수
+    예측이 나온 날에는 둘이 다르다. 설명 쪽에서 그 경우를 표기한다.
+    ⚠️기여도는 "이 모델이 그렇게 계산했다"는 분해이지 **인과가 아니다.**
+    """
+    cols = list(model.feature_cols)
+    contrib = model.expected.predict(test[cols], pred_contrib=True)
+    frame = pd.DataFrame(contrib[:, :-1], columns=cols)
+    frame.insert(0, "date", test["date"].to_numpy())
+    frame["base_value"] = contrib[:, -1]
+    frame["raw_prediction"] = contrib.sum(axis=1)
+    return frame
+
+
+def _category_base_predict_with_contrib(
+    train: pd.DataFrame, test: pd.DataFrame, *,
+    target_col: str, total_model: str, production_quantile: float,
+) -> tuple:
+    """`_category_base_predict` + 피처 기여도. (base_median, base_prod, contributions).
+
+    contributions는 lightgbm 경로에서만 나온다 — NGBoost(distributional)는 `pred_contrib`
+    를 제공하지 않으므로 None이다.
+    """
+    import numpy as np
+
+    if total_model == "distributional":
+        model = fit_distributional_total(train, target_col=target_col)
+        base_prod = np.clip(model.predict_production(test, production_q=production_quantile), 0.0, None)
+        contributions = None
+    elif total_model == "lightgbm":
+        model = fit_category_total(train, target_col=target_col, production_q=production_quantile)
+        base_prod = np.clip(model.predict_production(test), 0.0, None)
+        contributions = _expected_contributions(model, test)
+    else:
+        raise ValueError(f"unknown total_model: {total_model!r} (expected 'lightgbm' or 'distributional')")
+    base_median = np.clip(model.predict_expected(test), 0.0, None)
+    return base_median, base_prod, contributions
+
+
 def _category_base_predict(
     train: pd.DataFrame, test: pd.DataFrame, *,
     target_col: str, total_model: str, production_quantile: float,
@@ -37,18 +80,12 @@ def _category_base_predict(
     """train으로 카테고리 총량 모델 fit → test의 (base_median, base_prod) 반환(clip≥0).
 
     total_model 분기: lightgbm(production_q fit 고정) | distributional(production_q predict 시).
-    fold backtest·future 예측 공용(중복 제거)."""
-    import numpy as np
-
-    if total_model == "distributional":
-        model = fit_distributional_total(train, target_col=target_col)
-        base_prod = np.clip(model.predict_production(test, production_q=production_quantile), 0.0, None)
-    elif total_model == "lightgbm":
-        model = fit_category_total(train, target_col=target_col, production_q=production_quantile)
-        base_prod = np.clip(model.predict_production(test), 0.0, None)
-    else:
-        raise ValueError(f"unknown total_model: {total_model!r} (expected 'lightgbm' or 'distributional')")
-    base_median = np.clip(model.predict_expected(test), 0.0, None)
+    fold backtest·future 예측 공용(중복 제거). 2-tuple 계약 유지 — cli.py 소비처 불변.
+    기여도까지 필요하면 `_category_base_predict_with_contrib`."""
+    base_median, base_prod, _ = _category_base_predict_with_contrib(
+        train, test, target_col=target_col, total_model=total_model,
+        production_quantile=production_quantile,
+    )
     return base_median, base_prod
 
 
@@ -114,10 +151,13 @@ class ForwardForecast:
         base_* = Stage1 예측(event_prior blend 전), prior_* = blend 후.
     proportions: compute_proportions 출력(target_date→date), factor 컬럼 포함.
     item_quantities: [store_id, item_id, category_id, date, demand_point, our_order].
+    contributions: base_median(=expected 모델)의 피처별 가법 기여도.
+        [date, *feature, base_value, raw_prediction]. lightgbm 경로만(NGBoost는 None).
     """
     category_totals: pd.DataFrame
     proportions: pd.DataFrame
     item_quantities: pd.DataFrame
+    contributions: pd.DataFrame | None = None
 
 
 def forecast_forward(
@@ -152,7 +192,7 @@ def forecast_forward(
     is_future = feats["date"].isin(horizon)
     train = feats[~is_future].dropna(subset=[target_col])
     test = feats[is_future]
-    base_median, base_prod = _category_base_predict(
+    base_median, base_prod, contributions = _category_base_predict_with_contrib(
         train, test, target_col=target_col,
         total_model=total_model, production_quantile=production_quantile,
     )
@@ -185,5 +225,5 @@ def forecast_forward(
     proportions = prop_result.proportions.rename(columns={"target_date": "date"})
     return ForwardForecast(
         category_totals=category_totals, proportions=proportions,
-        item_quantities=item_quantities,
+        item_quantities=item_quantities, contributions=contributions,
     )
