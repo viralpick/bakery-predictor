@@ -11,7 +11,11 @@ from typing import Protocol, runtime_checkable
 import numpy as np
 import pandas as pd
 
-from bakery.models.category_total import fit_category_total
+from bakery.models.category_total import (
+    EXPECTED_OBJECTIVE_L1,
+    EXPECTED_OBJECTIVE_L2,
+    fit_category_total,
+)
 
 
 @runtime_checkable
@@ -27,14 +31,29 @@ class Forecaster(Protocol):
 
 
 class CategoryTotalForecaster:
+    """헤드라인 forecaster. expected 모델 목적함수는 기본 L1(조건부 중앙값)."""
+
     name = "category_total"
+    expected_objective = EXPECTED_OBJECTIVE_L1
 
     def fit(self, train: pd.DataFrame, *, target_col: str, alpha: float,
             production_q: float) -> FittedForecaster:
         # 반환 CategoryTotalModel이 이미 predict_expected/predict_production(q fit-고정) 계약 만족.
         return fit_category_total(
             train, target_col=target_col, alpha_demand=alpha, production_q=production_q,
+            expected_objective=self.expected_objective,
         )
+
+
+class CategoryTotalL2Forecaster(CategoryTotalForecaster):
+    """expected 모델만 L2(조건부 평균)로 바꾼 변이 — 목적함수 축 A/B용.
+
+    생산량(quantile) 모델은 동일하다. 나머지 하이퍼파라미터도 동일하므로 두 forecaster를
+    한 실험에 태우면 **같은 fold·같은 데이터**에서 목적함수 효과만 분리된다.
+    """
+
+    name = "category_total_l2"
+    expected_objective = EXPECTED_OBJECTIVE_L2
 
 
 class _ProdQBound:
