@@ -10,10 +10,12 @@ import pandas as pd
 import yaml
 
 from bakery.features.category_aggregate import build_category_daily, build_features
+from bakery.features.forecast_panel import build_forecast_panel
 from bakery.harness.backtest_core import metrics_from_preds, windowed_backtest
 from bakery.harness.config import ExperimentSpec
 from bakery.harness.event_priors import resolve_event_priors
-from bakery.harness.registry import is_runnable, build_forecaster
+from bakery.harness.panel_backtest import panel_backtest
+from bakery.harness.registry import build_forecaster, is_runnable
 
 STAGES: tuple[str, ...] = ("features", "backtest", "evaluate")
 
@@ -65,11 +67,14 @@ def run_experiment(
     if not runnable:
         raise ValueError("실행 가능한 forecaster 없음(category_total/distributional_total 필요).")
 
-    feat_key = _stage_key({"source": spec.data.source, "store": spec.data.store,
+    feat_key = _stage_key({"engine": spec.engine,
+                           "source": spec.data.source, "store": spec.data.store,
                            "target": spec.target, "alpha": spec.alpha})
 
     def _feat():
         cd = build_category_daily(alpha=spec.alpha)
+        if spec.engine == "panel":
+            return build_forecast_panel(cd, target_col=spec.target)
         return build_features(cd, target_col=spec.target)
 
     feat = _load_or_compute("features", feat_key, cache_dir, _feat, trace)
@@ -86,15 +91,23 @@ def run_experiment(
     for fname in runnable:
         fc = build_forecaster(fname)
         trace.append((f"backtest:{fname}", "run"))
-        bt = windowed_backtest(
-            feat, window_days=spec.window.window_days, target_col=spec.target,
-            n_folds=spec.window.n_folds, horizon_days=spec.window.horizon_days,
-            production_q=spec.production_q, alpha=spec.alpha,
-            events=events, lunar_events=lunar, forecaster=fc,
-            lead_days=spec.window.lead_days, anchor_dow=spec.window.anchor_dow,
-            # gapless(dropna 이전) 프레임을 넘긴다 — AR 재계산은 위치 shift라 연속성이 필수.
-            ar_history=feat[["date", spec.target]] if spec.window.align_features else None,
-        )
+        if spec.engine == "panel":
+            # 패널은 fold를 원점으로 자른다(대상일 블록 아님) → 형제 함수 사용.
+            bt = panel_backtest(
+                feat, window_days=spec.window.window_days, target_col=spec.target,
+                n_folds=spec.window.n_folds, production_q=spec.production_q,
+                alpha=spec.alpha, events=events, lunar_events=lunar, forecaster=fc,
+            )
+        else:
+            bt = windowed_backtest(
+                feat, window_days=spec.window.window_days, target_col=spec.target,
+                n_folds=spec.window.n_folds, horizon_days=spec.window.horizon_days,
+                production_q=spec.production_q, alpha=spec.alpha,
+                events=events, lunar_events=lunar, forecaster=fc,
+                lead_days=spec.window.lead_days, anchor_dow=spec.window.anchor_dow,
+                # gapless(dropna 이전) 프레임 — AR 재계산은 위치 shift라 연속성이 필수.
+                ar_history=feat[["date", spec.target]] if spec.window.align_features else None,
+            )
         metrics = metrics_from_preds(bt.predictions)
         fout = out / fname
         fout.mkdir(parents=True, exist_ok=True)
