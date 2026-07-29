@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
@@ -39,10 +41,21 @@ def test_verdict_reports_global_advantage():
     assert verdict == "기각 — 1칸에서 GLOBAL(전역 균일) 우위, DOW 우위 0칸"
 
 
+# reports/ 는 gitignored라 신규 clone·워크트리에는 없다. 이 테스트는 **live canonical
+# 아티팩트** 경로를 일부러 태우는 것이므로(동결 fixture 테스트와 역할이 다르다) 부재는
+# 결함이 아니라 "harness-run을 아직 안 돌렸다"는 뜻이다 → 이유를 밝히고 skip한다.
+# 반면 tests/fixtures/frozen/* 은 git-tracked이며 부재 시 fail이 맞다(설계 의도 유지).
+_LIVE_PREDS = Path("reports/gwangyo_default/category_total/predictions.csv")
+
+
 @pytest.mark.slow
+@pytest.mark.skipif(
+    not _LIVE_PREDS.exists(),
+    reason=f"{_LIVE_PREDS} 없음 — `uv run bakery harness-run experiments/gwangyo_default.yaml` 먼저 실행",
+)
 def test_handler_consumes_predictions_artifact(tmp_path):
     """canonical harness preds로 실행 — 수치는 동결 캐시와 다르며 방향만 본다."""
-    preds_path = "reports/gwangyo_default/category_total/predictions.csv"
+    preds_path = str(_LIVE_PREDS)
     spec = AnalysisSpec(name="t", data={"source": "real"}, predictions=preds_path,
                         params={"weekday_bias": {"n_boot": 50}})
     result = weekday_bias(AnalysisInputs.from_spec(spec))

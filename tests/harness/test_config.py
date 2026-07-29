@@ -24,6 +24,34 @@ def test_defaults_are_category_stack(tmp_path):
     assert spec.metrics == ["wape", "wpe", "stockout_risk", "surplus_mean_units", "surplus_rate"]
 
 
+def test_operational_window_defaults_are_current_behavior(tmp_path):
+    """lead_days/anchor_dow 기본값 = 현 헤드라인 동작(리드타임 0, 인덱스 기반 fold)."""
+    spec = load_spec(_write(tmp_path, {"name": "x", "data": {"source": "real"}}))
+    assert spec.window.lead_days == 0
+    assert spec.window.anchor_dow is None
+
+
+def test_operational_window_opt_in(tmp_path):
+    body = {"name": "x", "data": {"source": "real"},
+            "window": {"lead_days": 5, "anchor_dow": 0}}
+    spec = load_spec(_write(tmp_path, body))
+    assert spec.window.lead_days == 5
+    assert spec.window.anchor_dow == 0
+
+
+@pytest.mark.parametrize("bad", [-1, 7])
+def test_anchor_dow_out_of_range_rejected(tmp_path, bad):
+    body = {"name": "x", "data": {"source": "real"}, "window": {"anchor_dow": bad}}
+    with pytest.raises(SpecError, match="anchor_dow"):
+        load_spec(_write(tmp_path, body))
+
+
+def test_negative_lead_days_rejected(tmp_path):
+    body = {"name": "x", "data": {"source": "real"}, "window": {"lead_days": -1}}
+    with pytest.raises(SpecError, match="lead_days"):
+        load_spec(_write(tmp_path, body))
+
+
 def test_potential_demand_rejected(tmp_path):
     body = {"name": "x", "data": {"source": "real"}, "target": "potential_demand"}
     with pytest.raises(SpecError, match="potential_demand"):

@@ -12,6 +12,9 @@ DEFAULT_LAYERS: list[str] = ["event_prior"]
 DEFAULT_METRICS: list[str] = ["wape", "wpe", "stockout_risk", "surplus_mean_units", "surplus_rate"]
 DEPRECATED_FORECASTERS = {"conformal_interval"}
 
+MONDAY = 0
+SUNDAY = 6
+
 
 class SpecError(ValueError):
     """canonical 강제 규칙 위반."""
@@ -23,10 +26,33 @@ class DataSpec(BaseModel):
 
 
 class WindowSpec(BaseModel):
+    """백테스트 fold 창 사양.
+
+    lead_days / anchor_dow 는 운영 리드타임 정렬용 opt-in 파라미터다. 기본값
+    (0 / None)은 현 헤드라인 동작(리드타임 0 + 인덱스 기반 연속 블록)과 동일하며,
+    엔진 동등성 게이트(rtol=1e-9)가 이를 보증한다.
+    """
+
     scheme: Literal["expanding", "rolling"] = "expanding"
     n_folds: int = 52
     window_days: int = 730
     horizon_days: int = 7
+    lead_days: int = 0            # train/prior cutoff = test_start − lead_days. 0 = 현 동작
+    anchor_dow: int | None = None  # None = 현 동작(인덱스 기반). 0=월요일 시작 블록
+
+    @field_validator("lead_days")
+    @classmethod
+    def _check_lead_days(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(f"lead_days는 0 이상이어야 한다(0=리드타임 없음): {v}")
+        return v
+
+    @field_validator("anchor_dow")
+    @classmethod
+    def _check_anchor_dow(cls, v: int | None) -> int | None:
+        if v is not None and not MONDAY <= v <= SUNDAY:
+            raise ValueError(f"anchor_dow는 {MONDAY}(월)~{SUNDAY}(일) 범위여야 한다: {v}")
+        return v
 
 
 class ExperimentSpec(BaseModel):
