@@ -18,9 +18,10 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from bakery.features.category_aggregate import add_lag_rolling_ewma
+from bakery.harness.forecasters import CategoryTotalForecaster, Forecaster
 from bakery.models.category_total import BacktestResult
 from bakery.models.event_prior import EventLevelPrior
-from bakery.harness.forecasters import CategoryTotalForecaster, Forecaster
 
 MIN_TRAIN_ROWS = 60
 DAYS_PER_WEEK = 7
@@ -65,6 +66,50 @@ def _iter_test_folds(
         yield k, df[(df["date"] >= start) & (df["date"] <= start + span)]
 
 
+def _ar_columns(df: pd.DataFrame, target_col: str) -> list[str]:
+    """타깃 유래 자기회귀 feature 컬럼(lag/rmean/rstd/ewma)."""
+    return [c for c in df.columns if c.startswith(f"{target_col}_")]
+
+
+def _require_gapless(ar_history: pd.DataFrame) -> pd.DataFrame:
+    """AR 재계산은 위치 기반 shift라 날짜가 연속이어야 한다 — 아니면 조용히 틀린다.
+
+    backtest가 받는 프레임은 dropna로 gap이 생겨 있으므로(광교 실측 7건) 재계산에
+    쓸 수 없다. 그래서 gapless history를 따로 받고, 여기서 fails-loud로 검증한다.
+    """
+    hist = ar_history.sort_values("date").reset_index(drop=True)
+    gaps = hist["date"].diff().dt.days.dropna()
+    bad = int((gaps != 1).sum())
+    if bad:
+        raise ValueError(
+            f"ar_history에 날짜 gap {bad}건 — 자기회귀 재계산이 위치 shift로 어긋난다. "
+            "dropna 이전의 날짜 연속 프레임을 넘겨라."
+        )
+    return hist
+
+
+def _blind_ar_features(
+    test_df: pd.DataFrame, *, ar_history: pd.DataFrame, cutoff: pd.Timestamp, target_col: str,
+) -> pd.DataFrame:
+    """원점(cutoff) 이후 실측을 보는 자기회귀 feature를 가린다(운영 feature 가용성 정렬).
+
+    lead_days는 학습 시점만 옮기므로 test 행의 lag/rolling/ewma는 여전히 원점 이후를
+    본다(예: 월요일 블록의 lag1 = 전날 일요일). 여기서 타깃을 cutoff 이후로 마스킹한
+    뒤 AR feature만 재계산해 그 경로를 끊는다. 캘린더·날씨·경쟁점 feature는 타깃과
+    무관해 fold-invariant이므로 재계산 대상이 아니다.
+
+    ★타깃 컬럼 자체는 건드리지 않는다 — 평가(actual)에 쓰인다.
+    """
+    hist = _require_gapless(ar_history[["date", target_col]].copy())
+    hist[target_col] = hist[target_col].mask(hist["date"] >= cutoff)
+    blinded = add_lag_rolling_ewma(hist, target_col)
+    cols = _ar_columns(test_df, target_col)
+    patch = test_df[["date"]].merge(blinded[["date", *cols]], on="date", how="left")
+    out = test_df.copy()
+    out[cols] = patch[cols].to_numpy()
+    return out
+
+
 def windowed_backtest(
     df: pd.DataFrame, *, window_days: int,
     target_col: str = "adjusted_demand_unit", n_folds: int = 52,
@@ -73,6 +118,7 @@ def windowed_backtest(
     min_train_rows: int = MIN_TRAIN_ROWS,
     forecaster: Forecaster | None = None,
     lead_days: int = 0, anchor_dow: int | None = None,
+    ar_history: pd.DataFrame | None = None,
 ) -> BacktestResult:
     fc = forecaster if forecaster is not None else CategoryTotalForecaster()
     df = df.sort_values("date").reset_index(drop=True).dropna(subset=[target_col]).copy()
@@ -93,6 +139,12 @@ def windowed_backtest(
         # 운영 리드타임: 원점 이후 데이터는 train/prior 어디에도 넣지 않는다(leakage 차단).
         # lead_days=0이면 cutoff == test_start_date → 기존 산술과 완전 동일.
         cutoff = test_start_date - pd.Timedelta(days=lead_days)
+        if ar_history is not None:
+            # 운영 feature 가용성 정렬: 원점 이후를 보는 AR feature를 가린다.
+            # train 행은 전부 cutoff 미만이라 손대지 않는다(feature 불변).
+            test_df = _blind_ar_features(
+                test_df, ar_history=ar_history, cutoff=cutoff, target_col=target_col,
+            )
         # === 유일한 변경점(원본 대비): train slice 를 날짜 기반 rolling window 로 ===
         train_df = df[(df["date"] < cutoff) & (df["date"] >= cutoff - window)]
         if len(train_df) < min_train_rows:

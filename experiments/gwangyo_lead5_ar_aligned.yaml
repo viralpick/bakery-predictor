@@ -1,0 +1,33 @@
+# 운영 리드타임 정렬 "2단계" — 자기회귀 feature까지 원점 이후를 못 보게 가림
+#
+# 1단계(gwangyo_train_aged5)는 학습 시점만 옮겨서 test 행의 lag/rolling/ewma가
+# 여전히 원점 이후 실측을 봤다 → 그 수치는 운영 열화의 **하한**이었다.
+# 여기서는 align_features=true 로 그 경로까지 끊는다.
+#
+# ⚠️ 이건 운영 열화의 **상한(upper bound)** 이다.
+#   타깃-날짜 기준 lag 집합{1,7,14,28}에서 원점 이후 것을 NaN으로 지우기만 하므로,
+#   "원점 시점의 최신 실측"(예: 월요일 예측 시 화요일 값 = target−6)을 활용하지 못한다.
+#   실제 운영 시스템은 horizon offset별로 feature를 원점 기준으로 재정의해
+#   그 정보를 쓴다(`scripts/operational_backtest.py` 가 그렇게 했다).
+#   → 진짜 운영 성능은 [1단계 하한, 이 실험 상한] 사이에 있다.
+#   → 상세: docs/superpowers/specs/2026-07-29-operational-horizon-design.md
+#
+# ⚠️ 헤드라인 아님. 헤드라인 = experiments/gwangyo_default.yaml.
+name: gwangyo_lead5_ar_aligned
+data:
+  source: real
+  store: store_gw01
+target: adjusted_demand_unit
+forecaster: [category_total]
+layers: [event_prior]
+event_priors: gwangyo
+window:
+  scheme: expanding
+  n_folds: 52
+  window_days: 730
+  horizon_days: 7
+  lead_days: 5          # 원점 = 화요일 (월요일 블록 − 5일 → train/prior는 화요일까지)
+  anchor_dow: 0         # 월요일 시작 → 대상 = 다음주 월~일
+  align_features: true  # ★2단계: 원점 이후를 보는 AR feature(lag/rolling/ewma) 차단
+alpha: 0.8
+production_q: 0.85

@@ -92,6 +92,8 @@ def run_experiment(
             production_q=spec.production_q, alpha=spec.alpha,
             events=events, lunar_events=lunar, forecaster=fc,
             lead_days=spec.window.lead_days, anchor_dow=spec.window.anchor_dow,
+            # gapless(dropna 이전) 프레임을 넘긴다 — AR 재계산은 위치 shift라 연속성이 필수.
+            ar_history=feat[["date", spec.target]] if spec.window.align_features else None,
         )
         metrics = metrics_from_preds(bt.predictions)
         fout = out / fname

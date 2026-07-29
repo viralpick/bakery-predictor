@@ -39,6 +39,9 @@ class WindowSpec(BaseModel):
     horizon_days: int = 7
     lead_days: int = 0            # train/prior cutoff = test_start − lead_days. 0 = 현 동작
     anchor_dow: int | None = None  # None = 현 동작(인덱스 기반). 0=월요일 시작 블록
+    # True면 원점 이후를 보는 자기회귀 feature(lag/rolling/ewma)를 가린다.
+    # lead_days>0에서만 의미가 있다(원점=test_start). 기본 False = 현 동작.
+    align_features: bool = False
 
     @field_validator("lead_days")
     @classmethod
