@@ -73,6 +73,10 @@ class ExperimentSpec(BaseModel):
     # "windowed" = 대상일 블록 fold(헤드라인). "panel" = 원점 기준 fold + 원점기준
     # AR feature(운영 정렬). 기본값은 헤드라인 경로다.
     engine: Literal["windowed", "panel"] = "windowed"
+    # "category" = 카테고리 총량 발주까지(헤드라인, 기본). "item" = 총량을 품목별로
+    # 배분해 `item_orders` 까지 낸다. 배분은 날짜마다 compute_proportions를 돌려
+    # **느리므로** KPI가 필요한 실험에서만 켠다. 총량 지표는 배분 여부와 무관하게 동일.
+    order_level: Literal["category", "item"] = "category"
 
     @field_validator("forecaster", "layers", mode="before")
     @classmethod

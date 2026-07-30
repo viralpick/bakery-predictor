@@ -22,9 +22,32 @@ from bakery.features.category_aggregate import add_lag_rolling_ewma
 from bakery.harness.forecasters import CategoryTotalForecaster, Forecaster
 from bakery.models.category_total import BacktestResult
 from bakery.models.event_prior import EventLevelPrior
+from bakery.models.item_proportion import distribute_total
 
 MIN_TRAIN_ROWS = 60
 DAYS_PER_WEEK = 7
+ORDER_LEVEL_CATEGORY = "category"
+ORDER_LEVEL_ITEM = "item"
+
+
+def _distribute_fold_orders(
+    item_history: pd.DataFrame,
+    dates: np.ndarray,
+    production: np.ndarray,
+    *,
+    fold: int,
+    lead_days: int,
+) -> pd.DataFrame:
+    """카테고리 총 발주량을 품목별로 배분 — models.item_proportion 호출만(재구현 없음).
+
+    ★`lead_days` 를 그대로 넘긴다. 총량만 리드타임을 지키고 배분이 대상일 직전 실적을
+    보면 파이프라인 전체가 여전히 leaky다(PR#74에서 이 축을 막았다).
+    """
+    totals = pd.Series(np.asarray(production, dtype=float), index=pd.to_datetime(dates))
+    result = distribute_total(item_history, totals, lead_days=lead_days)
+    out = result.quantities.rename(columns={"qty": "order_qty"})
+    out["fold"] = fold
+    return out[["date", "item_id", "fold", "order_qty"]]
 
 
 def _fold_starts_by_dow(
@@ -119,7 +142,19 @@ def windowed_backtest(
     forecaster: Forecaster | None = None,
     lead_days: int = 0, anchor_dow: int | None = None,
     ar_history: pd.DataFrame | None = None,
+    order_level: str = ORDER_LEVEL_CATEGORY,
+    item_history: pd.DataFrame | None = None,
 ) -> BacktestResult:
+    """카테고리 총량 백테스트. order_level="item"이면 품목 배분까지 함께 낸다.
+
+    order_level: "category"(기본, 헤드라인) | "item". "item"이면 `item_history`
+      (품목 일별 프레임)가 **필수** — 없으면 fails-loud. 배분은 가법 출력이며
+      folds/predictions는 배분 여부와 무관하게 동일하다(엔진 동등성 hard gate).
+    """
+    if order_level not in (ORDER_LEVEL_CATEGORY, ORDER_LEVEL_ITEM):
+        raise ValueError(f"order_level must be 'category' or 'item', got {order_level!r}")
+    if order_level == ORDER_LEVEL_ITEM and item_history is None:
+        raise ValueError("order_level='item' requires item_history (품목 일별 프레임)")
     fc = forecaster if forecaster is not None else CategoryTotalForecaster()
     df = df.sort_values("date").reset_index(drop=True).dropna(subset=[target_col]).copy()
     df = df.dropna().reset_index(drop=True)
@@ -130,6 +165,7 @@ def windowed_backtest(
 
     window = pd.Timedelta(days=window_days)
     folds, preds = [], []
+    item_orders: list[pd.DataFrame] = []
     for k, test_df in _iter_test_folds(
         df, n_folds=n_folds, horizon_days=horizon_days, anchor_dow=anchor_dow,
     ):
@@ -172,9 +208,15 @@ def windowed_backtest(
             "date": test_df["date"].values, "fold": k,
             "actual": actual, "expected": exp_pred, "production": prod_pred,
         }))
+        if order_level == ORDER_LEVEL_ITEM:
+            item_orders.append(_distribute_fold_orders(
+                item_history, test_df["date"].values, prod_pred,
+                fold=k, lead_days=lead_days,
+            ))
     return BacktestResult(
         folds=pd.DataFrame(folds).sort_values("fold").reset_index(drop=True),
         predictions=pd.concat(preds, ignore_index=True),
+        item_orders=pd.concat(item_orders, ignore_index=True) if item_orders else None,
     )
 
 

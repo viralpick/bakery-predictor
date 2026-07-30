@@ -170,3 +170,58 @@ Phase 1 스파인 추출 때 harness는 **"총량 예측기 비교" 평면**으�
 
 ⚠️ 이 측정은 **비율 변화**만 본다. KPI(폐기·매진 비용)로의 전파는 총량과 곱해지고 실수요와
 비교되므로 3단계에서 다시 측정한다 — 여기 수치를 KPI 변동으로 인용하면 안 된다.
+
+## 9. 2단계 결과 — 배분을 harness에 배선 (완료)
+
+### 설계: 가법(additive) 확장
+```python
+@dataclass
+class BacktestResult:
+    folds: pd.DataFrame
+    predictions: pd.DataFrame
+    item_orders: pd.DataFrame | None = None    # ← 추가만. 기존 두 필드 불변
+```
+`ExperimentSpec.order_level: "category" | "item"`, **기본 `category`** 로 헤드라인 속도 보존.
+배분은 `models.item_proportion.distribute_total` **호출만**(재구현 0).
+
+### 관문 통과
+| 검증 | 결과 |
+|---|---|
+| **엔진 동등성 hard gate**(52-fold, rtol=1e-9) | **1 passed** — 카테고리 경로 무변경 |
+| 배분 on/off 시 총량 예측 | **rtol=1e-12 일치** |
+| 총량 보존(배분 합 == 총 발주), 52-fold 실측 | **최대 오차 1.14e-13** |
+| `order_level=category` 시 `item_orders` | `None`(배분 비용 안 냄) |
+
+### 실측 산출 (`experiments/gwangyo_item_orders.yaml`, 52-fold, `lead_days=5`)
+두 arm 모두 **13,457행 / 품목 58종 / 364일**. `item_orders.csv` 로 저장된다.
+
+### 세 가지 함정을 막았다
+1. **`lead_days` 를 배분에 전달** — 총량만 리드타임을 지키고 배분이 대상일 직전을 보면
+   파이프라인이 **부분 leaky**다. PR#74에서 막은 축이 harness 경로로 실제로 흐르는지
+   테스트로 고정(`test_lead_days_changes_item_orders_not_shape`, 리드 구간 spike 주입).
+2. **캐시 키에 `order_level` 포함** — 안 넣으면 배분 on/off가 같은 캐시를 공유해 조용히 틀린다.
+3. **`panel` + `item` 조합은 fails-loud** — 패널은 fold가 원점 기준이라 배분 대상일 매핑이
+   미정의다. 조용히 틀린 배분을 내는 것보다 막는다. (패널 KPI는 별도 과제)
+
+### 테스트 9종
+가법성(총량 불변) / fold 지표 불변 / 총량 보존 / 계약(컬럼·fold 집합) /
+**배분 비율이 history를 따르는지**(a:b=1:3 → 0.25) / history 없으면 fails-loud /
+잘못된 `order_level` 거부 / `category` 시 None / **리드타임 실효**(대조군 방식).
+
+⚠️ **품목 수 차이 주의**: 배분 산출은 **58종**인데 타깃 카테고리 전체는 157종이다.
+`compute_proportions` 가 최근 판매 실적이 있는 품목에만 배분하기 때문이다. 3단계 KPI에서
+이 population 차이가 폐기·매진 분모에 영향을 주므로 그때 다시 다룬다
+(PR#72에서 관측한 "강제-0 수요 행 9.4%" 와 같은 뿌리).
+
+## 10. 3단계 전제조건 검증 (완료)
+
+A basis(아띠제 실측)가 harness 평가 구간과 정렬되는지 확인했다:
+
+| 항목 | 값 |
+|---|---|
+| 범위 | 2021-01-01 ~ 2025-12-31 |
+| 품목-일 행 / 품목 | 91,619 / 157 |
+| `production_qty` / `waste_qty` 결측 | **0 / 0** |
+| 최근 364일 커버 | **364일 (완전)** |
+
+→ A/B basis 병기가 데이터 측면에서 가능하다. 3단계 착수 가능.

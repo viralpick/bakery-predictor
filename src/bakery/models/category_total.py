@@ -103,6 +103,10 @@ def fit_category_total(
 class BacktestResult:
     folds: pd.DataFrame
     predictions: pd.DataFrame
+    # 품목 배분 발주 [date, item_id, fold, order_qty]. order_level="item"일 때만 채운다.
+    # ★가법 필드다 — folds/predictions는 배분 여부와 무관하게 동일해야 하고,
+    # 엔진 동등성 hard gate(rtol=1e-9)가 그것을 고정한다.
+    item_orders: pd.DataFrame | None = None
 
 
 @dataclass

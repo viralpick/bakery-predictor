@@ -1,0 +1,21 @@
+# experiments/gwangyo_item_orders.yaml — 품목 배분 발주까지 산출(KPI 입력용).
+# ★헤드라인(gwangyo_default.yaml)과 총량 지표는 동일하다. 배분만 추가된다.
+#   배분은 날짜마다 compute_proportions를 돌려 느리다 — KPI가 필요할 때만 쓴다.
+# lead_days=5: 원점 화요일 → 다음주 월요일 대상. 배분 비율도 이 경계를 지킨다(PR#74).
+name: gwangyo_item_orders
+data:
+  source: real
+  store: store_gw01
+target: adjusted_demand_unit
+forecaster: [category_total, distributional_total]
+layers: [event_prior]
+event_priors: gwangyo
+order_level: item
+window:
+  scheme: expanding
+  n_folds: 52
+  window_days: 730
+  horizon_days: 7
+  lead_days: 5
+alpha: 0.8
+production_q: 0.85
