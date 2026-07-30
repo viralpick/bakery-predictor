@@ -115,9 +115,26 @@ def _classify_signals(df: pd.DataFrame) -> pd.DataFrame:
 def compute_proportions(
     history: pd.DataFrame,
     target_date: pd.Timestamp,
+    *,
+    cutoff_date: pd.Timestamp | None = None,
 ) -> pd.DataFrame:
-    """For a single target_date, compute item proportions from history < target_date."""
-    sig = _per_item_signals(history, target_date)
+    """target_date 하루치 품목 배분 비율.
+
+    ★두 날짜는 다른 개념이다. 섞으면 time leakage가 된다:
+      - `target_date`  = **무엇을 배분하는가**(대상일). 출력 라벨로만 쓴다.
+      - `cutoff_date`  = **발주 시점에 무엇을 알 수 있는가**(정보 경계).
+        history는 `< cutoff_date` 만 쓴다.
+
+    리드타임이 있으면 발주 시점엔 `target_date - lead_days` 까지만 안다. 그때
+    `cutoff_date` 를 그렇게 넘겨야 한다 — 안 넘기면 발주자가 갖지 못한 실적으로
+    비율을 만드는 것이고, 이는 절대 규칙 #2(time leakage) 위반이다.
+    `distribute_total(..., lead_days=)` 가 이 계산을 해준다.
+
+    `cutoff_date=None` 이면 `target_date` 를 쓴다(리드타임 0 = 기존 동작 보존).
+    """
+    if cutoff_date is None:
+        cutoff_date = target_date
+    sig = _per_item_signals(history, cutoff_date)
     sig = _classify_signals(sig)
 
     # 분위수 기반 연속 boost (인기도/과잉도 강도에 비례)
@@ -189,13 +206,25 @@ def distribute_interval(
 def distribute_total(
     history: pd.DataFrame,
     total_by_date: pd.Series,
+    *,
+    lead_days: int = 0,
 ) -> ItemProportionResult:
-    """For each date in total_by_date, distribute the total across items."""
+    """total_by_date의 각 날짜 총량을 품목별로 배분.
+
+    lead_days: 발주 리드타임(일). 대상일 D의 배분 비율은 `D - lead_days` 이전
+      history로만 만든다. **운영 정합을 맞추려면 총량 예측의 `lead_days` 와 같은
+      값을 넘겨야 한다** — 총량만 리드타임을 지키고 배분이 대상일 직전 실적을 보면
+      전체 파이프라인이 여전히 leaky다(절대 규칙 #2).
+      기본 0 = 기존 동작 보존.
+    """
+    if lead_days < 0:
+        raise ValueError(f"lead_days must be >= 0, got {lead_days}")
+    lead = pd.Timedelta(days=lead_days)
     all_props = []
     all_qty = []
     for d, total in total_by_date.items():
         d = pd.Timestamp(d)
-        props = compute_proportions(history, d)
+        props = compute_proportions(history, d, cutoff_date=d - lead)
         props["qty"] = props["proportion"] * total
         all_props.append(props)
         all_qty.append(props[["target_date", "item_id", "qty"]].rename(columns={"target_date": "date"}))
