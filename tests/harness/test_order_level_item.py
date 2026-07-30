@@ -1,0 +1,132 @@
+"""order_level='item' 배선 — 배분은 **가법**이고 총량 경로를 건드리지 않는다."""
+import numpy as np
+import pandas as pd
+import pytest
+
+from bakery.harness.backtest_core import windowed_backtest
+
+TARGET = "y"
+N_FOLDS = 3
+HORIZON = 7
+WINDOW_DAYS = 120
+
+
+def _category_frame(n_days: int = 400) -> pd.DataFrame:
+    """단조 추세 + 요일 효과가 있는 합성 카테고리 일별 프레임."""
+    dates = pd.date_range("2024-01-01", periods=n_days, freq="D")
+    dow_lift = np.where(dates.dayofweek >= 5, 1.3, 1.0)
+    y = 100.0 + np.arange(n_days) * 0.1
+    return pd.DataFrame({"date": dates, TARGET: y * dow_lift, "feat": np.arange(n_days) % 13})
+
+
+def _item_history(dates: pd.DatetimeIndex) -> pd.DataFrame:
+    """a:b = 1:3 인 2품목 history (배분 비율 0.25 / 0.75)."""
+    rows = []
+    for day in dates:
+        rows.append([day, "a", "bread", 10.0, False, pd.NaT])
+        rows.append([day, "b", "bread", 30.0, False, pd.NaT])
+    return pd.DataFrame(rows, columns=["date", "item_id", "category_id",
+                                       "sold_units", "is_stockout", "stockout_time"])
+
+
+def _run(order_level: str, *, item_history=None, lead_days: int = 0):
+    df = _category_frame()
+    return windowed_backtest(
+        df, window_days=WINDOW_DAYS, target_col=TARGET, n_folds=N_FOLDS,
+        horizon_days=HORIZON, order_level=order_level, item_history=item_history,
+        lead_days=lead_days,
+    )
+
+
+@pytest.fixture(scope="module")
+def runs():
+    df = _category_frame()
+    hist = _item_history(pd.DatetimeIndex(df["date"]))
+    return {
+        "category": _run("category"),
+        "item": _run("item", item_history=hist),
+    }
+
+
+def test_item_orders_absent_for_category_level(runs):
+    """기본(category)에서는 item_orders가 None — 배분 비용을 안 낸다."""
+    assert runs["category"].item_orders is None
+
+
+def test_distribution_is_additive(runs):
+    """★핵심: 배분을 켜도 총량 예측/발주/실측이 **정확히** 같다.
+
+    엔진 동등성 hard gate(rtol=1e-9)가 카테고리 경로를 지키는 것과 같은 취지를
+    합성 데이터로 빠르게 고정한다. 여기가 깨지면 배분이 총량을 오염시킨 것이다.
+    """
+    cat, item = runs["category"].predictions, runs["item"].predictions
+    assert len(cat) == len(item)
+    for col in ("expected", "production", "actual"):
+        np.testing.assert_allclose(item[col].to_numpy(), cat[col].to_numpy(), rtol=1e-12)
+
+
+def test_fold_metrics_unchanged_by_distribution(runs):
+    """fold 지표도 불변이어야 한다(리포트가 이걸 소비한다)."""
+    cat, item = runs["category"].folds, runs["item"].folds
+    np.testing.assert_allclose(item["wape"].to_numpy(), cat["wape"].to_numpy(), rtol=1e-12)
+
+
+def test_item_orders_preserve_category_total(runs):
+    """★배분은 재분배다 — 날짜별 품목 발주 합 == 카테고리 총 발주."""
+    orders, preds = runs["item"].item_orders, runs["item"].predictions
+    by_date = orders.groupby("date")["order_qty"].sum()
+    total = preds.set_index("date")["production"]
+    joined = pd.DataFrame({"dist": by_date, "total": total}).dropna()
+    assert len(joined) == N_FOLDS * HORIZON
+    np.testing.assert_allclose(joined["dist"].to_numpy(), joined["total"].to_numpy(), rtol=1e-12)
+
+
+def test_item_orders_shape_and_columns(runs):
+    """계약: [date, item_id, fold, order_qty], fold는 총량 fold와 같은 집합."""
+    orders = runs["item"].item_orders
+    assert list(orders.columns) == ["date", "item_id", "fold", "order_qty"]
+    assert sorted(orders["fold"].unique().tolist()) == list(range(N_FOLDS))
+    assert sorted(orders["item_id"].unique().tolist()) == ["a", "b"]
+
+
+def test_item_orders_follow_history_proportions(runs):
+    """a:b = 1:3 history → 발주도 0.25 : 0.75 (배분 비율이 실제로 흐르는지)."""
+    orders = runs["item"].item_orders
+    share = orders.groupby("item_id")["order_qty"].sum()
+    ratio = share["a"] / (share["a"] + share["b"])
+    # popularity/매진/추세 보정이 없는 평탄한 합성 history라 base 비율이 그대로 나온다
+    assert ratio == pytest.approx(0.25, abs=0.02)
+
+
+def test_item_level_requires_history():
+    """order_level='item' + history 없음 → fails-loud."""
+    with pytest.raises(ValueError, match="item_history"):
+        _run("item")
+
+
+def test_unknown_order_level_rejected():
+    with pytest.raises(ValueError, match="order_level"):
+        _run("sku")
+
+
+def test_lead_days_changes_item_orders_not_shape():
+    """★리드타임이 배분에 실제로 전달된다 — 수량은 달라지고 계약은 유지된다.
+
+    PR#74에서 막은 축이 harness 경로로 흐르는지 확인한다. 이 단언이 깨지면
+    lead_days가 배분까지 전달되지 않는다는 뜻이다(= 파이프라인 부분 leaky).
+    """
+    df = _category_frame()
+    hist = _item_history(pd.DatetimeIndex(df["date"]))
+    # 리드 구간에만 a를 폭증시킨다 — lead_days>0이면 이 실적은 배분에 반영되면 안 된다
+    spike_dates = pd.DatetimeIndex(df["date"]).sort_values()[-HORIZON * N_FOLDS - 3:]
+    spike = pd.DataFrame({
+        "date": spike_dates, "item_id": "a", "category_id": "bread",
+        "sold_units": 5000.0, "is_stockout": False, "stockout_time": pd.NaT,
+    })
+    leaky_hist = pd.concat([hist, spike], ignore_index=True)
+    lead0 = _run("item", item_history=leaky_hist, lead_days=0).item_orders
+    lead9 = _run("item", item_history=leaky_hist, lead_days=9).item_orders
+    a0 = lead0.groupby("item_id")["order_qty"].sum()["a"]
+    a9 = lead9.groupby("item_id")["order_qty"].sum()["a"]
+    assert a0 != pytest.approx(a9, rel=1e-6)          # 리드타임이 배분을 실제로 바꾼다
+    assert list(lead9.columns) == ["date", "item_id", "fold", "order_qty"]

@@ -55,6 +55,22 @@ def _load_or_compute(stage, key, cache_dir, compute, trace):
     return df
 
 
+def _load_item_history(spec: ExperimentSpec) -> pd.DataFrame:
+    """배분 비율 계산용 품목 일별 프레임.
+
+    ★panel 엔진은 아직 미지원 — fold가 원점 기준이라 배분 대상일 매핑이 다르다.
+    조용히 틀린 배분을 내는 대신 fails-loud한다.
+    """
+    if spec.engine == "panel":
+        raise ValueError("order_level='item'은 engine='panel'과 아직 함께 쓸 수 없다(배분 대상일 매핑 미정의).")
+    from bakery.cli import _load_real_daily
+
+    daily = _load_real_daily(spec.data.store)
+    daily = daily.copy()
+    daily["date"] = pd.to_datetime(daily["date"])
+    return daily
+
+
 def run_experiment(
     spec: ExperimentSpec, *, out_dir: Path, cache_dir: Path | None = None,
     _trace: list | None = None,
@@ -67,7 +83,7 @@ def run_experiment(
     if not runnable:
         raise ValueError("실행 가능한 forecaster 없음(category_total/distributional_total 필요).")
 
-    feat_key = _stage_key({"engine": spec.engine,
+    feat_key = _stage_key({"engine": spec.engine, "order_level": spec.order_level,
                            "source": spec.data.source, "store": spec.data.store,
                            "target": spec.target, "alpha": spec.alpha})
 
@@ -78,6 +94,9 @@ def run_experiment(
         return build_features(cd, target_col=spec.target)
 
     feat = _load_or_compute("features", feat_key, cache_dir, _feat, trace)
+    # 배분 비율 소스(품목 일별). order_level="item"일 때만 읽는다 — 헤드라인 경로는
+    # 이 I/O를 타지 않는다.
+    item_history = _load_item_history(spec) if spec.order_level == "item" else None
     events, lunar = resolve_event_priors(spec.event_priors) if "event_prior" in spec.layers else (None, None)
 
     out = out_dir / spec.name
@@ -107,12 +126,15 @@ def run_experiment(
                 lead_days=spec.window.lead_days, anchor_dow=spec.window.anchor_dow,
                 # gapless(dropna 이전) 프레임 — AR 재계산은 위치 shift라 연속성이 필수.
                 ar_history=feat[["date", spec.target]] if spec.window.align_features else None,
+                order_level=spec.order_level, item_history=item_history,
             )
         metrics = metrics_from_preds(bt.predictions)
         fout = out / fname
         fout.mkdir(parents=True, exist_ok=True)
         bt.predictions.to_csv(fout / "predictions.csv", index=False)
         bt.folds.to_csv(fout / "fold_results.csv", index=False)
+        if bt.item_orders is not None:
+            bt.item_orders.to_csv(fout / "item_orders.csv", index=False)
         (fout / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
         runs[fname] = RunResult(name=fname, predictions=bt.predictions,
                                 fold_metrics=bt.folds, metrics=metrics, resolved=resolved)
