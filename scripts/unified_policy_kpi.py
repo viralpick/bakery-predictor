@@ -1,4 +1,26 @@
-"""통합 발주정책 KPI — 측정 헌장(project_measurement_charter) 기준 재구현.
+"""[레거시 · 5정책 비교 전용] 통합 발주정책 KPI.
+
+★★헤드라인 수치는 여기서 내지 않는다. 백본을 쓴다:
+
+    uv run bakery harness-run experiments/gwangyo_kpi.yaml   # → reports/gwangyo_kpi/kpi.csv
+
+KPI 평면은 백본으로 편입됐다(PR#74~#77). 정의의 단일 출처 =
+`src/bakery/evaluation/order_kpi.py`(A/B basis 병기 / 품목별 원가율 / 전체매진 k=0 /
+SKU품절율=날별평균 / 매진시각 2관점). 정산 기록 = `docs/kpi_plane_reconciliation.md`.
+
+이 스크립트가 아직 남아 있는 **유일한 이유** = 백본이 아직 안 태우는 **5정책 비교**
+(nk15 / nk30 / conformal / artisee_reimpl). 그 축이 필요할 때만 쓴다. 단:
+  - NK(nk15/nk30)는 **과적합으로 폐기 판정**된 정책이다(project_distributional_forecasting_stack).
+    옛 헤드라인 범위 하단 −46.6%가 nk15였고, 그래서 새 범위에서 사라졌다.
+  - 원가율이 **전역 0.30**이다. 백본은 품목별 0.40/0.60(접두어 판별자, 오분류 0)을 쓴다.
+    → 이 스크립트의 절대 KRW를 백본 수치와 직접 비교하면 안 된다.
+  - fold 규약이 **8 fold × 8주**다. 백본 헤드라인은 52 fold × 7일이다.
+  - 배분 leakage 수정(PR#74)이 이 경로에 반영되지 않았다 — `_category_order_predictions`는
+    `distribute_total`을 lead_days 없이 호출한다.
+
+아래 원본 설계 노트는 정의의 출처로서 보존한다(백본이 이 정의를 이어받았다).
+
+---
 
 기준(reference) = 아띠제 실제 생산(=발주) QT_MADE(bulk 제외) / 실측 폐기 QT_OUT.
 수요 잣대 = adjusted_demand(정상+0.8×마감). potential_demand 폐기.
