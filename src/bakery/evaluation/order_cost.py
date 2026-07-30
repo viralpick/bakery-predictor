@@ -39,7 +39,15 @@ COST_RATE_BY_KIND: dict[str, float] = {
     "store_produced": 0.40,
     "finished_goods": 0.60,
 }
-DEFAULT_ABSORPTION_K: float = 1.0
+# ★품목 단위 품절의 마진 손실 계수. 기본 0.0 = 이 프로젝트의 확정 가정이다.
+# 근거 3층: ①측정 헌장 "매진 2관점 — ①전체매진(critical) / ②SKU품절"에서 SKU품절은
+# critical이 아니다 ②수요흡수 실측(카테고리 총량 보존·walk-away 0/20 / 매진의 매장
+# 시간당 매출 영향 3/4 매장 무영향) ③운영 KPI 경로(scripts/unified_policy_kpi.py)가
+# waste_krw만 계산하고 품절 비용을 세지 않는다.
+# 즉 팥빵이 없으면 손님은 소보로빵을 사므로 품목 단위 품절엔 마진 손실이 없다.
+# 진짜 손실은 **카테고리 전체가 소진될 때** 발생하며 그건 category_stockout_cost가 센다.
+# k>0은 흡수가 성립하지 않는 시나리오를 재보고 싶을 때만 쓰는 sensitivity 손잡이다.
+DEFAULT_ABSORPTION_K: float = 0.0
 DEFAULT_EARLY_STOCKOUT_HOUR: int = 20
 
 
@@ -116,8 +124,52 @@ def stockout_timing(
     return out
 
 
+def category_stockout_cost(
+    costed: pd.DataFrame,
+    *,
+    order_col: str,
+    demand_col: str,
+    price_col: str = "unit_price",
+    date_col: str = "date",
+) -> pd.DataFrame:
+    """★전체매진(카테고리 소진)으로 실제로 못 판 수량과 그 마진 손실 — 날짜 단위.
+
+    흡수 가정의 정확한 귀결: 품목 하나가 품절돼도 손님은 같은 카테고리 다른 빵을 사므로
+    손실이 없다. 손실은 **그날 카테고리 발주 총량이 실수요 총량보다 적을 때**만 발생한다
+    (측정 헌장의 "①전체매진 = Σ발주 < Σadjusted, critical").
+
+    반환(날짜별): order_total / demand_total / category_short_units /
+    is_category_stockout / category_lost_margin_krw.
+
+    마진율은 그날 실수요 가중 `1 − 원가율`을 쓴다 — 매장생산(0.40)과 완제품(0.60)이
+    섞여 있어 단일 상수로 두면 구성 변화가 비용에 반영되지 않는다.
+    """
+    cost_rate = cost_rate_for(costed["item_id"]).to_numpy()
+    work = pd.DataFrame({
+        date_col: costed[date_col].to_numpy(),
+        "order": costed[order_col].to_numpy(dtype=float),
+        "demand": costed[demand_col].to_numpy(dtype=float),
+        "margin_w": (1.0 - cost_rate) * costed[price_col].to_numpy(dtype=float)
+                    * costed[demand_col].to_numpy(dtype=float),
+    })
+    grouped = work.groupby(date_col, as_index=False).sum()
+    grouped = grouped.rename(columns={"order": "order_total", "demand": "demand_total"})
+    grouped["category_short_units"] = (
+        grouped["demand_total"] - grouped["order_total"]
+    ).clip(lower=0.0)
+    grouped["is_category_stockout"] = grouped["category_short_units"] > 0
+    # 실수요 가중 평균 마진(원/개). demand_total=0인 날은 손실도 0이므로 0으로 둔다.
+    unit_margin = np.divide(
+        grouped["margin_w"].to_numpy(), grouped["demand_total"].to_numpy(),
+        out=np.zeros(len(grouped)), where=grouped["demand_total"].to_numpy() > 0,
+    )
+    grouped["category_lost_margin_krw"] = grouped["category_short_units"] * unit_margin
+    return grouped.drop(columns=["margin_w"])
+
+
 def summarize_order_kpi(
-    costed: pd.DataFrame, *, early_hour: int = DEFAULT_EARLY_STOCKOUT_HOUR
+    costed: pd.DataFrame, *, early_hour: int = DEFAULT_EARLY_STOCKOUT_HOUR,
+    category: pd.DataFrame | None = None,
 ) -> dict:
     """비용/매진 KPI 요약.
 
@@ -125,12 +177,17 @@ def summarize_order_kpi(
     컬럼을 갖는 합성 데이터)이어야 한다. 필요 컬럼: waste_cost_krw,
     lost_margin_krw, total_cost_krw, waste_units, short_units, is_stockout,
     soldout_hour, date.
+
+    `category`(category_stockout_cost 출력)를 주면 **전체매진 지표와 총비용**을 함께 낸다.
+    이 프로젝트의 확정 가정(품목 품절=흡수, k=0)에서는 **총비용 = 품목 폐기비용 +
+    전체매진 마진손실**이며 `total_cost_with_category_krw` 가 그 값이다.
+    category=None이면 전체매진 항은 빠지고 품목 단위 합계만 나온다.
     """
     is_so = costed["is_stockout"].astype(bool)
     on_so = costed.loc[is_so]
     is_early_all = is_so & (costed["soldout_hour"] < early_hour)
     daily_median = on_so.groupby("date")["soldout_hour"].median() if len(on_so) else pd.Series(dtype=float)
-    return {
+    summary = {
         "waste_cost_krw": float(costed["waste_cost_krw"].sum()),
         "lost_margin_krw": float(costed["lost_margin_krw"].sum()),
         "total_cost_krw": float(costed["total_cost_krw"].sum()),
@@ -143,3 +200,18 @@ def summarize_order_kpi(
         "stockout_rate": float(is_so.mean()),
         "soldout_hour_median_mean": float(daily_median.mean()) if len(daily_median) else float("nan"),
     }
+    if category is not None:
+        cat_short = float(category["category_short_units"].sum())
+        cat_lost = float(category["category_lost_margin_krw"].sum())
+        n_days = int(len(category))
+        summary.update({
+            "category_short_units": cat_short,
+            "category_lost_margin_krw": cat_lost,
+            "category_stockout_days": int(category["is_category_stockout"].sum()),
+            "category_stockout_day_rate": (
+                float(category["is_category_stockout"].mean()) if n_days else float("nan")
+            ),
+            # ★이 프로젝트 확정 가정(k=0)에서의 총비용
+            "total_cost_with_category_krw": float(summary["waste_cost_krw"]) + cat_lost,
+        })
+    return summary

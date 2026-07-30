@@ -27,6 +27,7 @@ from bakery.data import paths
 from bakery.evaluation.order_cost import (
     DEFAULT_ABSORPTION_K,
     DEFAULT_EARLY_STOCKOUT_HOUR,
+    category_stockout_cost,
     order_cost,
     stockout_timing,
     summarize_order_kpi,
@@ -119,13 +120,20 @@ def attach_event_flag(costed: pd.DataFrame, event_prior: EventLevelPrior) -> pd.
 
 
 def segment_summaries(costed: pd.DataFrame, *, early_hour: int) -> list[tuple[str, int, dict]]:
-    """전체/이벤트일/비이벤트일 3개 분해로 summarize_order_kpi 실행. off(0행)도 표기."""
-    segments = [
-        ("all", costed),
-        ("event", costed[costed["is_event_day"]]),
-        ("non_event", costed[~costed["is_event_day"]]),
-    ]
-    return [(name, len(seg), summarize_order_kpi(seg, early_hour=early_hour)) for name, seg in segments]
+    """전체/이벤트/비이벤트 구간별 KPI 요약.
+
+    ★전체매진(카테고리) 비용은 구간별로 **그 구간의 날짜만** 다시 집계한다 —
+    품목 단위 합계와 달리 날짜 단위 항이라 사후 분할이 안 된다.
+    """
+    out = []
+    segments = (("all", costed), ("event", costed[costed["is_event_day"]]),
+                ("non_event", costed[~costed["is_event_day"]]))
+    for name, seg in segments:
+        if seg.empty:
+            continue
+        cat = category_stockout_cost(seg, order_col="order_qty", demand_col="adjusted_demand")
+        out.append((name, len(seg), summarize_order_kpi(seg, early_hour=early_hour, category=cat)))
+    return out
 
 
 def run_comparison(args: argparse.Namespace) -> pd.DataFrame:
