@@ -163,3 +163,37 @@ def test_kpi_defaults_off():
     spec = ExperimentSpec(name="x", data=DataSpec(source="real", store="store_gw01"))
     assert spec.kpi is False
     assert spec.order_level == "category"
+
+
+# ---------------------------------------------------------------------------
+# ★영업 종료 시각 — 시트값을 쓰면 안 된다
+# ---------------------------------------------------------------------------
+
+def test_kpi_close_hour_is_22():
+    """★광교 영업 종료 = 22시. 21로 되돌아가면 매진시각 지표가 조용히 틀린다.
+
+    `master_xlsx` 의 `영업시간` 시트 `SALE_TIME` 중앙값이 21시대라 그걸 마감으로
+    쓰기 쉬운데, 그 컬럼은 실제 영업 종료와 무관하다:
+      - 시트값 20시대인 날의 마지막 판매 21.73시 / 21시대 21.83 / 22시대 21.84
+        → 시트값이 바뀌어도 마지막 판매가 안 움직인다
+      - 시트값이 마지막 판매보다 **빠른 날이 66%** (median −0.28h)
+    반면 마지막 판매는 1,816일 내내 21.8시로 일관돼 22시 마감과 정합한다.
+    레거시 `scripts/unified_policy_kpi.py` 도 8,22를 쓴다(그쪽이 맞았다).
+    """
+    from bakery.harness.runner import KPI_CLOSE_HOUR, KPI_OPEN_HOUR
+
+    assert KPI_CLOSE_HOUR == 22
+    assert KPI_OPEN_HOUR == 8
+
+
+def test_kpi_hours_match_legacy_script():
+    """백본과 레거시 KPI 경로의 영업시간이 같아야 한다 — 다르면 두 수치가 비교 불가."""
+    import re
+    from pathlib import Path
+
+    from bakery.harness.runner import KPI_CLOSE_HOUR, KPI_OPEN_HOUR
+
+    src = Path("scripts/unified_policy_kpi.py").read_text(encoding="utf-8")
+    found = re.search(r"StoreHours\(STORE,\s*(\d+),\s*(\d+)\)", src)
+    assert found is not None, "레거시 스크립트에서 StoreHours 호출을 찾지 못했다"
+    assert (int(found.group(1)), int(found.group(2))) == (KPI_OPEN_HOUR, KPI_CLOSE_HOUR)
