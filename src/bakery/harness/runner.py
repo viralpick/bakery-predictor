@@ -162,11 +162,24 @@ def _kpi_rows(spec: ExperimentSpec, runs: dict, materials: dict) -> pd.DataFrame
         (actual_rows["production_qty"] > 0) & (actual_rows["waste_qty"] <= 0)
     )
     actual = basis_actual(actual_rows)
+
+    # ★★actual_sim — 아띠제 실생산(QT_MADE)을 **B 잣대로** 다시 잰다.
+    # 모델(B)을 아띠제(A)와 직접 비교하면 절감에 censoring(잣대 효과)이 섞인다.
+    # 같은 정책을 A/B로 각각 재면 그 차이가 순수 잣대 효과이고, 모델 vs actual_sim이
+    # 공정 비교다. 옛 헤드라인 "−37~45%"도 이 ΔvsB 축이다.
+    sim_rows = actual_rows.merge(demand, on=["date", "item_id"], how="left")
+    sim_rows["adjusted_demand"] = sim_rows["adjusted_demand"].fillna(0.0)
+    sim_rows = sim_rows.rename(columns={"production_qty": "order_qty"})
+    sim_costed = order_cost(sim_rows, order_col="order_qty", demand_col="adjusted_demand",
+                            price_col="unit_price")
+    actual_sim = basis_sim(sim_costed, order_col="order_qty", demand_col="adjusted_demand")
+
     records.append({"policy": "artisee_actual", **actual})
+    records.append({"policy": "artisee_actual_sim", **actual_sim})
     for rec in records:
-        if rec["policy"] == "artisee_actual":
+        if rec["policy"].startswith("artisee_actual"):
             continue
-        rec.update(compare_to_actual(rec, actual))
+        rec.update(compare_to_actual(rec, actual, actual_sim=actual_sim))
     diag = waste_negative_diagnostics(actual_rows)
     table = kpi_table(records)
     for key, value in diag.items():

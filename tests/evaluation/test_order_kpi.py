@@ -215,3 +215,23 @@ def test_kpi_table_keeps_basis_label_first():
 
 def test_kpi_table_empty_is_empty_frame():
     assert kpi_table([]).empty
+
+
+def test_actual_sim_makes_censoring_explicit_on_real_shape():
+    """★actual_sim 배선의 계약: 같은 정책을 A/B로 재면 차이가 잣대 효과다.
+
+    아띠제 실생산을 그대로 발주로 쓰면(order == production_qty) B 잣대 폐기는
+    max(생산−실수요, 0)이고, A 잣대 폐기는 실측 QT_OUT이다. 둘의 차이가 censoring.
+    """
+    rows = _rows([
+        ("2025-01-01", STORE_ITEM, 12, 10, 1.0, False),   # 생산 12, 실수요 10 → B폐기 2 / A폐기 1
+    ])
+    actual = basis_actual(rows)
+    sim = basis_sim(_costed(rows), order_col="order_qty", demand_col="adjusted_demand")
+    assert actual["waste_units"] == pytest.approx(1.0, rel=1e-12)   # 실측
+    assert sim["waste_units"] == pytest.approx(2.0, rel=1e-12)      # 시뮬
+    # 모델이 아띠제와 동일 발주라면 vs_actual_sim은 0이어야 한다(자기 자신 비교)
+    out = compare_to_actual(sim, actual, actual_sim=sim)
+    assert out["vs_actual_sim_pct"] == pytest.approx(0.0, rel=1e-12)
+    # censoring gap은 A→B 잣대 차이만 반영: 800원 → 1600원 = +100%
+    assert out["censoring_gap_pct"] == pytest.approx(100.0, rel=1e-12)

@@ -112,7 +112,18 @@ uv run bakery predict-next-week --source real ...          #    운영형 forwar
 uv run bakery v6-predict / business-report / stockout-risk #    결정 레이어·리포트 (백본 편입 전)
 ```
 
-**아직 백본 밖인 것**: 운영 KPI(폐기 절감 −37~45%) 측정은 `scripts/unified_policy_kpi.py` 경로다. `harness-run`의 `surplus_rate`와 **정의가 달라 같은 축에서 비교하면 오도된다**(근거 = `docs/phase7/gwangyo_headline_remeasure.md`). KPI 평면의 백본 편입은 백로그.
+### 발주 KPI (백본 편입 완료 — PR#74~#77)
+
+```bash
+uv run bakery harness-run experiments/gwangyo_kpi.yaml   # 비용+매진+아띠제 절감률 → reports/gwangyo_kpi/kpi.csv
+```
+
+정의의 **단일 출처** = `src/bakery/evaluation/order_kpi.py`. 5축 확정: **A/B basis 병기**(A=아띠제 실측 `QT_OUT` / B=발주−실수요) · 원가율 **품목별**(`1511`=0.40 / `1513`=0.60) · 품절 손실은 **전체매진만**(k=0) · SKU 품절율 = **날별 비율의 평균** · 매진시각 = **전체 median + 날별 median 평균 병기**.
+
+- ⚠️ **인용할 축은 `ΔvsB`(공정)** — `vs_actual_sim_pct`. `ΔvsA`(`vs_actual_pct`)는 A가 censored라 절감을 과소평가하는 **하한**이다. 옛 헤드라인 −37~45%도 `ΔvsB` 축이었다.
+- ⚠️ `surplus_rate`(총량 층위 비율)와 KPI 비용은 **다른 축이다** — 같은 표에서 비교 금지.
+- ⚠️ `kpi: true` 는 `order_level: item` 필수(`SpecError`로 강제). 둘 다 기본 off라 헤드라인 실험 속도는 보존된다.
+- 정산 기록(옛↔새 축별 분해) = `@docs/kpi_plane_reconciliation.md`. `scripts/unified_policy_kpi.py` 는 **5정책 비교(nk/conformal) 전용 레거시**이며 헤드라인 아님.
 
 ---
 
