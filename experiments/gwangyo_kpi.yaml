@@ -1,0 +1,22 @@
+# experiments/gwangyo_kpi.yaml — ★발주 KPI 실험: 비용 + 매진 + 아띠제 대비 절감률.
+# 헤드라인(gwangyo_default.yaml)과 총량 지표는 동일하다. 배분+KPI만 추가된다.
+#   배분(날짜마다 compute_proportions) + 매진시각 시뮬이 무거워 별도 실험으로 둔다.
+# lead_days=5: 원점 화요일 → 다음주 월요일 대상. 배분 비율도 이 경계를 지킨다(PR#74).
+name: gwangyo_kpi
+data:
+  source: real
+  store: store_gw01
+target: adjusted_demand_unit
+forecaster: [category_total, distributional_total]
+layers: [event_prior]
+event_priors: gwangyo
+order_level: item
+kpi: true
+window:
+  scheme: expanding
+  n_folds: 52
+  window_days: 730
+  horizon_days: 7
+  lead_days: 5
+alpha: 0.8
+production_q: 0.85

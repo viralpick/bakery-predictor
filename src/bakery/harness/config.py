@@ -77,6 +77,10 @@ class ExperimentSpec(BaseModel):
     # 배분해 `item_orders` 까지 낸다. 배분은 날짜마다 compute_proportions를 돌려
     # **느리므로** KPI가 필요한 실험에서만 켠다. 총량 지표는 배분 여부와 무관하게 동일.
     order_level: Literal["category", "item"] = "category"
+    # KPI(비용·매진·아띠제 대비 절감률) 산출 여부. order_level="item" 필수 — 발주는
+    # 품목별이고 폐기·매진시각은 품목 층위가 아니면 정의되지 않는다.
+    # 매진시각 시뮬(도착 프로필 역산)이 무거워 기본 off.
+    kpi: bool = False
 
     @field_validator("forecaster", "layers", mode="before")
     @classmethod
@@ -95,6 +99,11 @@ def load_spec(path: str | Path) -> ExperimentSpec:
 
 
 def _enforce(spec: ExperimentSpec) -> None:
+    if spec.kpi and spec.order_level != "item":
+        raise SpecError(
+            "kpi: true는 order_level: item이 필요하다 — 폐기·매진시각은 품목 층위가 "
+            "아니면 정의되지 않는다."
+        )
     if spec.target == "potential_demand" and not spec.allow_deprecated:
         raise SpecError("target=potential_demand는 오염 소스라 금지. allow_deprecated: true 필요.")
     if spec.metrics == ["mape"]:

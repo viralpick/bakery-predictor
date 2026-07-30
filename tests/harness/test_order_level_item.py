@@ -130,3 +130,36 @@ def test_lead_days_changes_item_orders_not_shape():
     a9 = lead9.groupby("item_id")["order_qty"].sum()["a"]
     assert a0 != pytest.approx(a9, rel=1e-6)          # 리드타임이 배분을 실제로 바꾼다
     assert list(lead9.columns) == ["date", "item_id", "fold", "order_qty"]
+
+
+# ---------------------------------------------------------------------------
+# kpi 플래그 게이트 — 층위가 안 맞으면 실행 전에 막는다
+# ---------------------------------------------------------------------------
+
+def test_kpi_requires_item_order_level():
+    """★kpi=true + order_level=category → SpecError.
+
+    폐기·매진시각은 품목 층위가 아니면 정의되지 않는다. 조용히 빈 KPI를 내는 대신
+    스펙 로드 시점에 막는다.
+    """
+    from bakery.harness.config import DataSpec, ExperimentSpec, SpecError, _enforce
+
+    data = DataSpec(source="real", store="store_gw01")
+    with pytest.raises(SpecError, match="order_level"):
+        _enforce(ExperimentSpec(name="x", data=data, kpi=True))
+
+
+def test_kpi_with_item_order_level_allowed():
+    from bakery.harness.config import DataSpec, ExperimentSpec, _enforce
+
+    data = DataSpec(source="real", store="store_gw01")
+    _enforce(ExperimentSpec(name="x", data=data, kpi=True, order_level="item"))
+
+
+def test_kpi_defaults_off():
+    """기본은 off — 헤드라인 실험이 무거운 KPI 경로를 타지 않는다."""
+    from bakery.harness.config import DataSpec, ExperimentSpec
+
+    spec = ExperimentSpec(name="x", data=DataSpec(source="real", store="store_gw01"))
+    assert spec.kpi is False
+    assert spec.order_level == "category"
