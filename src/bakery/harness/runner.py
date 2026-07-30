@@ -27,6 +27,8 @@ class RunResult:
     fold_metrics: pd.DataFrame
     metrics: dict
     resolved: dict
+    # 품목 배분 발주. order_level="item"일 때만 채워진다(KPI 입력).
+    item_orders: pd.DataFrame | None = None
 
 
 @dataclass
@@ -34,6 +36,13 @@ class ExperimentResult:
     name: str
     runs: dict[str, RunResult]
     comparison: pd.DataFrame
+    # KPI 표(A/B basis 병기 + 아띠제 대비 절감률). spec.kpi=True일 때만 채운다.
+    kpi: pd.DataFrame | None = None
+
+
+KPI_OPEN_HOUR = 8
+KPI_CLOSE_HOUR = 21      # 광교 마감시각 중앙값(실측 분포: 20시 572일 / 21시 782일 / 22시 437일)
+KPI_PRICE_FALLBACK = 4000.0
 
 
 def _stage_key(fields: dict) -> str:
@@ -69,6 +78,100 @@ def _load_item_history(spec: ExperimentSpec) -> pd.DataFrame:
     daily = daily.copy()
     daily["date"] = pd.to_datetime(daily["date"])
     return daily
+
+
+def _kpi_inputs(spec: ExperimentSpec) -> dict:
+    """KPI 계산 재료 — 품목 실수요 / 단가 / 아띠제 실측(A basis) / 도착 프로필.
+
+    전부 기존 프리미티브 호출이다(재구현 0).
+    """
+    from bakery.cli import REAL_INVENTORY_XLSX_PATH, _load_real_receipts, _load_unit_prices
+    from bakery.evaluation.prospective import build_arrival_profile
+    from bakery.features.category_aggregate import (
+        DEFAULT_ALPHA,
+        TARGET_CATEGORIES,
+        build_item_adjusted_demand,
+    )
+    from bakery.ingest.inventory import load_inventory
+
+    daily = _load_item_history(spec)
+    demand = build_item_adjusted_demand(daily, alpha=spec.alpha)
+    prices = _load_unit_prices(REAL_INVENTORY_XLSX_PATH)
+    inventory = load_inventory(str(REAL_INVENTORY_XLSX_PATH), spec.data.store)
+    inventory = inventory.copy()
+    inventory["date"] = pd.to_datetime(inventory["date"])
+    inventory["item_id"] = inventory["item_id"].astype(str)
+    cat_map = daily[["item_id", "category_id"]].drop_duplicates()
+    cat_map["item_id"] = cat_map["item_id"].astype(str)
+    inventory = inventory.merge(cat_map, on="item_id", how="inner")
+    inventory = inventory[inventory["category_id"].isin(TARGET_CATEGORIES)]
+    # _load_real_receipts는 store가 아니라 item_ids를 받는다(receipts에 store 컬럼 없음).
+    receipts = _load_real_receipts(set(inventory["item_id"].astype(str)))
+    profiles = build_arrival_profile(receipts, group_cols=["item_id"])
+    return {
+        "demand": demand, "prices": prices, "inventory": inventory,
+        "profiles": profiles, "alpha_used": DEFAULT_ALPHA,
+    }
+
+
+def _kpi_rows(spec: ExperimentSpec, runs: dict, materials: dict) -> pd.DataFrame:
+    """arm별 B basis + 공통 A basis + 절감률을 한 표로."""
+    from bakery.evaluation.order_cost import order_cost, stockout_timing
+    from bakery.evaluation.order_kpi import (
+        basis_actual,
+        basis_sim,
+        compare_to_actual,
+        kpi_table,
+        waste_negative_diagnostics,
+    )
+    from bakery.features.potential_demand import StoreHours
+
+    demand = materials["demand"][["date", "item_id", "adjusted_demand"]].copy()
+    demand["item_id"] = demand["item_id"].astype(str)
+    prices, inventory = materials["prices"], materials["inventory"]
+    hours = StoreHours(spec.data.store, KPI_OPEN_HOUR, KPI_CLOSE_HOUR)
+
+    records: list[dict] = []
+    dates_seen: set = set()
+    for name, run in runs.items():
+        orders = run.item_orders
+        if orders is None or orders.empty:
+            continue
+        rows = orders.copy()
+        rows["item_id"] = rows["item_id"].astype(str)
+        rows = rows.merge(demand, on=["date", "item_id"], how="left")
+        rows["adjusted_demand"] = rows["adjusted_demand"].fillna(0.0)
+        rows["unit_price"] = rows["item_id"].map(prices).fillna(KPI_PRICE_FALLBACK)
+        costed = order_cost(rows, order_col="order_qty", demand_col="adjusted_demand",
+                            price_col="unit_price")
+        costed = costed.join(stockout_timing(
+            rows, materials["profiles"], order_col="order_qty",
+            demand_col="adjusted_demand", store_hours=hours, group_cols=["item_id"],
+        )[["soldout_hour", "is_stockout"]])
+        records.append({"policy": name, **basis_sim(
+            costed, order_col="order_qty", demand_col="adjusted_demand")})
+        dates_seen |= set(pd.to_datetime(orders["date"]).unique())
+
+    if not records:
+        return pd.DataFrame()
+    # ★A basis는 모델이 평가한 **같은 날짜**로 제한한다 — 안 하면 분모가 달라져
+    #   절감률이 기간 차이를 절감으로 오독한다.
+    actual_rows = inventory[inventory["date"].isin(dates_seen)].copy()
+    actual_rows["unit_price"] = actual_rows["item_id"].map(prices).fillna(KPI_PRICE_FALLBACK)
+    actual_rows["is_stockout"] = (
+        (actual_rows["production_qty"] > 0) & (actual_rows["waste_qty"] <= 0)
+    )
+    actual = basis_actual(actual_rows)
+    records.append({"policy": "artisee_actual", **actual})
+    for rec in records:
+        if rec["policy"] == "artisee_actual":
+            continue
+        rec.update(compare_to_actual(rec, actual))
+    diag = waste_negative_diagnostics(actual_rows)
+    table = kpi_table(records)
+    for key, value in diag.items():
+        table[f"actual_waste_{key}"] = value
+    return table
 
 
 def run_experiment(
@@ -137,9 +240,17 @@ def run_experiment(
             bt.item_orders.to_csv(fout / "item_orders.csv", index=False)
         (fout / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
         runs[fname] = RunResult(name=fname, predictions=bt.predictions,
-                                fold_metrics=bt.folds, metrics=metrics, resolved=resolved)
+                                fold_metrics=bt.folds, metrics=metrics, resolved=resolved,
+                                item_orders=bt.item_orders)
         rows.append({"forecaster": fname, **metrics})
 
     comparison = pd.DataFrame(rows)
     comparison.to_csv(out / "comparison.csv", index=False)
-    return ExperimentResult(name=spec.name, runs=runs, comparison=comparison)
+
+    kpi = None
+    if spec.kpi:
+        trace.append(("kpi", "run"))
+        kpi = _kpi_rows(spec, runs, _kpi_inputs(spec))
+        if not kpi.empty:
+            kpi.to_csv(out / "kpi.csv", index=False)
+    return ExperimentResult(name=spec.name, runs=runs, comparison=comparison, kpi=kpi)
