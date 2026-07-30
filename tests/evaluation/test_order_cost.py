@@ -136,3 +136,114 @@ def test_soldout_hour_median_mean_differs_from_pooled_median():
     pooled_median = float(np.median([18.0, 22.0, 10.0]))
     assert pooled_median == pytest.approx(18.0, rel=1e-12)
     assert result["soldout_hour_median_mean"] != pooled_median
+
+
+# ---------------------------------------------------------------------------
+# 전체매진(카테고리) 비용 — 흡수 가정(k=0)의 정확한 귀결
+# ---------------------------------------------------------------------------
+
+def test_default_absorption_k_is_zero():
+    """★프로젝트 확정 가정: 품목 단위 품절엔 마진 손실이 없다(흡수).
+
+    근거 = 측정 헌장 매진 2관점(SKU품절은 critical 아님) + 흡수 실측 +
+    운영 KPI 경로가 waste_krw만 센다. 이 기본값이 1.0으로 되돌아가면
+    "품절을 전액 손실로 본다"는 다른 프로젝트가 된다.
+    """
+    from bakery.evaluation.order_cost import DEFAULT_ABSORPTION_K
+
+    assert DEFAULT_ABSORPTION_K == 0.0
+
+
+def _two_item_day(order_a, order_b, demand=10.0, price=1000.0, date="2025-01-01"):
+    """매장생산(1511)·완제품(1513) 각 1품목인 하루."""
+    return pd.DataFrame({
+        "date": pd.to_datetime([date, date]),
+        "item_id": ["1511000000001", "1513000000001"],
+        "order": [float(order_a), float(order_b)],
+        "demand": [demand, demand],
+        "unit_price": [price, price],
+    })
+
+
+def test_item_shortfall_costs_nothing_by_default():
+    """품목 부족은 기본(k=0)에서 비용 0 — 폐기만 비용이다."""
+    from bakery.evaluation.order_cost import order_cost
+
+    costed = order_cost(_two_item_day(12, 8), order_col="order",
+                        demand_col="demand", price_col="unit_price")
+    assert costed["lost_margin_krw"].sum() == 0.0
+    # 폐기 2개 × 원가율 0.40 × 1000 = 800
+    assert costed["waste_cost_krw"].sum() == pytest.approx(800.0, rel=1e-12)
+
+
+def test_category_not_stockout_when_total_is_met():
+    """★핵심: 품목별 과·부족이 있어도 카테고리 총량이 충족되면 전체매진이 아니다."""
+    from bakery.evaluation.order_cost import category_stockout_cost, order_cost
+
+    costed = order_cost(_two_item_day(12, 8), order_col="order",
+                        demand_col="demand", price_col="unit_price")
+    cat = category_stockout_cost(costed, order_col="order", demand_col="demand")
+    assert len(cat) == 1
+    assert cat["category_short_units"].iloc[0] == 0.0
+    assert bool(cat["is_category_stockout"].iloc[0]) is False
+    assert cat["category_lost_margin_krw"].iloc[0] == 0.0
+
+
+def test_category_stockout_uses_demand_weighted_margin():
+    """전체매진 손실 = 부족량 × 실수요가중 (1−원가율)×단가.
+
+    매장생산(r=0.40 → 마진 600) + 완제품(r=0.60 → 마진 400), 실수요 동일 →
+    가중 마진 500원/개. 부족 10개 → 5,000원.
+    """
+    from bakery.evaluation.order_cost import category_stockout_cost, order_cost
+
+    costed = order_cost(_two_item_day(5, 5), order_col="order",
+                        demand_col="demand", price_col="unit_price")
+    cat = category_stockout_cost(costed, order_col="order", demand_col="demand")
+    assert cat["category_short_units"].iloc[0] == pytest.approx(10.0, rel=1e-12)
+    assert cat["category_lost_margin_krw"].iloc[0] == pytest.approx(5000.0, rel=1e-12)
+
+
+def test_category_margin_shifts_with_mix():
+    """구성이 완제품 쪽으로 쏠리면 가중 마진이 내려간다(단일 상수면 못 잡는 효과)."""
+    from bakery.evaluation.order_cost import category_stockout_cost, order_cost
+
+    rows = _two_item_day(0, 0)
+    rows.loc[rows.item_id.str.startswith("1513"), "demand"] = 30.0   # 완제품 비중↑
+    costed = order_cost(rows, order_col="order", demand_col="demand", price_col="unit_price")
+    cat = category_stockout_cost(costed, order_col="order", demand_col="demand")
+    # 마진 = (10×600 + 30×400)/40 = 450 → 부족 40개 → 18,000
+    assert cat["category_lost_margin_krw"].iloc[0] == pytest.approx(18000.0, rel=1e-12)
+
+
+def test_summary_total_cost_with_category():
+    """★k=0 총비용 = 품목 폐기비용 + 전체매진 마진손실."""
+    from bakery.evaluation.order_cost import (
+        category_stockout_cost,
+        order_cost,
+        summarize_order_kpi,
+    )
+
+    costed = order_cost(_two_item_day(5, 5), order_col="order",
+                        demand_col="demand", price_col="unit_price")
+    costed["is_stockout"] = True
+    costed["soldout_hour"] = [18.0, 19.0]
+    cat = category_stockout_cost(costed, order_col="order", demand_col="demand")
+    s = summarize_order_kpi(costed, early_hour=20, category=cat)
+    assert s["waste_cost_krw"] == 0.0                       # 전량 부족이라 폐기 없음
+    assert s["category_short_units"] == pytest.approx(10.0, rel=1e-12)
+    assert s["category_stockout_days"] == 1
+    assert s["total_cost_with_category_krw"] == pytest.approx(5000.0, rel=1e-12)
+
+
+def test_summary_without_category_omits_keys():
+    """category=None이면 전체매진 항이 없다(계약 명확성)."""
+    from bakery.evaluation.order_cost import order_cost, summarize_order_kpi
+
+    costed = order_cost(_two_item_day(12, 8), order_col="order",
+                        demand_col="demand", price_col="unit_price")
+    costed["is_stockout"] = False
+    costed["soldout_hour"] = [float("nan"), float("nan")]
+    s = summarize_order_kpi(costed, early_hour=20)
+    assert "total_cost_with_category_krw" not in s
+    assert "category_short_units" not in s
