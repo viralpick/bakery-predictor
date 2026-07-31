@@ -208,6 +208,7 @@ def run_experiment(
         raise ValueError("실행 가능한 forecaster 없음(category_total/distributional_total 필요).")
 
     feat_key = _stage_key({"engine": spec.engine, "order_level": spec.order_level,
+                           "eval_end": spec.window.eval_end,
                            "source": spec.data.source, "store": spec.data.store,
                            "target": spec.target, "alpha": spec.alpha})
 
@@ -218,6 +219,14 @@ def run_experiment(
         return build_features(cd, target_col=spec.target)
 
     feat = _load_or_compute("features", feat_key, cache_dir, _feat, trace)
+    if spec.window.eval_end is not None:
+        # ★평가 구간 끝 고정 — 데이터가 늘어나도 같은 구간을 재현한다.
+        cutoff = pd.Timestamp(spec.window.eval_end)
+        before = len(feat)
+        feat = feat[feat["date"] <= cutoff].reset_index(drop=True)
+        if feat.empty:
+            raise ValueError(f"eval_end={spec.window.eval_end} 이전 데이터가 없다")
+        trace.append((f"eval_end:{spec.window.eval_end}", f"{before}->{len(feat)}"))
     # 배분 비율 소스(품목 일별). order_level="item"일 때만 읽는다 — 헤드라인 경로는
     # 이 I/O를 타지 않는다.
     item_history = _load_item_history(spec) if spec.order_level == "item" else None

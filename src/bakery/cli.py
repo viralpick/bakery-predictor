@@ -2096,7 +2096,11 @@ def _synthetic_prospective_inputs() -> tuple[pd.DataFrame, pd.DataFrame, dict[st
 
 
 # 실데이터 진입점 — 재고정보 시트가 있는 파일만 생산량/폐기량/품목단가를 갖는다.
-REAL_INVENTORY_XLSX_PATH = str(paths.dataset("master_xlsx"))
+# ★재고정보(생산량·폐기량) 소스. `additional_xlsx` 는 master의 **상위집합**이며
+# 2026 상반기까지 담고 있다(겹치는 구간 2021~2025 값 불일치 0건 실측).
+# master를 쓰면 2026 구간 평가에서 **아띠제 폐기가 0으로 집계돼 절감률이 뒤집힌다**
+# (실측 사고: A basis 4.45M→2.42M로 반토막, vs_actual_sim −33%→+22%).
+REAL_INVENTORY_XLSX_PATH = str(paths.dataset("additional_xlsx"))
 REAL_RECEIPTS_PARQUET_PATH = str(paths.dataset("bonavi_receipts"))
 
 REAL_ROWS_COLUMNS = [
