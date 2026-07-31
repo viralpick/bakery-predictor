@@ -26,6 +26,12 @@ _DATASETS: dict[str, Path] = {
     "master_xlsx": _RAW_INTERNAL / "보나비 데이터_20260526.xlsx",
     "legacy_xlsx_0520": _RAW_INTERNAL / "보나비 데이터_20260520.xlsx",
     "display_time_xls": _RAW_INTERNAL / "수원광교점 - 브레드 진열 시간(보안 해제 완료).xls",
+    # ★2026 상반기 재고·영업시간·품절 (master의 상위집합 — 2021~2025 값 충돌 0건 실측).
+    #   재고정보에 신규 컬럼 QT_MAKE(제시량)/QT_ADD(추가량)이 추가돼 있다.
+    #   ⚠️영업시간 SALE_TIME 포맷이 master(HHMM)와 다르다(YYYYMMDDHHMMSS) — per-file 파싱 필요.
+    "additional_xlsx": _RAW_INTERNAL / "보나비 추가 데이터_20260721.xlsx",
+    # 아띠제 제공 브레드 배수 마스터(맞춤수량) + 대체품 매핑
+    "ai_production_xlsx": _RAW_INTERNAL / "ai생산량 정보전달(수원광교점) 암호해제완료.xlsx",
     # --- interim ---
     "sales_lines_clean": INTERIM_DIR / "sales_lines_clean.parquet",
     # --- processed / internal (rebuild-deterministic) ---

@@ -1,0 +1,23 @@
+# experiments/gwangyo_kpi_2026.yaml — ★2026 상반기 포함 구간(2025-07-02 ~ 2026-06-30).
+# 2026 1~6월은 모델이 학습에 전혀 쓰지 않은 구간이므로 **out-of-sample 성적**에 가깝다.
+# ⚠️gwangyo_kpi_2025.yaml 과 나란히 봐야 한다 — 한쪽만 보면 성능 차이인지 구간 차이인지
+#   판별할 수 없다.
+name: gwangyo_kpi_2026
+data:
+  source: real
+  store: store_gw01
+target: adjusted_demand_unit
+forecaster: [category_total, distributional_total]
+layers: [event_prior]
+event_priors: gwangyo
+order_level: item
+kpi: true
+window:
+  scheme: expanding
+  n_folds: 52
+  window_days: 730
+  horizon_days: 7
+  lead_days: 5
+  eval_end: "2026-06-30"
+alpha: 0.8
+production_q: 0.85

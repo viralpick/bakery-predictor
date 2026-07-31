@@ -42,6 +42,10 @@ class WindowSpec(BaseModel):
     # True면 원점 이후를 보는 자기회귀 feature(lag/rolling/ewma)를 가린다.
     # lead_days>0에서만 의미가 있다(원점=test_start). 기본 False = 현 동작.
     align_features: bool = False
+    # ★평가 구간 끝 고정("YYYY-MM-DD"). None = 데이터 마지막 날짜(현 동작).
+    # 데이터가 늘어나면 fold가 최신으로 밀려 **옛 수치와 다른 구간을 재게 된다.**
+    # 이 값을 박아두면 데이터 확장 후에도 같은 구간을 재현할 수 있다(구간 병기용).
+    eval_end: str | None = None
 
     @field_validator("lead_days")
     @classmethod

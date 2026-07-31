@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pandas as pd
 
-
 # Mapping from store_id (e.g., "store_gw01") to 점포코드 (e.g., "1000000047")
 STORE_CODE_MAPPING = {
     "store_gw01": "1000000047",  # 광교 (아티제 아브뉴프랑광교점)
@@ -31,14 +30,24 @@ def _normalize_inventory(raw: pd.DataFrame, store_code: str) -> pd.DataFrame:
     # Filter to store
     df = raw[raw["점포코드"] == store_code].copy()
 
-    # Map columns
-    df = df[["날짜", "품목코드", "생산량", "폐기량"]]
-    df.columns = ["date", "item_id", "production_qty", "waste_qty"]
+    # ★파일별 컬럼명이 다르다 — master는 "생산량", 추가 데이터(20260721)는 "총생산량"이고
+    #   후자에는 제시량(AX 산출)·추가량이 더 있다. 둘 다 받는다.
+    made_col = "총생산량" if "총생산량" in df.columns else "생산량"
+    if made_col not in df.columns:
+        raise ValueError(
+            f"재고정보에 생산량 컬럼이 없다(기대: 생산량 또는 총생산량). 실제: {list(df.columns)}"
+        )
+    keep = {"날짜": "date", "품목코드": "item_id", made_col: "production_qty", "폐기량": "waste_qty"}
+    # 신규 컬럼은 있을 때만 싣는다(없는 파일에서 조용히 0을 만들지 않는다).
+    for src, dst in (("제시량", "suggested_qty"), ("추가량", "added_qty")):
+        if src in df.columns:
+            keep[src] = dst
+    df = df[list(keep)].rename(columns=keep)
 
     # Convert types
     df["item_id"] = df["item_id"].astype(str)
-    df["production_qty"] = pd.to_numeric(df["production_qty"], errors="coerce").fillna(0).astype("int64")
-    df["waste_qty"] = pd.to_numeric(df["waste_qty"], errors="coerce").fillna(0).astype("int64")
+    for col in [c for c in df.columns if c.endswith("_qty")]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype("int64")
 
     return df.reset_index(drop=True)
 

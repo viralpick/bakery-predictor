@@ -1,0 +1,22 @@
+# experiments/gwangyo_kpi_2025.yaml — ★옛 구간 재현용(2025-01-02 ~ 2025-12-31).
+# 2026 데이터 편입 후에도 이번 주 보고 수치(폐기 −33.4%/−35.0%)를 같은 구간에서
+# 재현할 수 있게 eval_end를 박아둔다. gwangyo_kpi.yaml 과 이 파일의 차이는 eval_end뿐이다.
+name: gwangyo_kpi_2025
+data:
+  source: real
+  store: store_gw01
+target: adjusted_demand_unit
+forecaster: [category_total, distributional_total]
+layers: [event_prior]
+event_priors: gwangyo
+order_level: item
+kpi: true
+window:
+  scheme: expanding
+  n_folds: 52
+  window_days: 730
+  horizon_days: 7
+  lead_days: 5
+  eval_end: "2025-12-31"
+alpha: 0.8
+production_q: 0.85

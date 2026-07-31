@@ -46,7 +46,11 @@ CLEAN_PARQUET = paths.dataset("sales_lines_clean")
 OUT_DEFAULT = paths.dataset("bonavi_daily")
 RECEIPTS_DEFAULT = paths.dataset("bonavi_receipts")
 DEFAULT_STORE_CODE = "1000000047"  # 아티제 아브뉴프랑광교점
-LABEL_END = "20251231"  # 재고(폐기/생산) 라벨 가용 끝 — 이후는 sales-only
+# 재고(폐기/생산) 라벨 가용 끝. ★2026-06-30으로 확장 — `additional_xlsx`(보나비 추가
+# 데이터_20260721)가 2026 상반기 재고정보를 담고 있고, 겹치는 구간(2021~2025) 값이
+# master와 **완전히 동일**함을 실측 확인했다(광교 90,938행 전수, QT_MADE/QT_OUT 불일치 0).
+# 즉 상위집합이므로 기존 수치는 재측정 대상이 아니다.
+LABEL_END = "20260630"
 
 # 당일폐기=Y지만 예측 타깃 아님(구운 빵 아닌 델리). map_category salad 버킷.
 EXCLUDE_CATEGORIES = frozenset({"salad"})

@@ -41,12 +41,14 @@ class ExperimentResult:
 
 
 KPI_OPEN_HOUR = 8
-# ★광교 영업 종료 = 22시 (architect 확인 + 실측 정합).
-# ⚠️`master_xlsx` 의 `영업시간` 시트 `SALE_TIME` 을 마감시각으로 쓰면 안 된다 — 그 컬럼은
-# 실제 영업 종료와 무관하다(실측: 시트값이 20시대인 날의 마지막 판매 21.73시 / 21시대 21.83 /
-# 22시대 21.84 — 시트값이 바뀌어도 마지막 판매가 안 움직인다. 시트값이 마지막 판매보다
-# **빠른 날이 66%**). 반면 마지막 판매는 1,816일 내내 21.8시로 일관돼 22시 마감과 맞는다.
-# 처음 이 상수를 시트 중앙값(21)으로 잡았다가 교정한 것이다.
+# ★광교 영업 종료 = 22시 (architect 확인 + 광교 실측 정합).
+# 근거: `영업시간` 시트(광교=**1000000047**) median **21.93시**, 2026 상반기 median 21.83시.
+# 영수증 마지막 판매 median 21.82시와 **날짜별로 76%가 15분 내 일치**(상관 0.495)하고
+# 시트값이 오르면 마지막 판매도 오른다(20시대→20.87 / 21시대→21.70 / 22시+→22.12).
+# 즉 이 시트는 광교에서 유효한 마감시각이며, 반올림하면 22시다.
+# ⚠️**매장 코드 주의** — `1000000047`=광교 / `1000000009`=삼성타운. 처음 이 상수를 21로
+# 잡았던 이유가 삼성타운 시트값(median 21.42)을 광교 영수증과 비교한 교차매장 오류였다.
+# 매장은 `STORE_CODE_MAPPING`(store_gw01) 을 통해 접근할 것.
 KPI_CLOSE_HOUR = 22
 KPI_PRICE_FALLBACK = 4000.0
 
@@ -206,6 +208,7 @@ def run_experiment(
         raise ValueError("실행 가능한 forecaster 없음(category_total/distributional_total 필요).")
 
     feat_key = _stage_key({"engine": spec.engine, "order_level": spec.order_level,
+                           "eval_end": spec.window.eval_end,
                            "source": spec.data.source, "store": spec.data.store,
                            "target": spec.target, "alpha": spec.alpha})
 
@@ -216,6 +219,14 @@ def run_experiment(
         return build_features(cd, target_col=spec.target)
 
     feat = _load_or_compute("features", feat_key, cache_dir, _feat, trace)
+    if spec.window.eval_end is not None:
+        # ★평가 구간 끝 고정 — 데이터가 늘어나도 같은 구간을 재현한다.
+        cutoff = pd.Timestamp(spec.window.eval_end)
+        before = len(feat)
+        feat = feat[feat["date"] <= cutoff].reset_index(drop=True)
+        if feat.empty:
+            raise ValueError(f"eval_end={spec.window.eval_end} 이전 데이터가 없다")
+        trace.append((f"eval_end:{spec.window.eval_end}", f"{before}->{len(feat)}"))
     # 배분 비율 소스(품목 일별). order_level="item"일 때만 읽는다 — 헤드라인 경로는
     # 이 I/O를 타지 않는다.
     item_history = _load_item_history(spec) if spec.order_level == "item" else None
